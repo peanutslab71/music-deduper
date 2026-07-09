@@ -15,6 +15,7 @@
 		DE0000000000000000000029 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DE0000000000000000000028 /* Assets.xcassets */; };
 		DE0000000000000000000033 /* DirectSMB.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE0000000000000000000032 /* DirectSMB.swift */; };
 		DE0000000000000000000040 /* AMSMB2 in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000042 /* AMSMB2 */; };
+		DE0000000000000000000043 /* AMSMB2 in Embed Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000042 /* AMSMB2 */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -38,6 +39,20 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		DE0000000000000000000044 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				DE0000000000000000000043 /* AMSMB2 in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXGroup section */
 		DE0000000000000000000002 = {
@@ -80,6 +95,7 @@
 				DE000000000000000000000D /* Sources */,
 				DE000000000000000000000E /* Frameworks */,
 				DE000000000000000000000F /* Resources */,
+				DE0000000000000000000044 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
