@@ -305,6 +305,36 @@ func sanitizeName(_ s: String) -> String {
     return out.isEmpty ? "_" : out
 }
 
+// MARK: - Blocking file ops with a watchdog
+
+/// Hand-off box for a blocking operation running on a disposable thread.
+final class BlockingResultBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<T, Error>?
+    func set(_ r: Result<T, Error>) { lock.lock(); if result == nil { result = r }; lock.unlock() }
+    func get() -> Result<T, Error>? { lock.lock(); defer { lock.unlock() }; return result }
+}
+
+/// Run a blocking file operation (stat/copy on a network share can hang inside
+/// the OS for minutes) on its own throwaway thread, with a deadline. Returns
+/// the operation's result, or nil if it timed out or was cancelled — in which
+/// case the thread is abandoned and whatever it eventually returns is ignored.
+func runBlockingFileOp<T>(timeout: TimeInterval, cancel: CancelBox,
+                          _ work: @escaping @Sendable () throws -> T) async -> Result<T, Error>? {
+    let box = BlockingResultBox<T>()
+    Thread.detachNewThread {
+        do { box.set(.success(try work())) } catch { box.set(.failure(error)) }
+    }
+    var waited = 0.0
+    while waited < timeout {
+        if let r = box.get() { return r }
+        if cancel.cancelled { return nil }
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        waited += 0.25
+    }
+    return box.get()   // one last look before declaring it hung
+}
+
 // MARK: - SMB mount helpers (guest)
 
 /// True if the destination is currently reachable (mount is alive).

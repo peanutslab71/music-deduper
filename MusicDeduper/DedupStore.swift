@@ -340,9 +340,17 @@ final class DedupStore: ObservableObject {
                                 .appendingPathComponent(sanitizeName(t.album.isEmpty ? "Unknown Album" : t.album))
                 let target = dir.appendingPathComponent(t.name)
 
+                // Existence check with a watchdog — even a stat can hang for
+                // minutes on a wedged share. On timeout we skip the conflict
+                // check and let the copy attempt below deal with the share.
+                let statResult = await runBlockingFileOp(timeout: 15, cancel: box) {
+                    try? target.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                }
+                if statResult == nil && box.cancelled { cancelled = true; break }
+
                 // file already exists at the destination → that's a conflict,
                 // the user decides (Overwrite / Skip, each or All). No silent skips.
-                if let vals = try? target.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+                if case .success(let maybeVals) = statResult, let vals = maybeVals,
                    let exSize = vals.fileSize {
                     let identical = Int64(exSize) == t.size
                     var decision = conflicts.policy
@@ -374,20 +382,32 @@ final class DedupStore: ObservableObject {
                 var copied = false
                 var attempt = 0
                 let maxAttempts = 5
+                // watchdog: 10s base + 1.5s per MB — a healthy copy never gets near
+                // it, a wedged share is declared hung instead of blocking for minutes
+                let opTimeout = min(90.0, 10.0 + Double(t.size) / 1_000_000.0 * 1.5)
                 while !box.cancelled {
-                    do {
+                    let srcURL = t.url, wantSize = t.size
+                    let result = await runBlockingFileOp(timeout: opTimeout, cancel: box) {
+                        let fm = FileManager.default
                         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
                         if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: target) }
-                        try fm.copyItem(at: t.url, to: target)
+                        try fm.copyItem(at: srcURL, to: target)
                         // verify the whole file landed — a mid-copy stall can leave a truncated file
                         let landed = ((try? fm.attributesOfItem(atPath: target.path))?[.size] as? NSNumber)?.int64Value
-                        guard landed == t.size else {
+                        guard landed == wantSize else {
                             try? fm.removeItem(at: target)
                             throw NSError(domain: "MusicDeduper", code: 1, userInfo: [
                                 NSLocalizedDescriptionKey:
-                                    "incomplete copy (\(landed ?? 0) of \(t.size) bytes landed)"])
+                                    "incomplete copy (\(landed ?? 0) of \(wantSize) bytes landed)"])
                         }
-                        copied = true; break
+                    }
+                    if case .success = result { copied = true; break }
+                    if result == nil && box.cancelled { break }
+                    do {
+                        if case .failure(let e) = result { throw e }
+                        throw NSError(domain: "MusicDeduper", code: 2, userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "no response after \(Int(opTimeout))s — share not answering"])
                     } catch {
                         attempt += 1
                         if attempt >= maxAttempts {
