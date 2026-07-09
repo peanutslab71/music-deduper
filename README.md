@@ -24,8 +24,9 @@ A four-step wizard: **Source → Review → Clean up → Copy.**
 - **Copy** rebuilds a clean Artist/Album tree on a server or NAS share, as an
   explicit sequence: locate the share → pick the folder → copy. Files that already
   exist **ask first** (Overwrite / Skip, each or All — nothing silent). The copy is
-  built for flaky network shares: **three files copy in parallel** (per-file round
-  trips dominate on the old SMB dialects small servers speak), macOS is told not
+  built for flaky network shares: **three to four files copy in parallel**
+  (self-tuning — per-file round trips dominate on the old SMB dialects small
+  servers speak), existence checks are batched per album folder, macOS is told not
   to throttle the app or sleep mid-run, the share is nudged every 30 seconds so
   the connection can't idle out, every copied file is verified against the source,
   and a file that fails is retried up to 5 times (re-mounting the share directly —

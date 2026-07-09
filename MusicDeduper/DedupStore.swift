@@ -349,6 +349,11 @@ final class DedupStore: ObservableObject {
             // small-file transfers on old SMB dialects.
             await withTaskGroup(of: Void.self) { group in
                 var inFlight = 0
+                // One listing per album folder instead of one existence check per
+                // file — a listing costs the same round trip but answers for the
+                // whole album, so new albums cost zero per-file checks.
+                var dirCache: [String: [String: (size: Int64, date: Date?)]] = [:]
+                var lastLimit = 3
                 for t in keepers {
                     if box.cancelled { break }
 
@@ -370,18 +375,30 @@ final class DedupStore: ObservableObject {
                                     .appendingPathComponent(sanitizeName(t.album.isEmpty ? "Unknown Album" : t.album))
                     let target = dir.appendingPathComponent(t.name)
 
-                    // Existence check with a watchdog — even a stat can hang for
-                    // minutes on a wedged share. On timeout we skip the conflict
-                    // check and let the copy attempt below deal with the share.
-                    let statResult = await runBlockingFileOp(timeout: 15, cancel: box) {
-                        try? target.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                    // Existence check via the cached album-folder listing (one
+                    // watchdogged round trip per folder, not per file). A folder
+                    // that doesn't exist yet lists as empty — no conflicts.
+                    if dirCache[dir.path] == nil {
+                        let listResult = await runBlockingFileOp(timeout: 20, cancel: box) {
+                            () -> [String: (size: Int64, date: Date?)] in
+                            var m: [String: (size: Int64, date: Date?)] = [:]
+                            let items = (try? FileManager.default.contentsOfDirectory(
+                                at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
+                            for u in items {
+                                let v = try? u.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                                m[u.lastPathComponent] = (Int64(v?.fileSize ?? 0), v?.contentModificationDate)
+                            }
+                            return m
+                        }
+                        if listResult == nil && box.cancelled { break }
+                        if case .success(let m) = listResult { dirCache[dir.path] = m }
+                        else { dirCache[dir.path] = [:] }   // hung/failed listing → let the copy worker fight it out
                     }
-                    if statResult == nil && box.cancelled { break }
 
                     // file already exists at the destination → that's a conflict,
                     // the user decides (Overwrite / Skip, each or All). No silent skips.
-                    if case .success(let maybeVals) = statResult, let vals = maybeVals,
-                       let exSize = vals.fileSize {
+                    if let existing = dirCache[dir.path]?[t.name] {
+                        let exSize = existing.size
                         let identical = Int64(exSize) == t.size
                         var decision = conflicts.policy
                         if decision == nil {
@@ -389,7 +406,7 @@ final class DedupStore: ObservableObject {
                                 name: t.name,
                                 artist: t.displayArtist, album: t.album,
                                 srcURL: t.url, srcSize: t.size,
-                                dstSize: Int64(exSize), dstDate: vals.contentModificationDate,
+                                dstSize: Int64(exSize), dstDate: existing.date,
                                 identical: identical))
                             while !box.cancelled {
                                 if let d = conflicts.take() { decision = d; break }
@@ -407,7 +424,14 @@ final class DedupStore: ObservableObject {
                         // overwrite falls through to the copy below (target removed there)
                     }
 
-                    if inFlight >= 3 {
+                    let limit = counters.currentLimit
+                    if limit != lastLimit {
+                        await self.opLogLine(limit > lastLimit
+                            ? "⇧ link is clean — stepping up to \(limit) parallel copies"
+                            : "⇩ retries seen — back to \(limit) parallel copies")
+                        lastLimit = limit
+                    }
+                    while inFlight >= limit {
                         await group.next()
                         inFlight -= 1
                     }
@@ -466,6 +490,7 @@ final class DedupStore: ObservableObject {
             if case .failure(let e) = result { desc = e.localizedDescription }
             else { desc = "no response after \(Int(opTimeout))s — share not answering" }
             attempt += 1
+            counters.noteRetry()   // any struggle → back to 3 parallel streams
             if attempt >= maxAttempts {
                 await self.opLogLine("✗ giving up on “\(t.name)” after \(maxAttempts) tries: \(desc)")
                 break
@@ -494,7 +519,7 @@ final class DedupStore: ObservableObject {
         }
         await self.setNote("")
         if copied {
-            let s = counters.recordOK()
+            let s = counters.recordOK(clean: attempt == 0)
             let suffix = attempt > 0 ? "  (after \(attempt) retr\(attempt == 1 ? "y" : "ies"))" : ""
             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
                               line: "✓ \(sanitizeName(t.displayArtist))/\(sanitizeName(t.album))/\(t.name)\(suffix)")
@@ -526,18 +551,29 @@ final class ResumeBox: @unchecked Sendable {
 }
 
 /// Shared, locked progress counters for the parallel copy workers.
+/// Also self-tunes the parallelism: 3 streams normally, stepping up to 4 after
+/// a clean stretch and straight back to 3 the moment any retry appears.
 final class CopyCounters: @unchecked Sendable {
     struct Snap { let done: Int; let ok: Int; let skip: Int; let fail: Int }
     private let lock = NSLock()
     private var ok = 0, skip = 0, fail = 0, done = 0, consec = 0
     private var failed: [Int] = []
+    private var cleanStreak = 0
+    private var limit = 3
 
     var consecutiveFailCount: Int { lock.lock(); defer { lock.unlock() }; return consec }
     func resetConsecutive() { lock.lock(); consec = 0; lock.unlock() }
 
-    func recordOK() -> Snap {
+    /// Current parallel-worker limit (3, or 4 after 20 clean files in a row).
+    var currentLimit: Int { lock.lock(); defer { lock.unlock() }; return limit }
+    /// Any failed copy attempt (even one that later succeeds) drops back to 3.
+    func noteRetry() { lock.lock(); cleanStreak = 0; limit = 3; lock.unlock() }
+
+    func recordOK(clean: Bool) -> Snap {
         lock.lock(); defer { lock.unlock() }
         ok += 1; done += 1; consec = 0
+        if clean { cleanStreak += 1; if cleanStreak >= 20 { limit = 4 } }
+        else { cleanStreak = 0; limit = 3 }
         return Snap(done: done, ok: ok, skip: skip, fail: fail)
     }
     func recordSkip() -> Snap {

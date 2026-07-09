@@ -26,9 +26,15 @@ remove duplicates and never copy anything anywhere.
 Network shares — especially over Wi-Fi, especially on small NAS boxes and
 Roon ROCK — drop out. The copy step assumes they will:
 
-- **Three files copy at once.** On the old SMB dialects small servers speak,
-  the per-file back-and-forth costs more than the data itself; parallel
-  streams keep the link busy and roughly halve big-run times.
+- **Three files copy at once — four when the link is clean.** On the old SMB
+  dialects small servers speak, the per-file back-and-forth costs more than
+  the data itself; parallel streams keep the link busy. The count self-tunes:
+  after 20 files in a row with no retries it steps up to 4, and drops back
+  to 3 the moment anything struggles.
+- **Existence checks are per album, not per file.** Before copying, the app
+  lists each destination album folder once and remembers the answer, instead
+  of asking the server about every file — thousands of round trips saved on
+  a big run, and brand-new albums cost nothing to check.
 - Every copied file's size is **verified against the source**; a file that
   arrives incomplete is deleted and re-copied.
 - A failing file is retried up to **5 times** with increasing waits, and the
