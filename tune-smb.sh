@@ -4,7 +4,7 @@
 #
 # What it does, and nothing else:
 #   1. Backs up any existing /etc/nsmb.conf to /etc/nsmb.conf.backup
-#   2. Writes /etc/nsmb.conf with four settings:
+#   2. Writes /etc/nsmb.conf with three settings:
 #        signing_required=no    — never require packet signing (pointless
 #                                 overhead on a guest share on your own network)
 #        mc_on=no               — turn off SMB "multichannel" (parallel
@@ -12,9 +12,10 @@
 #        notify_off=yes         — stop asking the server to push change
 #                                 notifications (chatter simple servers
 #                                 handle badly)
-#        max_resp_timeout=600   — give a slow server up to 10 minutes to answer
-#                                 a request instead of 30 seconds, so a brief
-#                                 stall doesn't kill the whole session
+#
+# Deliberately NOT set: max_resp_timeout. Raising it sounds resilient but
+# means every hung request blocks whatever asked for it (Finder included)
+# for that long. The 30-second default is right.
 #
 # The change applies the NEXT time a share is mounted: eject the share in
 # Finder, then reconnect — ideally by IP (Finder > Go > Connect to Server >
@@ -35,7 +36,7 @@ if [ -f /etc/nsmb.conf ]; then
   echo "Existing /etc/nsmb.conf backed up to /etc/nsmb.conf.backup"
 fi
 
-printf '[default]\nsigning_required=no\nmc_on=no\nnotify_off=yes\nmax_resp_timeout=600\n' > /etc/nsmb.conf
+printf '[default]\nsigning_required=no\nmc_on=no\nnotify_off=yes\n' > /etc/nsmb.conf
 
 echo "Written /etc/nsmb.conf:"
 echo "------------------------"

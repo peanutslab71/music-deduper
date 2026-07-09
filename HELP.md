@@ -84,17 +84,20 @@ A few of macOS's SMB client defaults hurt small servers:
 - it tries **multichannel** (parallel connections), which simple servers
   often mishandle, causing stalls and session drops;
 - it subscribes to **change notifications** from the server — constant
-  chatter that basic servers handle badly;
-- it gives a slow server only **30 seconds** to answer a request before
-  tearing the session down — a brief stall becomes a full disconnect.
+  chatter that basic servers handle badly.
 
-All four are fixed with one small system config file. The repo includes
+All three are fixed with one small system config file. The repo includes
 [`tune-smb.sh`](tune-smb.sh), which does it with a backup and an undo note,
 or do it by hand — open Terminal and paste:
 
 ```
-printf '[default]\nsigning_required=no\nmc_on=no\nnotify_off=yes\nmax_resp_timeout=600\n' | sudo tee /etc/nsmb.conf
+printf '[default]\nsigning_required=no\nmc_on=no\nnotify_off=yes\n' | sudo tee /etc/nsmb.conf
 ```
+
+(One tempting setting to avoid: `max_resp_timeout`. Raising it sounds like
+resilience, but it means a hung request blocks whatever issued it — Finder
+included — for that long. Leave it at its 30-second default; the app's own
+retries handle stalls.)
 
 Then **eject the share in Finder and reconnect** — the setting only applies
 to new mounts. Reconnect by IP if you can: Finder → Go → Connect to Server →
