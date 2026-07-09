@@ -352,10 +352,10 @@
 /* Begin XCRemoteSwiftPackageReference section */
 		DE0000000000000000000041 /* XCRemoteSwiftPackageReference "AMSMB2" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/amosavian/AMSMB2";
+			repositoryURL = "https://github.com/peanutslab71/AMSMB2";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 4.0.0;
+				kind = branch;
+				branch = "guest-anonymous-session";
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

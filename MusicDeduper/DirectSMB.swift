@@ -223,17 +223,15 @@ final class DirectSMBClient: @unchecked Sendable {
         NSError(domain: "DirectSMB", code: 1, userInfo: [NSLocalizedDescriptionKey: msg])
     }
 
-    /// Translate the errors old/odd servers produce into something a person
-    /// can act on. EPERM at connect time = the box refused our SMB2 session —
-    /// almost always a device whose real service is SMB1 (which Finder falls
-    /// back to, and this engine deliberately doesn't speak).
+    /// Translate the errors odd servers produce into something a person can
+    /// act on. EPERM at connect time = the box refused the session (often an
+    /// authentication quirk in embedded firmware).
     static func friendly(_ error: Error, host: String) -> String {
         let ns = error as NSError
         if ns.domain == NSPOSIXErrorDomain && ns.code == 1 {
-            return "\(host) refused the connection. Some older devices only truly "
-                 + "support the obsolete SMB1 protocol (Finder quietly falls back to it; "
-                 + "this app's engine doesn't, for good reasons). To browse this device, "
-                 + "mount it in Finder (⌘K) and use it under This Mac → /Volumes."
+            return "\(host) refused the session. If it needs a login, guest access may be "
+                 + "disabled on it. As a fallback, mount it in Finder (⌘K) and browse it "
+                 + "under This Mac → /Volumes."
         }
         return error.localizedDescription
     }
