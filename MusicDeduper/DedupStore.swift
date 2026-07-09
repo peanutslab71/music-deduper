@@ -93,6 +93,7 @@ final class DedupStore: ObservableObject {
         cancelBox.cancelled = false
         opActive = true; opFinished = false; opTitle = title
         opTotal = total; opDone = 0; opOK = 0; opSkip = 0; opFail = 0; opLog = []; opNote = ""
+        opActiveStreams = 0; opStreamLimit = 0    // runCopy raises the limit for copy ops
         busy = true
         if activity == nil {
             // .userInitiated already implies idle-system-sleep prevention
@@ -325,6 +326,12 @@ final class DedupStore: ObservableObject {
         runCopy(items, to: dest, title: "Retrying \(items.count) failed file(s) → \(dest.lastPathComponent)")
     }
 
+    // live parallel-stream indicator for the copy dialog
+    @Published var opActiveStreams = 0     // files actually in flight right now
+    @Published var opStreamLimit = 0       // current adaptive cap (0 = not a copy op)
+    private func workerDelta(_ d: Int) { opActiveStreams += d }
+    private func setStreamLimit(_ n: Int) { opStreamLimit = n }
+
     // auto-pause: the run pauses itself after this many consecutive failures
     // (the server has clearly gone away — grinding on just multiplies timeouts)
     private static let pauseAfterConsecutiveFails = 3
@@ -339,6 +346,8 @@ final class DedupStore: ObservableObject {
         failedCopyIDs = []
         opStart(title: title, total: keepers.count)
         opPaused = false
+        opActiveStreams = 0
+        opStreamLimit = 3
         let box = cancelBox
         let conflicts = conflictBox
         conflicts.reset()
@@ -468,6 +477,7 @@ final class DedupStore: ObservableObject {
                         await self.opLogLine(limit > lastLimit
                             ? "⇧ link is clean — stepping up to \(limit) parallel copies"
                             : "⇩ retries seen — back to \(limit) parallel copies")
+                        await self.setStreamLimit(limit)
                         lastLimit = limit
                     }
                     while inFlight >= limit {
@@ -521,6 +531,7 @@ final class DedupStore: ObservableObject {
                                          throttle: MountThrottle,
                                          reconnectAddr: String, addr: String,
                                          sweep: Bool = false) async {
+        await self.workerDelta(1)
         var copied = false
         var attempt = 0
         let maxAttempts = 5
@@ -609,6 +620,7 @@ final class DedupStore: ObservableObject {
             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
                               line: "✗ \(t.name) — \(sweep ? "still failing after the sweep" : "failed after \(maxAttempts) tries")")
         }
+        await self.workerDelta(-1)
     }
 
     private func finishCopy(summary: String, failedIDs: [Int]) {

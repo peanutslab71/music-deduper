@@ -318,6 +318,12 @@ struct OperationSheet: View {
             ProgressView(value: store.opTotal > 0 ? Double(store.opDone) / Double(store.opTotal) : 0)
             HStack {
                 Text("\(store.opDone) / \(store.opTotal)")
+                if store.opStreamLimit > 0 && !store.opFinished {
+                    Label("\(store.opActiveStreams) of \(store.opStreamLimit) streams",
+                          systemImage: "arrow.triangle.branch")
+                        .foregroundStyle(store.opActiveStreams > 0 ? Color.accentColor : Color.secondary)
+                        .help("Files copying in parallel right now / current adaptive limit")
+                }
                 Spacer()
                 Text("✓ \(store.opOK)    • \(store.opSkip)    ✗ \(store.opFail)").foregroundStyle(.secondary)
             }
