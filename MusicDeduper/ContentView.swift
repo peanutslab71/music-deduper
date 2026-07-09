@@ -375,6 +375,9 @@ struct OperationSheet: View {
             HStack {
                 Spacer()
                 if store.opFinished {
+                    if let log = store.lastRunLogURL {
+                        Button("Open log") { NSWorkspace.shared.open(log) }
+                    }
                     if !store.failedCopyIDs.isEmpty {
                         Button("Retry \(store.failedCopyIDs.count) failed") { store.retryFailedCopies() }
                     }

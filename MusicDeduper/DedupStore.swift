@@ -89,11 +89,48 @@ final class DedupStore: ObservableObject {
         didSet { UserDefaults.standard.set(keepDisplayAwake, forKey: "keepDisplayAwake") }
     }
 
+    // MARK: Run log on disk — every dialog line (plus per-attempt retry detail)
+    // lands in ~/Library/Logs/MusicDeduper/run-<stamp>.log, one file per run.
+
+    @Published var lastRunLogURL: URL?
+    private var logHandle: FileHandle?
+    private static let logTS: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f
+    }()
+
+    private func openRunLog(title: String) {
+        closeRunLog()
+        let dir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Logs/MusicDeduper", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
+        let url = dir.appendingPathComponent("run-\(stamp).log")
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        logHandle = try? FileHandle(forWritingTo: url)
+        lastRunLogURL = url
+        let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        fileLog("=== Music Deduper \(v) · \(Date()) === \(title)")
+        // keep the 20 newest run logs
+        if let all = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+            let runs = all.filter { $0.lastPathComponent.hasPrefix("run-") }.sorted { $0.path > $1.path }
+            for old in runs.dropFirst(20) { try? FileManager.default.removeItem(at: old) }
+        }
+    }
+    func fileLog(_ s: String) {
+        guard let h = logHandle else { return }
+        h.write(Data("\(Self.logTS.string(from: Date()))  \(s)\n".utf8))
+    }
+    private func closeRunLog() {
+        try? logHandle?.close()
+        logHandle = nil
+    }
+
     private func opStart(title: String, total: Int) {
         cancelBox.cancelled = false
         opActive = true; opFinished = false; opTitle = title
         opTotal = total; opDone = 0; opOK = 0; opSkip = 0; opFail = 0; opLog = []; opNote = ""
         opActiveStreams = 0; opStreamLimit = 0    // runCopy raises the limit for copy ops
+        openRunLog(title: title)
         busy = true
         if activity == nil {
             // .userInitiated already implies idle-system-sleep prevention
@@ -106,15 +143,19 @@ final class DedupStore: ObservableObject {
     private func opStep(done: Int, ok: Int, skip: Int, fail: Int, line: String) {
         opDone = done; opOK = ok; opSkip = skip; opFail = fail
         opLog.append(line)
+        fileLog(line)
         if opLog.count > 800 { opLog.removeFirst(opLog.count - 800) }
     }
     private func setNote(_ s: String) { opNote = s }
     private func opLogLine(_ line: String) {
         opLog.append(line)
+        fileLog(line)
         if opLog.count > 800 { opLog.removeFirst(opLog.count - 800) }
     }
     private func opFinishLine(_ summary: String) {
         opLog.append(summary); opFinished = true; busy = false; status = summary; opNote = ""
+        fileLog(summary)
+        closeRunLog()
         if let a = activity { ProcessInfo.processInfo.endActivity(a); activity = nil }
     }
     func closeOp() { opActive = false }
@@ -582,6 +623,7 @@ final class DedupStore: ObservableObject {
             else { desc = "no response after \(Int(opTimeout))s — share not answering" }
             attempt += 1
             counters.noteRetry()   // any struggle → back to 3 parallel streams
+            await self.fileLog("⟳ attempt \(attempt)/\(maxAttempts) failed for “\(t.name)”: \(desc)")
             if attempt >= maxAttempts {
                 await self.opLogLine("✗ giving up on “\(t.name)” after \(maxAttempts) tries: \(desc)")
                 break
