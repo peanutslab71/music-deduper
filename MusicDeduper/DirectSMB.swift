@@ -345,14 +345,25 @@ final class SMBServerBrowser: ObservableObject {
 
     private func addScanned(ip: String) {
         guard !servers.contains(where: { $0.host == ip }) else { return }
-        // don't duplicate a Bonjour entry that resolves to this same box
-        let name = Self.reverseName(ip)
-        if let name, servers.contains(where: { $0.display.lowercased() == name.split(separator: ".").first.map(String.init)?.lowercased() ?? "" }) {
-            return
-        }
-        let short = name?.split(separator: ".").first.map(String.init)
-        servers.append(SMBServer(host: ip, display: short.map { "\($0)  (\(ip))" } ?? ip))
+        // show the responder immediately — the reverse name lookup can block
+        // for many seconds on networks without reverse DNS, so it happens in
+        // the background and upgrades the label when (if) it answers
+        servers.append(SMBServer(host: ip, display: ip))
         servers.sort { $0.display.lowercased() < $1.display.lowercased() }
+        Task.detached { [weak self] in
+            guard let name = Self.reverseName(ip) else { return }
+            let short = String(name.split(separator: ".").first ?? "")
+            await MainActor.run {
+                guard let self else { return }
+                if self.servers.contains(where: { $0.display.lowercased() == short.lowercased() }) {
+                    // a Bonjour entry already shows this box — drop the duplicate
+                    self.servers.removeAll { $0.host == ip }
+                } else if let idx = self.servers.firstIndex(where: { $0.host == ip }) {
+                    self.servers[idx] = SMBServer(host: ip, display: "\(short)  (\(ip))")
+                    self.servers.sort { $0.display.lowercased() < $1.display.lowercased() }
+                }
+            }
+        }
     }
 
     /// First three octets of this Mac's primary IPv4, plus its own address.
