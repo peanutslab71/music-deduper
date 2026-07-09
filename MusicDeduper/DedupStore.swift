@@ -27,6 +27,20 @@ final class DedupStore: ObservableObject {
         didSet { UserDefaults.standard.set(smbAddress, forKey: "smbAddress") }
     }
 
+    // recently used source folders (paths, newest first)
+    @Published var recentSources: [String] = UserDefaults.standard.stringArray(forKey: "recentSources") ?? []
+
+    // copy-conflict flow: a differing file at the destination pauses the copy
+    // until the user decides (or a sticky Overwrite All / Skip All policy is set)
+    @Published var pendingConflict: CopyConflict?
+    let conflictBox = ConflictBox()
+
+    func resolveConflict(_ d: ConflictDecision) {
+        if d == .overwriteAll || d == .skipAll { conflictBox.policy = d }
+        conflictBox.answer(d)
+        pendingConflict = nil
+    }
+
     // progress-dialog state (copy / delete)
     @Published var opActive = false
     @Published var opFinished = false
@@ -80,9 +94,18 @@ final class DedupStore: ObservableObject {
         p.prompt = "Choose"
         p.message = "Choose your music source folder"
         if p.runModal() == .OK, let url = p.url {
-            sourceURL = url
-            scan()
+            setSource(url)
         }
+    }
+
+    /// Set a source folder (picker, drag-and-drop, or recents) and scan it.
+    func setSource(_ url: URL) {
+        sourceURL = url
+        var r = recentSources.filter { $0 != url.path }
+        r.insert(url.path, at: 0)
+        recentSources = Array(r.prefix(5))
+        UserDefaults.standard.set(recentSources, forKey: "recentSources")
+        scan()
     }
 
     // MARK: Scan
@@ -223,6 +246,8 @@ final class DedupStore: ObservableObject {
         let keepers = keeperTracks
         opStart(title: "Copying \(keepers.count) keeper(s) → \(dest.lastPathComponent)", total: keepers.count)
         let box = cancelBox
+        let conflicts = conflictBox
+        conflicts.reset()
         let addr = smbAddress
         Task.detached(priority: .userInitiated) {
             var ok = 0, skip = 0, fail = 0, cancelled = false
@@ -234,11 +259,34 @@ final class DedupStore: ObservableObject {
                 let target = dir.appendingPathComponent(t.name)
 
                 // already present with matching size → skip, no copy
-                if let existing = try? target.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                   Int64(existing) == t.size {
-                    skip += 1
-                    await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail, line: "• skip \(t.name)")
-                    continue
+                if let vals = try? target.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+                   let exSize = vals.fileSize {
+                    if Int64(exSize) == t.size {
+                        skip += 1
+                        await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail, line: "• skip \(t.name)")
+                        continue
+                    }
+                    // exists but DIFFERS → pause and ask (unless an All policy is set)
+                    var decision = conflicts.policy
+                    if decision == nil {
+                        await self.presentConflict(CopyConflict(
+                            name: t.name,
+                            artist: t.displayArtist, album: t.album,
+                            srcURL: t.url, srcSize: t.size,
+                            dstSize: Int64(exSize), dstDate: vals.contentModificationDate))
+                        while !box.cancelled {
+                            if let d = conflicts.take() { decision = d; break }
+                            try? await Task.sleep(nanoseconds: 200_000_000)
+                        }
+                        await self.presentConflict(nil)
+                        if box.cancelled { cancelled = true; break }
+                    }
+                    if decision == .skip || decision == .skipAll {
+                        skip += 1
+                        await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail, line: "• kept existing \(t.name)")
+                        continue
+                    }
+                    // overwrite falls through to the copy below (target removed there)
                 }
 
                 // Retry this file until it succeeds — never skip. Only Cancel breaks out.
@@ -287,9 +335,44 @@ final class DedupStore: ObservableObject {
             await self.opFinishLine(summary)
         }
     }
+    private func presentConflict(_ c: CopyConflict?) { pendingConflict = c }
 }
 
 /// Simple thread-shared cancel flag readable from a background task without hopping actors.
 final class CancelBox: @unchecked Sendable {
     var cancelled = false
+}
+
+// MARK: - Copy-conflict plumbing
+
+/// A file that exists at the destination but differs from the source.
+struct CopyConflict: Identifiable {
+    let id = UUID()
+    let name: String
+    let artist: String
+    let album: String
+    let srcURL: URL
+    let srcSize: Int64
+    let dstSize: Int64
+    let dstDate: Date?
+}
+
+enum ConflictDecision { case overwrite, skip, overwriteAll, skipAll }
+
+/// Thread-shared decision hand-off between the UI and the copy task —
+/// same polling pattern as CancelBox (the copy task polls `take()`).
+final class ConflictBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var decision: ConflictDecision?
+    private var _policy: ConflictDecision?
+    var policy: ConflictDecision? {
+        get { lock.lock(); defer { lock.unlock() }; return _policy }
+        set { lock.lock(); _policy = newValue; lock.unlock() }
+    }
+    func reset() { lock.lock(); decision = nil; _policy = nil; lock.unlock() }
+    func answer(_ d: ConflictDecision) { lock.lock(); decision = d; lock.unlock() }
+    func take() -> ConflictDecision? {
+        lock.lock(); defer { lock.unlock() }
+        let d = decision; decision = nil; return d
+    }
 }
