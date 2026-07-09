@@ -381,7 +381,21 @@ final class DedupStore: ObservableObject {
     func resumeCopy() { resumeBox.resumed = true }
     private func setPaused(_ p: Bool) { opPaused = p }
 
+    // v1.3: the app's own SMB engine (DirectSMB.swift) — no kernel mount in the
+    // copy path. Falls back to the mount engine if the destination can't be
+    // mapped to a share.
+    @Published var useDirectEngine: Bool =
+        UserDefaults.standard.object(forKey: "useDirectEngine") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(useDirectEngine, forKey: "useDirectEngine") }
+    }
+
     private func runCopy(_ items: [Track], to dest: URL, title: String) {
+        if useDirectEngine, !smbAddress.isEmpty,
+           let client = DirectSMBClient(address: smbAddress),
+           let destRel = client.shareRelative(dest) {
+            runCopyDirect(items, client: client, destRel: destRel, dest: dest, title: title)
+            return
+        }
         let keepers = items
         lastCopyDest = dest
         failedCopyIDs = []
@@ -711,6 +725,230 @@ final class DedupStore: ObservableObject {
         opFinishLine(summary)
     }
     private func presentConflict(_ c: CopyConflict?) { pendingConflict = c }
+
+    // MARK: Direct SMB engine (v1.3) — same behaviour as the mount engine
+    // (selection, conflicts, adaptive streams, auto-pause, sweep), but every
+    // network operation goes through our in-process SMB client.
+
+    private func runCopyDirect(_ items: [Track], client: DirectSMBClient,
+                               destRel: String, dest: URL, title: String) {
+        let keepers = items
+        lastCopyDest = dest
+        failedCopyIDs = []
+        opStart(title: title, total: keepers.count)
+        opPaused = false
+        opActiveStreams = 0
+        opStreamLimit = 3
+        let box = cancelBox
+        let conflicts = conflictBox
+        conflicts.reset()
+        let pause = resumeBox
+        pause.reset()
+
+        // protocol-level keep-alive: a real SMB echo every 30s
+        let keepAlive = Task.detached(priority: .background) {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                if Task.isCancelled { break }
+                await client.keepAlive()
+            }
+        }
+
+        Task.detached(priority: .userInitiated) {
+            await self.opLogLine("ℹ direct SMB engine — \(client.host)/\(client.share), in-app networking (no macOS mount)")
+            let counters = CopyCounters()
+
+            // Preflight: dial the server before feeding files.
+            var connected = client.isConnected
+            if !connected {
+                for tryNo in 1...3 where !box.cancelled {
+                    do { try await client.connect(timeout: 20); connected = true; break }
+                    catch {
+                        await self.opLogLine("… connecting to \(client.host) failed (try \(tryNo) of 3): \(error.localizedDescription)")
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    }
+                }
+                if connected { await self.opLogLine("✓ connected — starting") }
+            }
+            if !connected && !box.cancelled {
+                await self.opLogLine("⚠ can't reach \(client.host) — paused before copying anything. Wake the server, then press Resume.")
+                await self.setPaused(true)
+                while !box.cancelled && !pause.resumed {
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                }
+                pause.reset()
+                await self.setPaused(false)
+                if !box.cancelled { await self.opLogLine("▶ Resumed.") }
+            }
+
+            func remotePaths(for t: Track) -> (dir: String, target: String, name: String) {
+                let artist = DirectSMBClient.nfc(sanitizeName(t.displayArtist.isEmpty ? "Unknown Artist" : t.displayArtist))
+                let album = DirectSMBClient.nfc(sanitizeName(t.album.isEmpty ? "Unknown Album" : t.album))
+                let name = DirectSMBClient.nfc(t.name)
+                let dir = (destRel.isEmpty ? "" : destRel + "/") + artist + "/" + album
+                return (dir, dir + "/" + name, name)
+            }
+
+            await withTaskGroup(of: Void.self) { group in
+                var inFlight = 0
+                var dirCache: [String: [String: Int64]] = [:]
+                var claimedTargets = Set<String>()
+                var lastLimit = 3
+                for t in keepers {
+                    if box.cancelled { break }
+
+                    if counters.consecutiveFailCount >= Self.pauseAfterConsecutiveFails {
+                        await self.opLogLine("⏸ \(Self.pauseAfterConsecutiveFails) files in a row failed — the server has gone away. Paused; press Resume when it's back.")
+                        await self.setPaused(true)
+                        while !box.cancelled && !pause.resumed {
+                            try? await Task.sleep(nanoseconds: 300_000_000)
+                        }
+                        counters.resetConsecutive()
+                        pause.reset()
+                        await self.setPaused(false)
+                        if box.cancelled { break }
+                        await self.opLogLine("▶ Resumed.")
+                    }
+
+                    let paths = remotePaths(for: t)
+
+                    if !claimedTargets.insert(paths.target).inserted {
+                        let s = counters.recordSkip()
+                        await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
+                                          line: "• skipped \(t.name) — another selected track already copies to this exact destination")
+                        continue
+                    }
+
+                    // one listing per album folder, straight over the wire
+                    if dirCache[paths.dir] == nil {
+                        dirCache[paths.dir] = (try? await client.listSizes(dir: paths.dir)) ?? [:]
+                    }
+                    if let exSize = dirCache[paths.dir]?[paths.name] {
+                        let identical = exSize == t.size
+                        var decision = conflicts.policy
+                        if decision == nil {
+                            await self.presentConflict(CopyConflict(
+                                name: t.name,
+                                artist: t.displayArtist, album: t.album,
+                                srcURL: t.url, srcSize: t.size,
+                                dstSize: exSize, dstDate: nil,
+                                identical: identical))
+                            while !box.cancelled {
+                                if let d = conflicts.take() { decision = d; break }
+                                try? await Task.sleep(nanoseconds: 200_000_000)
+                            }
+                            await self.presentConflict(nil)
+                            if box.cancelled { break }
+                        }
+                        if decision == .skip || decision == .skipAll {
+                            let s = counters.recordSkip()
+                            await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
+                                              line: "• kept existing \(t.name)\(identical ? " (identical size)" : "")")
+                            continue
+                        }
+                    }
+
+                    let limit = counters.currentLimit
+                    if limit != lastLimit {
+                        await self.opLogLine(limit > lastLimit
+                            ? "⇧ link is clean — stepping up to \(limit) parallel copies"
+                            : "⇩ retries seen — back to \(limit) parallel copies")
+                        await self.setStreamLimit(limit)
+                        lastLimit = limit
+                    }
+                    while inFlight >= limit {
+                        await group.next()
+                        inFlight -= 1
+                    }
+                    group.addTask {
+                        await self.copyOneFileDirect(t, client: client,
+                                                     dirPath: paths.dir, targetPath: paths.target,
+                                                     box: box, counters: counters)
+                    }
+                    inFlight += 1
+                }
+                await group.waitForAll()
+            }
+
+            if !box.cancelled {
+                let sweepIDs = Set(counters.beginSweep())
+                if !sweepIDs.isEmpty {
+                    await self.opLogLine("⟲ Sweeping \(sweepIDs.count) failed file(s)…")
+                    for t in keepers where sweepIDs.contains(t.id) {
+                        if box.cancelled { break }
+                        let paths = remotePaths(for: t)
+                        await self.copyOneFileDirect(t, client: client,
+                                                     dirPath: paths.dir, targetPath: paths.target,
+                                                     box: box, counters: counters, sweep: true)
+                    }
+                }
+            }
+
+            keepAlive.cancel()
+            let c = counters.finalSnapshot()
+            let summary = box.cancelled
+                ? "■ Cancelled — copied \(c.ok), skipped \(c.skip)."
+                : "✔ Done — copied \(c.ok), skipped \(c.skip)"
+                  + (c.fail > 0 ? ", \(c.fail) failed — use Retry failed." : ".")
+            await self.finishCopy(summary: summary, failedIDs: c.failedIDs)
+        }
+    }
+
+    nonisolated private func copyOneFileDirect(_ t: Track, client: DirectSMBClient,
+                                               dirPath: String, targetPath: String,
+                                               box: CancelBox, counters: CopyCounters,
+                                               sweep: Bool = false) async {
+        await self.workerDelta(1)
+        var copied = false
+        var attempt = 0
+        let maxAttempts = 5
+        let tmpPath = dirPath + "/." + DirectSMBClient.nfc(t.name) + ".mdtmp"
+        while !box.cancelled {
+            do {
+                try await client.mkdirs(dirPath)
+                try await client.upload(local: t.url, to: tmpPath)
+                let landed = try await client.fileSize(tmpPath)
+                guard landed == t.size else {
+                    await client.remove(tmpPath)
+                    throw DirectSMBClient.error("incomplete copy (\(landed ?? 0) of \(t.size) bytes landed)")
+                }
+                try await client.rename(tmpPath, to: targetPath)
+                copied = true
+                break
+            } catch {
+                attempt += 1
+                counters.noteRetry()
+                await self.fileLog("⟳ attempt \(attempt)/\(maxAttempts) failed for “\(t.name)”: \(error.localizedDescription)")
+                // our session, our rules: drop it and the next attempt dials fresh
+                client.dropConnection()
+                if attempt >= maxAttempts {
+                    await self.opLogLine("✗ giving up on “\(t.name)” after \(maxAttempts) tries: \(error.localizedDescription)")
+                    break
+                }
+                if attempt == 1 {
+                    await self.opLogLine("… waiting on “\(t.name)”: \(error.localizedDescription)")
+                }
+                let waitS = min(attempt * 2, 10)
+                await self.setNote("⟳ Retrying “\(t.name)” (attempt \(attempt)): \(error.localizedDescription)  · reconnecting  · waiting \(waitS)s")
+                var slept = 0.0
+                while slept < Double(waitS) && !box.cancelled {
+                    try? await Task.sleep(nanoseconds: 400_000_000); slept += 0.4
+                }
+            }
+        }
+        await self.setNote("")
+        if copied {
+            let s = sweep ? counters.recordSweepOK() : counters.recordOK(clean: attempt == 0)
+            let suffix = attempt > 0 ? "  (after \(attempt) retr\(attempt == 1 ? "y" : "ies"))" : ""
+            await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
+                              line: "\(sweep ? "⟲ swept " : "✓ ")\(targetPath)\(suffix)")
+        } else if !box.cancelled {
+            let s = sweep ? counters.recordSweepFail(t.id) : counters.recordFail(t.id)
+            await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
+                              line: "✗ \(t.name) — \(sweep ? "still failing after the sweep" : "failed after \(maxAttempts) tries")")
+        }
+        await self.workerDelta(-1)
+    }
 }
 
 /// Simple thread-shared cancel flag readable from a background task without hopping actors.

@@ -561,6 +561,10 @@ struct CopyStepView: View {
                            isOn: $store.keepDisplayAwake)
                         .font(.caption)
                         .toggleStyle(.checkbox)
+                    Toggle("Built-in network engine (new) — the app talks SMB to the server directly, bypassing the macOS mount",
+                           isOn: $store.useDirectEngine)
+                        .font(.caption)
+                        .toggleStyle(.checkbox)
                 }
             }
             Spacer(minLength: 8)
