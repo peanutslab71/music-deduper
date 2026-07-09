@@ -105,6 +105,20 @@ final class DirectSMBClient: @unchecked Sendable {
         return out
     }
 
+    /// List just the sub-folders of a folder (dot-folders hidden), sorted.
+    /// "" lists the share root.
+    func listFolders(dir: String) async throws -> [String] {
+        let m = try await ensure()
+        let items = try await m.contentsOfDirectory(atPath: dir)
+        return items.compactMap { it -> String? in
+            guard let name = it[.nameKey] as? String, !name.hasPrefix(".") else { return nil }
+            let isDir = (it[.isDirectoryKey] as? Bool)
+                ?? ((it[.fileResourceTypeKey] as? URLFileResourceType) == .directory)
+            return isDir ? name : nil
+        }
+        .sorted { $0.lowercased() < $1.lowercased() }
+    }
+
     /// Create a folder path, one level at a time ("already exists" is fine —
     /// anything real resurfaces on the write).
     func mkdirs(_ path: String) async throws {

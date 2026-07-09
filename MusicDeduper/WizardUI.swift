@@ -504,6 +504,7 @@ struct CopyStepView: View {
     @Binding var destFolder: URL?
     let onCopy: (URL) -> Void
     @State private var showServerPicker = false
+    @State private var showFolderBrowser = false
 
     private var shareName: String {
         guard let u = URL(string: store.smbAddress), let h = u.host else { return "" }
@@ -550,8 +551,13 @@ struct CopyStepView: View {
                         TextField("e.g. Storage/InternalStorage", text: $store.destRelSaved)
                             .textFieldStyle(.roundedBorder)
                             .frame(maxWidth: 320)
-                        Button("Browse…") { pickDestFolder() }
-                            .controlSize(.small)
+                        Button {
+                            showFolderBrowser = true
+                        } label: {
+                            Label("Browse…", systemImage: "folder")
+                        }
+                        .controlSize(.small)
+                        .disabled(store.smbAddress.isEmpty)
                     }
                 } else {
                     Button {
@@ -597,6 +603,7 @@ struct CopyStepView: View {
         .frame(maxWidth: 620)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .sheet(isPresented: $showServerPicker) { ServerPickerSheet(store: store) }
+        .sheet(isPresented: $showFolderBrowser) { FolderBrowserSheet(store: store) }
     }
 
     private func numbered(_ n: Int, title: String, detail: String,
@@ -759,6 +766,118 @@ struct ServerPickerSheet: View {
                 await MainActor.run {
                     connecting = false
                     errorMsg = "Couldn't connect to \(h): \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Folder browser (our protocol — drill into the share, no mount)
+
+struct FolderBrowserSheet: View {
+    @ObservedObject var store: DedupStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var client: DirectSMBClient?
+    @State private var path: [String] = []          // components from the share root
+    @State private var folders: [String]?
+    @State private var loading = false
+    @State private var errorMsg: String?
+
+    private var currentPath: String { path.joined(separator: "/") }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Choose the destination folder").font(.title3).fontWeight(.semibold)
+            // breadcrumb
+            HStack(spacing: 4) {
+                Image(systemName: "externaldrive.connected.to.line.below")
+                    .foregroundStyle(.secondary)
+                Text((client?.share ?? "share") + (currentPath.isEmpty ? "" : " / " + path.joined(separator: " / ")))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.head)
+                Spacer()
+                if !path.isEmpty {
+                    Button {
+                        path.removeLast()
+                        load()
+                    } label: { Label("Up", systemImage: "arrow.up") }
+                    .controlSize(.small)
+                }
+            }
+            Group {
+                if loading {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Reading folder…").foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let folders {
+                    if folders.isEmpty {
+                        Text("No sub-folders here.")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        List(folders, id: \.self) { f in
+                            Button {
+                                path.append(f)
+                                load()
+                            } label: {
+                                Label(f, systemImage: "folder")
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .listStyle(.inset)
+                    }
+                } else {
+                    Spacer()
+                }
+            }
+            if let e = errorMsg {
+                Text(e).font(.caption).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Use This Folder") {
+                    store.destRelSaved = currentPath
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(loading || client == nil)
+            }
+        }
+        .padding(16)
+        .frame(width: 480, height: 440)
+        .onAppear {
+            client = DirectSMBClient(address: store.smbAddress)
+            // start where the current destination points, if it still exists
+            if !store.destRelSaved.isEmpty {
+                path = store.destRelSaved.split(separator: "/").map(String.init)
+            }
+            load()
+        }
+    }
+
+    private func load() {
+        guard let client else { errorMsg = "Choose a server first."; return }
+        loading = true
+        errorMsg = nil
+        let p = currentPath
+        Task {
+            do {
+                let f = try await client.listFolders(dir: p)
+                await MainActor.run { folders = f; loading = false }
+            } catch {
+                await MainActor.run {
+                    loading = false
+                    if !path.isEmpty {
+                        // saved path may no longer exist — fall back to the root
+                        path = []
+                        load()
+                    } else {
+                        errorMsg = "Couldn't read the share: \(error.localizedDescription)"
+                    }
                 }
             }
         }
