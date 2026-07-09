@@ -331,11 +331,25 @@ struct ContentView: View {
         if let host = RockGuard.hostForDestination(dest, smbAddress: store.smbAddress) {
             store.status = "Checking \(host) for a running Roon Server…"
             let state = await RockGuard.getState(host: host)
-            store.status = ""
             if let s = state, s.isRock, s.roonRunning {
+                store.status = ""
                 rockPrompt = RockPrompt(host: host, dest: dest)
                 return
             }
+            // Make the check's outcome visible instead of silently proceeding —
+            // a plain NAS won't answer (fine), but "no answer" can also mean
+            // macOS denied Local Network access, which would defeat the gate.
+            switch state {
+            case .some(let s) where s.isRock:
+                store.status = "ROCK at \(host): Roon Server already stopped — copying."
+            case .some:
+                store.status = "\(host) is not a ROCK — copying."
+            case .none:
+                store.status = "No ROCK admin answer from \(host) (not a ROCK, or Local Network access is off in System Settings → Privacy & Security) — copying."
+                NSLog("[RockGuard] getstate failed for %@ — check Local Network permission", host)
+            }
+        } else {
+            NSLog("[RockGuard] no host resolved for destination %@ — skipping ROCK check", dest.path)
         }
         store.copyKeepers(to: dest)
     }
@@ -396,7 +410,8 @@ enum RockGuard {
         let vendor = d["device_vendor"] as? String ?? ""
         let model = d["device_model"] as? String ?? ""
         let st = d["state"] as? [String: Any]
-        let running = st?["roon_running"] as? Bool ?? false
+        // the API reports 1/0, not true/false — go via NSNumber to be safe
+        let running = (st?["roon_running"] as? NSNumber)?.boolValue ?? false
         let isRock = vendor.localizedCaseInsensitiveContains("roon")
                   || model.localizedCaseInsensitiveContains("core kit")
         return State(isRock: isRock, roonRunning: running, model: model)
