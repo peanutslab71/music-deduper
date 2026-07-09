@@ -92,11 +92,19 @@ the performance section below.
 - **Don't browse the share in Finder while copying.** Finder generates
   previews and thumbnails, which means opening lots of files — competition
   the little server doesn't need.
-- **Roon ROCK users:** the app stops Roon Server before copying (and offers to
-  restart it after). That's not just to protect the copy — when Roon Server
-  comes back it imports and audio-analyses everything new, which pegs the NUC
-  for a while. If the share feels slow *after* a copy, that's Roon working,
-  not a fault.
+- **Roon ROCK users: leave Roon Server stopped between runs during a big
+  migration.** The app stops Roon Server before every copy and offers to
+  restart it after — but each restart sends it off to import and identify
+  everything that just landed, and on a small NUC that work can peg the CPU
+  so hard the machine **stops answering the network for seconds at a time**.
+  From the outside that looks exactly like a broken network: hung folder
+  listings, "Server connections interrupted", copies failing with random
+  errors ("no permission", "already exists", timeouts) — while every cable,
+  switch and access point checks out fine. We lost an evening to this; see
+  the next section before you re-wire your house.
+  The recipe for a large first copy: say **No** to the restart offer between
+  runs, restart Roon Server once when *everything* has landed, and let it
+  import and analyse overnight in one go.
 
 ## Making macOS's SMB client behave (the big one)
 
@@ -140,6 +148,31 @@ corporate network your IT department may require signing.
 Real-world result on the network this was written against (Roon ROCK on a
 NUC, Mac on Wi-Fi): folder listings went from many seconds to instant, and a
 recursive walk of 2,500 files took 1.8 seconds.
+
+## "It looks like my network is broken" — check Roon first
+
+If copies to a Roon ROCK fail with a rotating cast of errors, folder
+listings hang, and the machine drops off the network in bursts — but your
+switch, cables and Wi-Fi all test clean — check whether **Roon Server is
+busy** before blaming the network. A small NUC running Roon's import,
+identification, or audio analysis can be so CPU-bound that it fails to
+answer pings for seconds at a time. The quick test: stop Roon Server from
+ROCK's web page (or let this app's copy gate do it) and see if the problems
+vanish instantly. Ours did — 100+ network drops an hour became zero.
+
+Two Roon settings keep it from ever getting that bad
+(Roon app → Settings → Library):
+
+- **Background Audio Analysis** → *Scheduled*, with the work window
+  overnight (e.g. 1 AM–5 AM), so bulk analysis never competes with you.
+- **On-demand audio analysis speed** → *Throttled*. "Fast" lets a single
+  played-but-unanalysed track spike the CPU during the day — and right
+  after a big copy, *everything* is unanalysed.
+
+Note that Roon's *import and identification* of new files starts immediately
+when the server sees them and has no schedule setting — which is exactly why
+the copy recipe above says to leave the server stopped until everything has
+landed.
 
 ## "Server connections interrupted"
 

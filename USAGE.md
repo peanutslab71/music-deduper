@@ -117,6 +117,13 @@ the copy) or **Cancel**. There is deliberately no "copy anyway". When the copy
 finishes, the app offers to **start Roon Server again** so it imports all the new
 files in one clean pass.
 
+**Copying a big library over several runs?** Say **No** to that restart offer
+until the *last* run is done. Every restart sends Roon off to import the fresh
+files immediately, and on a small NUC that can peg the CPU so hard the machine
+drops off the network — which then wrecks your next copy run and looks exactly
+like a network fault. Details and the Roon settings that prevent it are in
+[HELP.md](HELP.md).
+
 Two other behaviours worth knowing:
 
 - **Files that already exist ask first.** If a file is already at the destination —

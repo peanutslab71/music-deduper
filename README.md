@@ -36,7 +36,10 @@ A four-step wizard: **Source → Review → Clean up → Copy.**
 - **ROCK-aware copying** (v1.1): if the destination is a Roon ROCK server with Roon
   Server running, the copy is blocked — copying under a live server can hang it. The
   app offers to stop Roon Server for you, runs the copy, then offers to start it
-  again so it imports everything in one clean pass.
+  again so it imports everything in one clean pass. Migrating a big library over
+  several runs? Leave Roon Server stopped **between** runs too — a NUC busy
+  importing thousands of fresh tracks can drop off the network entirely and
+  look like a hardware fault ([HELP.md](HELP.md) has the full story).
 
 There's a full walkthrough in [USAGE.md](USAGE.md), and [HELP.md](HELP.md)
 covers performance tuning (including a fix for macOS's slow SMB defaults),
