@@ -155,10 +155,52 @@ final class DirectSMBClient: @unchecked Sendable {
         NSError(domain: "DirectSMB", code: 1, userInfo: [NSLocalizedDescriptionKey: msg])
     }
 
+    /// A sibling connection to the same server/share — used by the pool so
+    /// parallel copy workers each get their own TCP session instead of
+    /// queueing behind one socket.
+    func sibling() -> DirectSMBClient? {
+        DirectSMBClient(address: "smb://\(host)/\(share)")
+    }
+
     private static func asInt64(_ v: Any?) -> Int64 {
         if let n = v as? Int64 { return n }
         if let n = v as? Int { return Int64(n) }
         if let n = v as? NSNumber { return n.int64Value }
         return 0
+    }
+}
+
+/// A small pool of independent connections to one share. Each parallel copy
+/// worker checks a client out for the duration of its file, so N workers run
+/// on N TCP sessions — on high-latency links (Wi-Fi + old dialects that cap
+/// requests at 64KB) this is the difference between queueing and parallelism.
+final class DirectSMBPool: @unchecked Sendable {
+    private let lock = NSLock()
+    private var idle: [DirectSMBClient] = []
+    private let template: DirectSMBClient
+
+    init(template: DirectSMBClient) {
+        self.template = template
+    }
+
+    func acquire() -> DirectSMBClient {
+        lock.lock()
+        let c = idle.popLast()
+        lock.unlock()
+        return c ?? template.sibling() ?? template
+    }
+
+    func release(_ c: DirectSMBClient) {
+        guard c !== template else { return }
+        lock.lock()
+        if idle.count < 8 { idle.append(c) } // else drop; its session just closes
+        lock.unlock()
+    }
+
+    /// Keep every pooled session alive with a protocol-level echo.
+    func keepAliveAll() async {
+        lock.lock(); let clients = idle; lock.unlock()
+        await template.keepAlive()
+        for c in clients { await c.keepAlive() }
     }
 }

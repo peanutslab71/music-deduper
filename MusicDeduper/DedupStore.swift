@@ -745,18 +745,24 @@ final class DedupStore: ObservableObject {
         let pause = resumeBox
         pause.reset()
 
-        // protocol-level keep-alive: a real SMB echo every 30s
+        // one connection per parallel worker — N files on N TCP sessions
+        let pool = DirectSMBPool(template: client)
+
+        // protocol-level keep-alive: a real SMB echo every 30s, on every session
         let keepAlive = Task.detached(priority: .background) {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 30_000_000_000)
                 if Task.isCancelled { break }
-                await client.keepAlive()
+                await pool.keepAliveAll()
             }
         }
 
         Task.detached(priority: .userInitiated) {
-            await self.opLogLine("ℹ direct SMB engine — \(client.host)/\(client.share), in-app networking (no macOS mount)")
-            let counters = CopyCounters()
+            await self.opLogLine("ℹ direct SMB engine — \(client.host)/\(client.share), in-app networking (no macOS mount), one session per stream")
+            // independent sessions per worker → the cap can sit higher than the
+            // mount engine's: 4 normally, 6 after a clean stretch
+            let counters = CopyCounters(baseLimit: 4, maxLimit: 6)
+            await self.setStreamLimit(4)
 
             // Preflight: dial the server before feeding files.
             var connected = client.isConnected
@@ -793,7 +799,7 @@ final class DedupStore: ObservableObject {
                 var inFlight = 0
                 var dirCache: [String: [String: Int64]] = [:]
                 var claimedTargets = Set<String>()
-                var lastLimit = 3
+                var lastLimit = 4
                 for t in keepers {
                     if box.cancelled { break }
 
@@ -861,7 +867,7 @@ final class DedupStore: ObservableObject {
                         inFlight -= 1
                     }
                     group.addTask {
-                        await self.copyOneFileDirect(t, client: client,
+                        await self.copyOneFileDirect(t, pool: pool,
                                                      dirPath: paths.dir, targetPath: paths.target,
                                                      box: box, counters: counters)
                     }
@@ -877,7 +883,7 @@ final class DedupStore: ObservableObject {
                     for t in keepers where sweepIDs.contains(t.id) {
                         if box.cancelled { break }
                         let paths = remotePaths(for: t)
-                        await self.copyOneFileDirect(t, client: client,
+                        await self.copyOneFileDirect(t, pool: pool,
                                                      dirPath: paths.dir, targetPath: paths.target,
                                                      box: box, counters: counters, sweep: true)
                     }
@@ -894,11 +900,13 @@ final class DedupStore: ObservableObject {
         }
     }
 
-    nonisolated private func copyOneFileDirect(_ t: Track, client: DirectSMBClient,
+    nonisolated private func copyOneFileDirect(_ t: Track, pool: DirectSMBPool,
                                                dirPath: String, targetPath: String,
                                                box: CancelBox, counters: CopyCounters,
                                                sweep: Bool = false) async {
         await self.workerDelta(1)
+        let client = pool.acquire()
+        defer { pool.release(client) }
         var copied = false
         var attempt = 0
         let maxAttempts = 5
@@ -971,21 +979,29 @@ final class CopyCounters: @unchecked Sendable {
     private var ok = 0, skip = 0, fail = 0, done = 0, consec = 0
     private var failed: [Int] = []
     private var cleanStreak = 0
-    private var limit = 3
+    private let baseLimit: Int
+    private let maxLimit: Int
+    private var limit: Int
+
+    init(baseLimit: Int = 3, maxLimit: Int = 4) {
+        self.baseLimit = baseLimit
+        self.maxLimit = maxLimit
+        self.limit = baseLimit
+    }
 
     var consecutiveFailCount: Int { lock.lock(); defer { lock.unlock() }; return consec }
     func resetConsecutive() { lock.lock(); consec = 0; lock.unlock() }
 
-    /// Current parallel-worker limit (3, or 4 after 20 clean files in a row).
+    /// Current parallel-worker limit (base, rising to max after 20 clean files).
     var currentLimit: Int { lock.lock(); defer { lock.unlock() }; return limit }
-    /// Any failed copy attempt (even one that later succeeds) drops back to 3.
-    func noteRetry() { lock.lock(); cleanStreak = 0; limit = 3; lock.unlock() }
+    /// Any failed copy attempt (even one that later succeeds) drops back to base.
+    func noteRetry() { lock.lock(); cleanStreak = 0; limit = baseLimit; lock.unlock() }
 
     func recordOK(clean: Bool) -> Snap {
         lock.lock(); defer { lock.unlock() }
         ok += 1; done += 1; consec = 0
-        if clean { cleanStreak += 1; if cleanStreak >= 20 { limit = 4 } }
-        else { cleanStreak = 0; limit = 3 }
+        if clean { cleanStreak += 1; if cleanStreak >= 20 { limit = maxLimit } }
+        else { cleanStreak = 0; limit = baseLimit }
         return Snap(done: done, ok: ok, skip: skip, fail: fail)
     }
     func recordSkip() -> Snap {
