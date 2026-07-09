@@ -759,9 +759,9 @@ final class DedupStore: ObservableObject {
 
         Task.detached(priority: .userInitiated) {
             await self.opLogLine("ℹ direct SMB engine — \(client.host)/\(client.share), in-app networking (no macOS mount), one session per stream")
-            // independent sessions per worker → the cap can sit higher than the
-            // mount engine's: 4 normally, 6 after a clean stretch
-            let counters = CopyCounters(baseLimit: 4, maxLimit: 6)
+            // independent sessions per worker; 4 proved the sweet spot in testing
+            // (6 gained nothing against the old Samba on the other end)
+            let counters = CopyCounters(baseLimit: 4, maxLimit: 4)
             await self.setStreamLimit(4)
 
             // Preflight: dial the server before feeding files.
