@@ -389,6 +389,31 @@ final class DedupStore: ObservableObject {
         didSet { UserDefaults.standard.set(useDirectEngine, forKey: "useDirectEngine") }
     }
 
+    // While the Finder mount exists, the kernel SMB client keeps its own
+    // session chattering at the same fragile server — and it's the only path
+    // left for macOS mount dialogs/wedges. Direct-engine copies can eject it.
+    @Published var unmountDuringCopy: Bool =
+        UserDefaults.standard.object(forKey: "unmountDuringCopy") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(unmountDuringCopy, forKey: "unmountDuringCopy") }
+    }
+
+    /// Eject the mounted volume a destination path lives on (no Finder, no UI).
+    nonisolated private static func unmountVolume(containing dest: URL) async -> String {
+        let p = dest.path
+        guard p.hasPrefix("/Volumes/"),
+              let vol = p.dropFirst("/Volumes/".count).split(separator: "/").first else {
+            return "destination isn't on a mounted volume — nothing to disconnect"
+        }
+        let volURL = URL(fileURLWithPath: "/Volumes/\(vol)")
+        return await withCheckedContinuation { cont in
+            FileManager.default.unmountVolume(at: volURL, options: [.withoutUI]) { err in
+                cont.resume(returning: err == nil
+                    ? "disconnected the Finder mount “\(vol)” — macOS is out of the conversation"
+                    : "couldn't disconnect “\(vol)” (\(err!.localizedDescription)) — continuing anyway")
+            }
+        }
+    }
+
     private func runCopy(_ items: [Track], to dest: URL, title: String) {
         if useDirectEngine, !smbAddress.isEmpty,
            let client = DirectSMBClient(address: smbAddress),
@@ -744,6 +769,7 @@ final class DedupStore: ObservableObject {
         conflicts.reset()
         let pause = resumeBox
         pause.reset()
+        let ejectMount = unmountDuringCopy
 
         // one connection per parallel worker — N files on N TCP sessions
         let pool = DirectSMBPool(template: client)
@@ -759,6 +785,9 @@ final class DedupStore: ObservableObject {
 
         Task.detached(priority: .userInitiated) {
             await self.opLogLine("ℹ direct SMB engine — \(client.host)/\(client.share), in-app networking (no macOS mount), one session per stream")
+            if ejectMount {
+                await self.opLogLine("⏏ " + Self.unmountVolume(containing: dest))
+            }
             // independent sessions per worker; 4 proved the sweet spot in testing
             // (6 gained nothing against the old Samba on the other end)
             let counters = CopyCounters(baseLimit: 4, maxLimit: 4)

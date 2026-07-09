@@ -565,6 +565,13 @@ struct CopyStepView: View {
                            isOn: $store.useDirectEngine)
                         .font(.caption)
                         .toggleStyle(.checkbox)
+                    if store.useDirectEngine {
+                        Toggle("Disconnect the Finder mount while copying (recommended — keeps macOS's own SMB client out of the conversation)",
+                               isOn: $store.unmountDuringCopy)
+                            .font(.caption)
+                            .toggleStyle(.checkbox)
+                            .padding(.leading, 18)
+                    }
                 }
             }
             Spacer(minLength: 8)
