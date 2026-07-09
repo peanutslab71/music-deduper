@@ -11,6 +11,7 @@
 //
 
 import Foundation
+import Network
 import AMSMB2
 
 /// One server + one share, guest login. Thread-safe; any operation that finds
@@ -168,6 +169,44 @@ final class DirectSMBClient: @unchecked Sendable {
         if let n = v as? NSNumber { return n.int64Value }
         return 0
     }
+}
+
+extension DirectSMBClient {
+    /// Ask a server which shares it offers (guest login). System shares
+    /// (IPC$ and friends) are filtered out.
+    static func listShares(host: String, timeout: TimeInterval = 15) async throws -> [String] {
+        guard let url = URL(string: "smb://\(host)"),
+              let m = SMB2Manager(url: url,
+                                  credential: URLCredential(user: "guest", password: "",
+                                                            persistence: .forSession)) else {
+            throw error("couldn't reach \(host)")
+        }
+        m.timeout = timeout
+        let shares = try await m.listShares()
+        return shares.map(\.name).filter { !$0.hasSuffix("$") }
+    }
+}
+
+/// Finds SMB servers announcing themselves on the local network (Bonjour).
+@MainActor
+final class SMBServerBrowser: ObservableObject {
+    @Published var servers: [String] = []   // advertised names, e.g. "rock"
+    private var browser: NWBrowser?
+
+    func start() {
+        stop()
+        let b = NWBrowser(for: .bonjour(type: "_smb._tcp", domain: nil), using: NWParameters())
+        b.browseResultsChangedHandler = { [weak self] results, _ in
+            let names = results.compactMap { r -> String? in
+                if case .service(let name, _, _, _) = r.endpoint { return name }
+                return nil
+            }.sorted()
+            Task { @MainActor in self?.servers = names }
+        }
+        b.start(queue: .main)
+        browser = b
+    }
+    func stop() { browser?.cancel(); browser = nil }
 }
 
 /// A small pool of independent connections to one share. Each parallel copy

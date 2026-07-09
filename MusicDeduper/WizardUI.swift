@@ -503,6 +503,7 @@ struct CopyStepView: View {
     @ObservedObject var store: DedupStore
     @Binding var destFolder: URL?
     let onCopy: (URL) -> Void
+    @State private var showServerPicker = false
 
     private var shareName: String {
         guard let u = URL(string: store.smbAddress), let h = u.host else { return "" }
@@ -525,23 +526,39 @@ struct CopyStepView: View {
 
             numbered(1, title: "Where is your Roon server (or NAS)?",
                      detail: store.smbAddress.isEmpty
-                        ? "Locate the music share so the app can reconnect to it if the network drops mid-copy."
+                        ? "The app finds servers on your network itself — no Finder, no mounting."
                         : shareDetail) {
-                Button {
-                    locateServer()
-                } label: {
-                    Label(store.smbAddress.isEmpty ? "Locate server share…" : "Change…",
-                          systemImage: "server.rack")
+                HStack(spacing: 8) {
+                    Button {
+                        showServerPicker = true
+                    } label: {
+                        Label(store.smbAddress.isEmpty ? "Choose server…" : "Change…",
+                              systemImage: "server.rack")
+                    }
+                    Button("Locate via Finder mount…") { locateServer() }
+                        .controlSize(.small)
                 }
             }
 
             numbered(2, title: "Which folder inside it?",
-                     detail: destFolder.map { "Copying into: \($0.path)" }
-                        ?? "Pick the folder the Artist/Album tree should be created in.") {
-                Button {
-                    pickDestFolder()
-                } label: {
-                    Label(destFolder == nil ? "Choose folder…" : "Change…", systemImage: "folder")
+                     detail: store.useDirectEngine
+                        ? "The folder inside the share the Artist/Album tree goes into (a folder browser is coming — for now type it or browse a mount)."
+                        : (destFolder.map { "Copying into: \($0.path)" }
+                            ?? "Pick the folder the Artist/Album tree should be created in.")) {
+                if store.useDirectEngine {
+                    HStack(spacing: 8) {
+                        TextField("e.g. Storage/InternalStorage", text: $store.destRelSaved)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 320)
+                        Button("Browse…") { pickDestFolder() }
+                            .controlSize(.small)
+                    }
+                } else {
+                    Button {
+                        pickDestFolder()
+                    } label: {
+                        Label(destFolder == nil ? "Choose folder…" : "Change…", systemImage: "folder")
+                    }
                 }
             }
 
@@ -549,14 +566,15 @@ struct CopyStepView: View {
                      detail: "\(store.selectedKeeperTracks.count) of \(store.keeperTracks.count) keeper tracks selected (choose albums/tracks on the Review step) · any file that already exists asks Overwrite/Skip (or All) · a Roon ROCK destination is checked and Roon Server stopped first.") {
                 VStack(alignment: .leading, spacing: 8) {
                     Button {
-                        if let d = destFolder { onCopy(d) }
+                        if let d = store.effectiveDest ?? destFolder { onCopy(d) }
                     } label: {
                         Label("Copy \(store.selectedKeeperTracks.count) selected", systemImage: "arrow.right.doc.on.clipboard")
                             .frame(minWidth: 180)
                     }
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
-                    .disabled(destFolder == nil || store.busy || store.selectedKeeperTracks.isEmpty)
+                    .disabled((store.effectiveDest == nil && destFolder == nil)
+                              || store.busy || store.selectedKeeperTracks.isEmpty)
                     Toggle("Keep the display awake while copying (recommended on Wi-Fi — a sleeping display can power down Wi-Fi)",
                            isOn: $store.keepDisplayAwake)
                         .font(.caption)
@@ -578,6 +596,7 @@ struct CopyStepView: View {
         }
         .frame(maxWidth: 620)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .sheet(isPresented: $showServerPicker) { ServerPickerSheet(store: store) }
     }
 
     private func numbered(_ n: Int, title: String, detail: String,
@@ -633,6 +652,114 @@ struct CopyStepView: View {
             if let vals = try? url.resourceValues(forKeys: [.volumeURLForRemountingKey]),
                let remount = vals.volumeURLForRemounting {
                 store.setShareAddress(remount.absoluteString)
+            }
+            // and the share-relative path for the direct engine
+            if let c = DirectSMBClient(address: store.smbAddress),
+               let rel = c.shareRelative(url) {
+                store.destRelSaved = rel
+            }
+        }
+    }
+}
+
+// MARK: - Server picker (our protocol — Bonjour discovery + share listing, no mount)
+
+struct ServerPickerSheet: View {
+    @ObservedObject var store: DedupStore
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var browser = SMBServerBrowser()
+    @State private var manualHost = ""
+    @State private var connecting = false
+    @State private var pickedHost = ""
+    @State private var shares: [String]?
+    @State private var errorMsg: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(shares == nil ? "Choose your server" : "Choose a share on \(pickedHost)")
+                .font(.title3).fontWeight(.semibold)
+            if let shares {
+                List(shares, id: \.self) { s in
+                    Button {
+                        store.setShareAddress("smb://\(pickedHost)/\(s)")
+                        dismiss()
+                    } label: {
+                        Label(s, systemImage: "externaldrive.connected.to.line.below")
+                    }
+                    .buttonStyle(.plain)
+                }
+                .listStyle(.inset)
+            } else {
+                Group {
+                    if browser.servers.isEmpty {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Looking for servers on your network…")
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        List(browser.servers, id: \.self) { name in
+                            Button {
+                                connect(host: name + ".local")
+                            } label: {
+                                Label(name, systemImage: "server.rack")
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(connecting)
+                        }
+                        .listStyle(.inset)
+                    }
+                }
+                HStack(spacing: 8) {
+                    TextField("Or an address, e.g. 192.168.1.128", text: $manualHost)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { connect(host: manualHost) }
+                    Button("Connect") { connect(host: manualHost) }
+                        .disabled(connecting || manualHost.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            if connecting {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Asking \(pickedHost) for its shares…").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let e = errorMsg {
+                Text(e).font(.caption).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                if shares != nil { Button("Back") { shares = nil; errorMsg = nil } }
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 460, height: 420)
+        .onAppear { browser.start() }
+        .onDisappear { browser.stop() }
+    }
+
+    private func connect(host: String) {
+        let h = host.trimmingCharacters(in: .whitespaces)
+        guard !h.isEmpty else { return }
+        connecting = true
+        pickedHost = h
+        errorMsg = nil
+        Task {
+            do {
+                let s = try await DirectSMBClient.listShares(host: h)
+                await MainActor.run {
+                    connecting = false
+                    if s.isEmpty { errorMsg = "\(h) answered but offers no shares to guests." }
+                    else { shares = s }
+                }
+            } catch {
+                await MainActor.run {
+                    connecting = false
+                    errorMsg = "Couldn't connect to \(h): \(error.localizedDescription)"
+                }
             }
         }
     }

@@ -328,16 +328,6 @@ struct OperationSheet: View {
                 Text("✓ \(store.opOK)    • \(store.opSkip)    ✗ \(store.opFail)").foregroundStyle(.secondary)
             }
             .font(.caption).monospaced()
-            // ticking elapsed / rate / ETA footer (copy runs only)
-            if let start = store.opStartDate, store.opStreamLimit > 0, !store.opFinished {
-                TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                    Text(Self.statsLine(now: ctx.date, start: start,
-                                        bytesDone: store.opBytesDone, bytesTotal: store.opBytesTotal,
-                                        filesDone: store.opDone))
-                        .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
             if !store.opNote.isEmpty {
                 Text(store.opNote)
                     .font(.caption)
@@ -363,26 +353,29 @@ struct OperationSheet: View {
             if let c = store.pendingConflict {
                 ConflictPanel(conflict: c) { store.resolveConflict($0) }
             }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(store.opLog.enumerated()), id: \.offset) { idx, line in
-                            Text(line)
-                                .font(.system(size: 11, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(idx)
-                        }
+            // newest entry at the top — no scrolling needed to follow along
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(store.opLog.enumerated()).reversed(), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(6)
                 }
-                .frame(height: 240)
-                .background(Color(nsColor: .textBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .onChange(of: store.opLog.count) { _ in
-                    if !store.opLog.isEmpty { proxy.scrollTo(store.opLog.count - 1) }
-                }
+                .padding(6)
             }
+            .frame(height: 240)
+            .background(Color(nsColor: .textBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
             HStack {
+                if let start = store.opStartDate, store.opStreamLimit > 0, !store.opFinished {
+                    TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                        Text(Self.statsLine(now: ctx.date, start: start,
+                                            bytesDone: store.opBytesDone, bytesTotal: store.opBytesTotal,
+                                            filesDone: store.opDone))
+                            .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                    }
+                }
                 Spacer()
                 if store.opFinished {
                     if let log = store.lastRunLogURL {

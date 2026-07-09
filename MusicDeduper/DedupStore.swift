@@ -48,6 +48,21 @@ final class DedupStore: ObservableObject {
         }
     }
 
+    // destination folder inside the share (share-relative, e.g. "Storage/InternalStorage")
+    // — with the direct engine this replaces needing a mounted /Volumes path at all
+    @Published var destRelSaved: String = UserDefaults.standard.string(forKey: "destRelSaved") ?? "" {
+        didSet { UserDefaults.standard.set(destRelSaved, forKey: "destRelSaved") }
+    }
+
+    /// A destination URL synthesized from share + relative folder — lets the
+    /// direct engine copy without any Finder mount existing.
+    var effectiveDest: URL? {
+        guard useDirectEngine, !smbAddress.isEmpty, !destRelSaved.isEmpty,
+              let c = DirectSMBClient(address: smbAddress) else { return nil }
+        let rel = destRelSaved.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        return URL(fileURLWithPath: "/Volumes/\(c.share)/\(rel)")
+    }
+
     // recently used source folders (paths, newest first)
     @Published var recentSources: [String] = UserDefaults.standard.stringArray(forKey: "recentSources") ?? []
 
