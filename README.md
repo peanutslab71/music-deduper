@@ -43,6 +43,14 @@ To produce a standalone `.app`, use Product → Archive. `make_dmg.sh` turns an 
 app into a drag-to-Applications DMG, and `DISTRIBUTION.md` covers the Developer ID
 signing and notarization steps if you want a build other Macs will open without warnings.
 
+## Use at your own risk
+
+This app deletes files — that's its job. It's provided free, **as is, with no
+warranty of any kind, express or implied**, and no liability is accepted for any
+loss of data or other damage arising from its use. Deletes default to the Trash
+and are confirmed twice, but you should **back up your library before letting
+this (or any) tool loose on it**. See [LICENSE](LICENSE) for the full terms (MIT).
+
 ## Notes
 
 - The scanner never modifies your library. Nothing is written or deleted until you

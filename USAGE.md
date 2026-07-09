@@ -6,6 +6,10 @@ One piece of advice before anything else: **have a backup of your library before
 delete anything.** The app is careful — keepers are never touched, deletes default to
 the Trash and are confirmed twice — but it's your music. Belt and braces.
 
+And the formal bit: this software is provided free, **as is, with no warranty of any
+kind, express or implied** — use it at your own risk. No liability is accepted for
+data loss or any other damage arising from its use. Full terms in the LICENSE file (MIT).
+
 ## 1. Scan your library
 
 Click **Pick source folder** and choose the top of your music library. The app walks
