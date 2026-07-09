@@ -318,49 +318,56 @@ final class SMBServerBrowser: ObservableObject {
         scanning = false
     }
 
+    private var scanPending: [String] = []
+    private var scanDone = Set<String>()   // ips already accounted for (idempotent)
+
     private func scanSubnet(gen: Int) {
         guard let (base, myIP) = Self.localIPv4Base() else { return }
         scanning = true
-        let queue = DispatchQueue(label: "smb-scan", attributes: .concurrent)
-        var pending = Array(1...254).map { "\(base).\($0)" }.filter { $0 != myIP }
-        let maxConcurrent = 24         // gentle on the network stack; still fast
-
-        func launchNext() {
-            guard gen == self.generation else { return }
-            guard !pending.isEmpty else {
-                if live.isEmpty { scanning = false }
-                return
-            }
-            let ip = pending.removeFirst()
-            let tcp = NWProtocolTCP.Options()
-            tcp.connectionTimeout = 2
-            let conn = NWConnection(host: NWEndpoint.Host(ip), port: 445,
-                                    using: NWParameters(tls: nil, tcp: tcp))
-            live[ip] = conn
-            conn.stateUpdateHandler = { [weak self] st in
-                switch st {
-                case .ready:
-                    Task { @MainActor in self?.finishProbe(ip: ip, gen: gen, found: true, launch: launchNext) }
-                case .failed, .cancelled:
-                    Task { @MainActor in self?.finishProbe(ip: ip, gen: gen, found: false, launch: launchNext) }
-                default:
-                    break
-                }
-            }
-            conn.start(queue: queue)
-        }
-        // prime the pump
-        for _ in 0..<maxConcurrent { launchNext() }
+        scanDone = []
+        scanPending = Array(1...254).map { "\(base).\($0)" }.filter { $0 != myIP }
+        // Keep this modest: some home routers treat a burst of connection
+        // attempts as a SYN-flood and start dropping the source, which makes
+        // the scan find nothing. 12-at-a-time still sweeps a /24 in seconds.
+        let maxConcurrent = 12
+        for _ in 0..<maxConcurrent { launchProbe(gen: gen) }
     }
 
-    private func finishProbe(ip: String, gen: Int, found: Bool, launch: () -> Void) {
+    private func launchProbe(gen: Int) {
         guard gen == generation else { return }
+        guard !scanPending.isEmpty else {
+            if live.isEmpty { scanning = false }
+            return
+        }
+        let ip = scanPending.removeFirst()
+        let queue = DispatchQueue(label: "smb-scan")
+        let tcp = NWProtocolTCP.Options()
+        tcp.connectionTimeout = 2
+        let conn = NWConnection(host: NWEndpoint.Host(ip), port: 445,
+                                using: NWParameters(tls: nil, tcp: tcp))
+        live[ip] = conn
+        conn.stateUpdateHandler = { [weak self] st in
+            switch st {
+            case .ready:
+                Task { @MainActor in self?.finishProbe(ip: ip, gen: gen, found: true) }
+            case .failed:
+                Task { @MainActor in self?.finishProbe(ip: ip, gen: gen, found: false) }
+            default:
+                break   // ignore .cancelled etc — finishProbe drives everything once
+            }
+        }
+        conn.start(queue: queue)
+    }
+
+    private func finishProbe(ip: String, gen: Int, found: Bool) {
+        guard gen == generation else { return }
+        guard !scanDone.contains(ip) else { return }   // only the first result counts
+        scanDone.insert(ip)
         if let c = live.removeValue(forKey: ip) { c.cancel() }
         if found { addScanned(ip: ip) }
-        launch()
-        if pendingIsIdle() { scanning = false }
+        launchProbe(gen: gen)                            // exactly one replacement
+        if live.isEmpty && scanPending.isEmpty { scanning = false }
     }
-    private func pendingIsIdle() -> Bool { live.isEmpty }
 
     func rescan() {
         Self.remembered = []
