@@ -78,7 +78,16 @@ final class DedupStore: ObservableObject {
     func requestCancel() { cancelBox.cancelled = true }
 
     // Keeps macOS from throttling us (App Nap) or idle-sleeping mid-operation.
+    // The token must stay alive for the whole operation — App Nap resumes the
+    // moment it deallocates — so it lives here, not in a task scope.
     private var activity: NSObjectProtocol?
+
+    // Display sleep is behaviourally linked to Wi-Fi dropping power on many Macs,
+    // which is exactly what kills an SMB copy — so this defaults on.
+    @Published var keepDisplayAwake: Bool =
+        UserDefaults.standard.object(forKey: "keepDisplayAwake") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(keepDisplayAwake, forKey: "keepDisplayAwake") }
+    }
 
     private func opStart(title: String, total: Int) {
         cancelBox.cancelled = false
@@ -86,8 +95,11 @@ final class DedupStore: ObservableObject {
         opTotal = total; opDone = 0; opOK = 0; opSkip = 0; opFail = 0; opLog = []; opNote = ""
         busy = true
         if activity == nil {
-            activity = ProcessInfo.processInfo.beginActivity(
-                options: [.userInitiated, .idleSystemSleepDisabled], reason: title)
+            // .userInitiated already implies idle-system-sleep prevention
+            var opts: ProcessInfo.ActivityOptions =
+                [.userInitiated, .suddenTerminationDisabled, .automaticTerminationDisabled]
+            if keepDisplayAwake { opts.insert(.idleDisplaySleepDisabled) }
+            activity = ProcessInfo.processInfo.beginActivity(options: opts, reason: title)
         }
     }
     private func opStep(done: Int, ok: Int, skip: Int, fail: Int, line: String) {

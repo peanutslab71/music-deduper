@@ -9,6 +9,16 @@ import SwiftUI
 
 @main
 struct MusicDeduperApp: App {
+    init() {
+        // Opt the app out of App Nap entirely. App Nap throttles disk/network
+        // I/O when the window is covered or minimized, and there are documented
+        // cases (Apple dev forums #679178) of it engaging despite a held
+        // beginActivity assertion — this per-app default is the fix Apple DTS
+        // endorsed there. Long unattended copies matter more to this app than
+        // the energy saving.
+        UserDefaults.standard.set(true, forKey: "NSAppSleepDisabled")
+    }
+
     var body: some Scene {
         WindowGroup("Music Library Deduper") {
             ContentView()

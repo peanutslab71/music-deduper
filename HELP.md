@@ -47,10 +47,19 @@ the performance section below.
 
 ## Getting the best copy speed
 
-- **Keep the app in front while it copies.** macOS quietly deprioritises
-  background apps in several ways the app can only partly opt out of. The
-  copy will *survive* being backgrounded — retries and reconnects take care
-  of that — but it runs fastest as the frontmost app with the Mac awake.
+- **Keep the app's window visible while it copies.** macOS has a feature
+  called App Nap that deliberately throttles an app's disk and network
+  activity when its window is completely covered or minimised — being merely
+  "not in front" is fine, but bury the window and macOS starts slowing the
+  app down. Music Deduper opts out of App Nap and additionally declares the
+  copy as user-initiated work, but keeping the window at least partly on
+  screen is a free extra guarantee. The copy will *survive* being buried —
+  retries and reconnects take care of that — it's just slower.
+- **Leave "Keep the display awake while copying" ticked if you're on Wi-Fi.**
+  When the display sleeps, many Macs also drop the Wi-Fi radio into a
+  low-power mode — which is exactly what a long network copy can't afford.
+  The checkbox (on the Copy page) keeps the screen on only while a copy is
+  actually running.
 - **Wired beats Wi-Fi, every time.** A Mac on Wi-Fi talking to a wired server
   will hit a ceiling of a few MB/s on the kind of old SMB dialect small
   servers speak, and Wi-Fi blips are where most mid-copy retries come from.
@@ -67,20 +76,24 @@ the performance section below.
 
 ## Making macOS's SMB client behave (the big one)
 
-macOS ships with two SMB client behaviours that hurt small servers:
+A few of macOS's SMB client defaults hurt small servers:
 
-- it **cryptographically signs every packet** when the server allows it —
-  pure overhead on a guest share on your own network, and it hits small
-  files hardest;
+- it **cryptographically signs every packet** when the negotiation lands
+  that way — pure overhead on a guest share on your own network, and it
+  hits small files hardest;
 - it tries **multichannel** (parallel connections), which simple servers
-  often mishandle, causing stalls and session drops.
+  often mishandle, causing stalls and session drops;
+- it subscribes to **change notifications** from the server — constant
+  chatter that basic servers handle badly;
+- it gives a slow server only **30 seconds** to answer a request before
+  tearing the session down — a brief stall becomes a full disconnect.
 
-Both are fixed with a two-line system config file. The repo includes
+All four are fixed with one small system config file. The repo includes
 [`tune-smb.sh`](tune-smb.sh), which does it with a backup and an undo note,
 or do it by hand — open Terminal and paste:
 
 ```
-printf '[default]\nsigning_required=no\nmc_on=no\n' | sudo tee /etc/nsmb.conf
+printf '[default]\nsigning_required=no\nmc_on=no\nnotify_off=yes\nmax_resp_timeout=600\n' | sudo tee /etc/nsmb.conf
 ```
 
 Then **eject the share in Finder and reconnect** — the setting only applies
@@ -110,6 +123,36 @@ Disconnect All if you're actually done with the share.
 
 If you see it often, it's almost always the Wi-Fi leg. The SMB config above
 reduces how *painful* each drop is; ethernet is what makes them stop.
+
+Technical background: macOS declares an SMB session interrupted after only
+10–12 seconds without a server response. So the dialog doesn't mean the
+network *died* — any 10-second stall triggers it, and Wi-Fi has several
+built-in sources of exactly that kind of stall (next section).
+
+## Wi-Fi stalls: AirDrop, Handoff and friends
+
+A Mac's Wi-Fi card periodically leaves your network's channel to service
+other Apple features, and every hop is a brief stall on anything mid-transfer:
+
+- **AirDrop / AirPlay / Handoff** make the Wi-Fi radio hop to their own
+  channels every 5–12 seconds while active. During a big copy, turning
+  **AirDrop off** (Control Centre) and, if you don't use it, **Handoff off**
+  (System Settings → General → AirDrop & Handoff) removes the single biggest
+  source of periodic stalls.
+- **Location Services** trigger a full Wi-Fi channel scan roughly once a
+  minute for apps that use your location — each scan pauses the connection
+  briefly. Trimming the list (System Settings → Privacy & Security →
+  Location Services) helps.
+- **"Private Wi-Fi Address"** (macOS 15 and later): on your *home* network,
+  set it to **Fixed** or Off (System Settings → Wi-Fi → Details) — the
+  rotating variety can force a mid-transfer network renegotiation.
+- Finder writing its folder-view files (`.DS_Store`) onto network shares is
+  more chatter a small server doesn't need; Apple's documented switch:
+  ```
+  defaults write com.apple.desktopservices DSDontWriteNetworkStores -bool true
+  ```
+
+Or skip the whole subject: plug the Mac into ethernet for big copies.
 
 ## Common questions
 

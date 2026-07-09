@@ -516,15 +516,21 @@ struct CopyStepView: View {
 
             numbered(3, title: "Copy",
                      detail: "\(store.keeperTracks.count) keeper tracks · any file that already exists asks Overwrite/Skip (or All) · a Roon ROCK destination is checked and Roon Server stopped first.") {
-                Button {
-                    if let d = destFolder { onCopy(d) }
-                } label: {
-                    Label("Copy \(store.keeperTracks.count) keepers", systemImage: "arrow.right.doc.on.clipboard")
-                        .frame(minWidth: 180)
+                VStack(alignment: .leading, spacing: 8) {
+                    Button {
+                        if let d = destFolder { onCopy(d) }
+                    } label: {
+                        Label("Copy \(store.keeperTracks.count) keepers", systemImage: "arrow.right.doc.on.clipboard")
+                            .frame(minWidth: 180)
+                    }
+                    .controlSize(.large)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(destFolder == nil || store.busy || store.tracks.isEmpty)
+                    Toggle("Keep the display awake while copying (recommended on Wi-Fi — a sleeping display can power down Wi-Fi)",
+                           isOn: $store.keepDisplayAwake)
+                        .font(.caption)
+                        .toggleStyle(.checkbox)
                 }
-                .controlSize(.large)
-                .buttonStyle(.borderedProminent)
-                .disabled(destFolder == nil || store.busy || store.tracks.isEmpty)
             }
             Spacer(minLength: 8)
         }
