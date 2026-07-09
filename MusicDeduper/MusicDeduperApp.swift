@@ -41,6 +41,10 @@ struct MusicDeduperApp: App {
             AboutView()
         }
         .windowResizability(.contentSize)
+
+        Window("Server Files", id: "files") {
+            ServerFilesView()
+        }
     }
 }
 

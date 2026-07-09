@@ -10,6 +10,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var store = DedupStore()
+    @Environment(\.openWindow) private var openWindow
     @State private var step: WizardStep = .source
     @State private var reviewTab = 0            // 0 duplicates · 1 library
     @State private var destFolder: URL? = nil
@@ -28,28 +29,42 @@ struct ContentView: View {
     @State private var rockRestartHost: String? = nil          // offer to start again after the copy
     @State private var restartHostAfterCopy: String? = nil     // we stopped it for this copy
 
-    var body: some View {
+    @ViewBuilder private var stepContent: some View {
+        switch step {
+        case .source:
+            SourceStepView(store: store)
+        case .review:
+            ReviewStepView(store: store, reviewTab: $reviewTab)
+        case .cleanup:
+            CleanupStepView(store: store) { deletePhase = .choose }
+        case .copy:
+            CopyStepView(store: store, destFolder: $destFolder) { dest in
+                Task { @MainActor in await guardedCopy(to: dest) }
+            }
+        }
+    }
+
+    private var chrome: some View {
         VStack(spacing: 0) {
             StepBar(step: $step, hasScan: !store.tracks.isEmpty)
             Divider()
 
-            switch step {
-            case .source:
-                SourceStepView(store: store)
-            case .review:
-                ReviewStepView(store: store, reviewTab: $reviewTab)
-            case .cleanup:
-                CleanupStepView(store: store) { deletePhase = .choose }
-            case .copy:
-                CopyStepView(store: store, destFolder: $destFolder) { dest in
-                    Task { @MainActor in await guardedCopy(to: dest) }
-                }
-            }
+            stepContent
 
             Divider()
             footer
         }
         .frame(minWidth: 940, minHeight: 620)
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    openWindow(id: "files")
+                } label: {
+                    Label("Server Files", systemImage: "externaldrive.connected.to.line.below")
+                }
+                .help("Browse and manage files on your server — rename, move, organise")
+            }
+        }
         // when a scan finishes, land on the right Review screen automatically:
         // duplicates if there are any, otherwise straight to the Library grid
         .onChange(of: store.busy) { busy in
@@ -58,6 +73,10 @@ struct ContentView: View {
                 step = .review
             }
         }
+    }
+
+    private var withDeleteFlow: some View {
+        chrome
         // 1) choose Trash vs Permanent
         .confirmationDialog("Delete duplicates",
                             isPresented: bind(.choose), titleVisibility: .visible) {
@@ -88,6 +107,10 @@ struct ContentView: View {
         .sheet(isPresented: $store.opActive) {
             OperationSheet(store: store)
         }
+    }
+
+    var body: some View {
+        withDeleteFlow
         // ROCK gate: Roon Server MUST be stopped before copying into a ROCK share
         .alert("Roon Server is running",
                isPresented: Binding(get: { rockPrompt != nil },

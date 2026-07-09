@@ -602,7 +602,11 @@ struct CopyStepView: View {
         }
         .frame(maxWidth: 620)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .sheet(isPresented: $showServerPicker) { ServerPickerSheet(store: store) }
+        .sheet(isPresented: $showServerPicker) {
+            ServerPickerSheet { host, share in
+                store.setShareAddress("smb://\(host)/\(share)")
+            }
+        }
         .sheet(isPresented: $showFolderBrowser) { FolderBrowserSheet(store: store) }
     }
 
@@ -672,7 +676,7 @@ struct CopyStepView: View {
 // MARK: - Server picker (our protocol — Bonjour discovery + share listing, no mount)
 
 struct ServerPickerSheet: View {
-    @ObservedObject var store: DedupStore
+    let onPick: (String, String) -> Void      // (host, share)
     @Environment(\.dismiss) private var dismiss
     @StateObject private var browser = SMBServerBrowser()
     @State private var manualHost = ""
@@ -688,7 +692,7 @@ struct ServerPickerSheet: View {
             if let shares {
                 List(shares, id: \.self) { s in
                     Button {
-                        store.setShareAddress("smb://\(pickedHost)/\(s)")
+                        onPick(pickedHost, s)
                         dismiss()
                     } label: {
                         Label(s, systemImage: "externaldrive.connected.to.line.below")

@@ -105,6 +105,48 @@ final class DirectSMBClient: @unchecked Sendable {
         return out
     }
 
+    struct Entry: Identifiable, Hashable {
+        let name: String
+        let isDir: Bool
+        let size: Int64
+        let date: Date?
+        var id: String { name }
+    }
+
+    /// Full listing of a folder — files and folders, sizes and dates
+    /// (dot-entries hidden). Folders first, then by name.
+    func listEntries(dir: String) async throws -> [Entry] {
+        let m = try await ensure()
+        let items = try await m.contentsOfDirectory(atPath: dir)
+        return items.compactMap { it -> Entry? in
+            guard let name = it[.nameKey] as? String, !name.hasPrefix(".") else { return nil }
+            let isDir = (it[.isDirectoryKey] as? Bool)
+                ?? ((it[.fileResourceTypeKey] as? URLFileResourceType) == .directory)
+            return Entry(name: name, isDir: isDir,
+                         size: Self.asInt64(it[.fileSizeKey]),
+                         date: it[.contentModificationDateKey] as? Date)
+        }
+        .sorted {
+            if $0.isDir != $1.isDir { return $0.isDir }
+            return $0.name.lowercased() < $1.name.lowercased()
+        }
+    }
+
+    /// Create one folder, surfacing the real error (unlike mkdirs, which is
+    /// deliberately forgiving for copy destinations).
+    func createFolder(_ path: String) async throws {
+        try await ensure().createDirectory(atPath: path)
+    }
+
+    /// Rename/move that refuses to replace anything — the manager's version.
+    func moveNoReplace(_ from: String, to: String) async throws {
+        let m = try await ensure()
+        if (try? await m.attributesOfItem(atPath: to)) != nil {
+            throw Self.error("“\((to as NSString).lastPathComponent)” already exists there")
+        }
+        try await m.moveItem(atPath: from, toPath: to)
+    }
+
     /// List just the sub-folders of a folder (dot-folders hidden), sorted.
     /// "" lists the share root.
     func listFolders(dir: String) async throws -> [String] {
