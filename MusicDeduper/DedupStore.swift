@@ -731,7 +731,7 @@ final class DedupStore: ObservableObject {
         }
         await self.setNote("")
         if copied {
-            let s = sweep ? counters.recordSweepOK() : counters.recordOK(clean: attempt == 0)
+            let s = sweep ? counters.recordSweepOK() : counters.recordOK(clean: attempt == 0, bytes: t.size)
             let suffix = attempt > 0 ? "  (after \(attempt) retr\(attempt == 1 ? "y" : "ies"))" : ""
             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
                               line: "\(sweep ? "⟲ swept " : "✓ ")\(sanitizeName(t.displayArtist))/\(sanitizeName(t.album))/\(t.name)\(suffix)")
@@ -788,10 +788,10 @@ final class DedupStore: ObservableObject {
             if ejectMount {
                 await self.opLogLine("⏏ " + Self.unmountVolume(containing: dest))
             }
-            // independent sessions per worker; 4 proved the sweet spot in testing
-            // (6 gained nothing against the old Samba on the other end)
-            let counters = CopyCounters(baseLimit: 4, maxLimit: 4)
-            await self.setStreamLimit(4)
+            // independent sessions per worker; the throughput hill-climber finds
+            // the best stream count on the fly (starts at 2, roams 2–6)
+            let counters = CopyCounters(baseLimit: 2, maxLimit: 6, adaptive: true)
+            await self.setStreamLimit(2)
 
             // Preflight: dial the server before feeding files.
             var connected = client.isConnected
@@ -828,7 +828,7 @@ final class DedupStore: ObservableObject {
                 var inFlight = 0
                 var dirCache: [String: [String: Int64]] = [:]
                 var claimedTargets = Set<String>()
-                var lastLimit = 4
+                var lastLimit = 2
                 for t in keepers {
                     if box.cancelled { break }
 
@@ -975,7 +975,7 @@ final class DedupStore: ObservableObject {
         }
         await self.setNote("")
         if copied {
-            let s = sweep ? counters.recordSweepOK() : counters.recordOK(clean: attempt == 0)
+            let s = sweep ? counters.recordSweepOK() : counters.recordOK(clean: attempt == 0, bytes: t.size)
             let suffix = attempt > 0 ? "  (after \(attempt) retr\(attempt == 1 ? "y" : "ies"))" : ""
             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
                               line: "\(sweep ? "⟲ swept " : "✓ ")\(sanitizeName(t.displayArtist))/\(sanitizeName(t.album))/\(t.name)\(suffix)")
@@ -1012,26 +1012,73 @@ final class CopyCounters: @unchecked Sendable {
     private let maxLimit: Int
     private var limit: Int
 
-    init(baseLimit: Int = 3, maxLimit: Int = 4) {
+    // throughput-driven hill-climbing (adaptive mode): measure bytes/sec over a
+    // rolling window; a window that beats the last by ~8% earns one more stream,
+    // a clearly worse one gives a stream back and holds a while before probing again
+    private let adaptive: Bool
+    private var windowBytes: Int64 = 0
+    private var windowFiles = 0
+    private var windowStart = Date()
+    private var lastRate: Double?
+    private var holdWindows = 0
+
+    init(baseLimit: Int = 3, maxLimit: Int = 4, adaptive: Bool = false) {
         self.baseLimit = baseLimit
         self.maxLimit = maxLimit
         self.limit = baseLimit
+        self.adaptive = adaptive
     }
 
     var consecutiveFailCount: Int { lock.lock(); defer { lock.unlock() }; return consec }
     func resetConsecutive() { lock.lock(); consec = 0; lock.unlock() }
 
-    /// Current parallel-worker limit (base, rising to max after 20 clean files).
+    /// Current parallel-worker limit.
     var currentLimit: Int { lock.lock(); defer { lock.unlock() }; return limit }
-    /// Any failed copy attempt (even one that later succeeds) drops back to base.
-    func noteRetry() { lock.lock(); cleanStreak = 0; limit = baseLimit; lock.unlock() }
+    /// Any failed copy attempt (even one that later succeeds) costs a stream.
+    func noteRetry() {
+        lock.lock()
+        cleanStreak = 0
+        limit = adaptive ? max(baseLimit, limit - 1) : baseLimit
+        if adaptive { windowBytes = 0; windowFiles = 0; windowStart = Date(); holdWindows = 2 }
+        lock.unlock()
+    }
 
-    func recordOK(clean: Bool) -> Snap {
+    func recordOK(clean: Bool, bytes: Int64 = 0) -> Snap {
         lock.lock(); defer { lock.unlock() }
         ok += 1; done += 1; consec = 0
-        if clean { cleanStreak += 1; if cleanStreak >= 20 { limit = maxLimit } }
-        else { cleanStreak = 0; limit = baseLimit }
+        if adaptive {
+            if clean {
+                windowBytes += bytes; windowFiles += 1
+                let dt = Date().timeIntervalSince(windowStart)
+                if windowFiles >= 6 && dt >= 10 {
+                    tuneLocked(rate: Double(windowBytes) / dt)
+                    windowBytes = 0; windowFiles = 0; windowStart = Date()
+                }
+            }
+        } else {
+            if clean { cleanStreak += 1; if cleanStreak >= 20 { limit = maxLimit } }
+            else { cleanStreak = 0; limit = baseLimit }
+        }
         return Snap(done: done, ok: ok, skip: skip, fail: fail)
+    }
+
+    private func tuneLocked(rate: Double) {
+        if holdWindows > 0 { holdWindows -= 1; lastRate = rate; return }
+        guard let last = lastRate else {
+            lastRate = rate
+            limit = min(maxLimit, limit + 1)   // first measurement: probe upward
+            return
+        }
+        if rate > last * 1.08 {
+            lastRate = rate
+            limit = min(maxLimit, limit + 1)   // faster: keep climbing
+        } else if rate < last * 0.90 {
+            limit = max(baseLimit, limit - 1)  // slower: give one back, settle
+            lastRate = rate
+            holdWindows = 3
+        } else {
+            lastRate = (last + rate) / 2       // plateau: hold where we are
+        }
     }
     func recordSkip() -> Snap {
         lock.lock(); defer { lock.unlock() }
