@@ -783,7 +783,7 @@ struct ServerPickerSheet: View {
             } catch {
                 await MainActor.run {
                     connecting = false
-                    errorMsg = "Couldn't connect to \(h): \(error.localizedDescription)"
+                    errorMsg = DirectSMBClient.friendly(error, host: h)
                 }
             }
         }

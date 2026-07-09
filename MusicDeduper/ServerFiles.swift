@@ -109,7 +109,7 @@ final class PaneModel: ObservableObject {
                     self.loading = false
                 } catch {
                     self.items = []
-                    self.errorMsg = error.localizedDescription
+                    self.errorMsg = DirectSMBClient.friendly(error, host: client.host)
                     self.loading = false
                 }
             }
