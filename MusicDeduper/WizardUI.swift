@@ -755,7 +755,12 @@ struct ServerPickerSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack {
-                if shares != nil { Button("Back") { shares = nil; errorMsg = nil } }
+                if shares != nil {
+                    Button("Back") { shares = nil; errorMsg = nil }
+                } else {
+                    Button { browser.rescan() } label: { Label("Rescan", systemImage: "arrow.clockwise") }
+                        .disabled(browser.scanning)
+                }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
             }

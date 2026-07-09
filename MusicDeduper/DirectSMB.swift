@@ -282,10 +282,17 @@ final class SMBServerBrowser: ObservableObject {
     @Published var servers: [SMBServer] = []
     @Published var scanning = false
     private var browser: NWBrowser?
-    private var probes: [NWConnection] = []
+    private var live: [String: NWConnection] = [:]   // ip → in-flight probe
+    // servers seen this session, so reopening the picker shows them at once
+    private static var remembered: [SMBServer] = []
+    private var generation = 0                        // invalidates an old scan's callbacks
 
     func start() {
         stop()
+        servers = Self.remembered      // show what we already know immediately
+        generation += 1
+        let gen = generation
+
         // 1) Bonjour
         let b = NWBrowser(for: .bonjour(type: "_smb._tcp", domain: nil), using: NWParameters())
         b.browseResultsChangedHandler = { [weak self] results, _ in
@@ -295,65 +302,77 @@ final class SMBServerBrowser: ObservableObject {
                 }
                 return nil
             }
-            Task { @MainActor in
-                guard let self else { return }
-                for s in found where !self.servers.contains(where: { $0.host == s.host }) {
-                    self.servers.append(s)
-                    self.servers.sort { $0.display.lowercased() < $1.display.lowercased() }
-                }
-            }
+            Task { @MainActor in self?.merge(found) }
         }
         b.start(queue: .main)
         browser = b
-        // 2) subnet sweep for port 445
-        scanSubnet()
+        // 2) subnet sweep, bounded so we never open hundreds of sockets at once
+        scanSubnet(gen: gen)
     }
 
     func stop() {
+        generation += 1                // orphan any pending callbacks
         browser?.cancel(); browser = nil
-        for p in probes { p.cancel() }
-        probes = []
+        for c in live.values { c.cancel() }
+        live = [:]
         scanning = false
     }
 
-    private func scanSubnet() {
+    private func scanSubnet(gen: Int) {
         guard let (base, myIP) = Self.localIPv4Base() else { return }
         scanning = true
         let queue = DispatchQueue(label: "smb-scan", attributes: .concurrent)
-        var remaining = 0
-        for i in 1...254 {
-            let ip = "\(base).\(i)"
-            if ip == myIP { continue }
-            remaining += 1
+        var pending = Array(1...254).map { "\(base).\($0)" }.filter { $0 != myIP }
+        let maxConcurrent = 24         // gentle on the network stack; still fast
+
+        func launchNext() {
+            guard gen == self.generation else { return }
+            guard !pending.isEmpty else {
+                if live.isEmpty { scanning = false }
+                return
+            }
+            let ip = pending.removeFirst()
             let tcp = NWProtocolTCP.Options()
             tcp.connectionTimeout = 2
             let conn = NWConnection(host: NWEndpoint.Host(ip), port: 445,
                                     using: NWParameters(tls: nil, tcp: tcp))
+            live[ip] = conn
             conn.stateUpdateHandler = { [weak self] st in
                 switch st {
                 case .ready:
-                    conn.cancel()
-                    Task { @MainActor in self?.addScanned(ip: ip) }
-                    Task { @MainActor in self?.probeDone() }
-                case .failed:
-                    conn.cancel()
-                    Task { @MainActor in self?.probeDone() }
+                    Task { @MainActor in self?.finishProbe(ip: ip, gen: gen, found: true, launch: launchNext) }
+                case .failed, .cancelled:
+                    Task { @MainActor in self?.finishProbe(ip: ip, gen: gen, found: false, launch: launchNext) }
                 default:
                     break
                 }
             }
-            probes.append(conn)
             conn.start(queue: queue)
         }
-        let total = remaining
-        Task { @MainActor in self.probeTotal = total }
+        // prime the pump
+        for _ in 0..<maxConcurrent { launchNext() }
     }
 
-    private var probeTotal = 0
-    private var probeCount = 0
-    private func probeDone() {
-        probeCount += 1
-        if probeCount >= probeTotal { scanning = false }
+    private func finishProbe(ip: String, gen: Int, found: Bool, launch: () -> Void) {
+        guard gen == generation else { return }
+        if let c = live.removeValue(forKey: ip) { c.cancel() }
+        if found { addScanned(ip: ip) }
+        launch()
+        if pendingIsIdle() { scanning = false }
+    }
+    private func pendingIsIdle() -> Bool { live.isEmpty }
+
+    func rescan() {
+        Self.remembered = []
+        start()
+    }
+
+    private func merge(_ found: [SMBServer]) {
+        for s in found where !servers.contains(where: { $0.host == s.host }) {
+            servers.append(s)
+        }
+        servers.sort { $0.display.lowercased() < $1.display.lowercased() }
+        Self.remembered = servers
     }
 
     private func addScanned(ip: String) {
@@ -363,18 +382,19 @@ final class SMBServerBrowser: ObservableObject {
         // the background and upgrades the label when (if) it answers
         servers.append(SMBServer(host: ip, display: ip))
         servers.sort { $0.display.lowercased() < $1.display.lowercased() }
+        Self.remembered = servers
         Task.detached { [weak self] in
             guard let name = Self.reverseName(ip) else { return }
             let short = String(name.split(separator: ".").first ?? "")
             await MainActor.run {
                 guard let self else { return }
                 if self.servers.contains(where: { $0.display.lowercased() == short.lowercased() }) {
-                    // a Bonjour entry already shows this box — drop the duplicate
                     self.servers.removeAll { $0.host == ip }
                 } else if let idx = self.servers.firstIndex(where: { $0.host == ip }) {
                     self.servers[idx] = SMBServer(host: ip, display: "\(short)  (\(ip))")
                     self.servers.sort { $0.display.lowercased() < $1.display.lowercased() }
                 }
+                Self.remembered = self.servers
             }
         }
     }
