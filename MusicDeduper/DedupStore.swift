@@ -130,6 +130,7 @@ final class DedupStore: ObservableObject {
         opActive = true; opFinished = false; opTitle = title
         opTotal = total; opDone = 0; opOK = 0; opSkip = 0; opFail = 0; opLog = []; opNote = ""
         opActiveStreams = 0; opStreamLimit = 0    // runCopy raises the limit for copy ops
+        opStartDate = Date(); opBytesDone = 0; opBytesTotal = 0
         openRunLog(title: title)
         busy = true
         if activity == nil {
@@ -373,6 +374,16 @@ final class DedupStore: ObservableObject {
     private func workerDelta(_ d: Int) { opActiveStreams += d }
     private func setStreamLimit(_ n: Int) { opStreamLimit = n }
 
+    // byte accounting for the elapsed/rate/ETA footer
+    @Published var opStartDate: Date?
+    @Published var opBytesDone: Int64 = 0
+    @Published var opBytesTotal: Int64 = 0
+    private func addBytesDone(_ n: Int64, restoreTotal: Bool = false) {
+        opBytesDone += n
+        if restoreTotal { opBytesTotal += n }   // a swept file re-enters the estimate
+    }
+    private func dropFromTotal(_ n: Int64) { opBytesTotal = max(0, opBytesTotal - n) }
+
     // auto-pause: the run pauses itself after this many consecutive failures
     // (the server has clearly gone away — grinding on just multiplies timeouts)
     private static let pauseAfterConsecutiveFails = 3
@@ -428,6 +439,7 @@ final class DedupStore: ObservableObject {
         opPaused = false
         opActiveStreams = 0
         opStreamLimit = 3
+        opBytesTotal = keepers.reduce(0) { $0 + $1.size }
         let box = cancelBox
         let conflicts = conflictBox
         conflicts.reset()
@@ -533,6 +545,7 @@ final class DedupStore: ObservableObject {
                         let s = counters.recordSkip()
                         await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
                                           line: "• skipped \(t.name) — another selected track already copies to this exact destination")
+                        await self.dropFromTotal(t.size)
                         continue
                     }
 
@@ -580,6 +593,7 @@ final class DedupStore: ObservableObject {
                             let s = counters.recordSkip()
                             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
                                               line: "• kept existing \(t.name)\(identical ? " (identical size)" : "")")
+                            await self.dropFromTotal(t.size)
                             continue
                         }
                         // overwrite falls through to the copy below (target removed there)
@@ -735,11 +749,13 @@ final class DedupStore: ObservableObject {
             let suffix = attempt > 0 ? "  (after \(attempt) retr\(attempt == 1 ? "y" : "ies"))" : ""
             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
                               line: "\(sweep ? "⟲ swept " : "✓ ")\(sanitizeName(t.displayArtist))/\(sanitizeName(t.album))/\(t.name)\(suffix)")
+            await self.addBytesDone(t.size, restoreTotal: sweep)
         } else if !box.cancelled {
             // out of attempts — record it; the lead loop may auto-pause
             let s = sweep ? counters.recordSweepFail(t.id) : counters.recordFail(t.id)
             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
                               line: "✗ \(t.name) — \(sweep ? "still failing after the sweep" : "failed after \(maxAttempts) tries")")
+            if !sweep { await self.dropFromTotal(t.size) }
         }
         await self.workerDelta(-1)
     }
@@ -764,6 +780,7 @@ final class DedupStore: ObservableObject {
         opPaused = false
         opActiveStreams = 0
         opStreamLimit = 3
+        opBytesTotal = keepers.reduce(0) { $0 + $1.size }
         let box = cancelBox
         let conflicts = conflictBox
         conflicts.reset()
@@ -851,6 +868,7 @@ final class DedupStore: ObservableObject {
                         let s = counters.recordSkip()
                         await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
                                           line: "• skipped \(t.name) — another selected track already copies to this exact destination")
+                        await self.dropFromTotal(t.size)
                         continue
                     }
 
@@ -879,6 +897,7 @@ final class DedupStore: ObservableObject {
                             let s = counters.recordSkip()
                             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
                                               line: "• kept existing \(t.name)\(identical ? " (identical size)" : "")")
+                            await self.dropFromTotal(t.size)
                             continue
                         }
                     }
@@ -979,10 +998,12 @@ final class DedupStore: ObservableObject {
             let suffix = attempt > 0 ? "  (after \(attempt) retr\(attempt == 1 ? "y" : "ies"))" : ""
             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
                               line: "\(sweep ? "⟲ swept " : "✓ ")\(sanitizeName(t.displayArtist))/\(sanitizeName(t.album))/\(t.name)\(suffix)")
+            await self.addBytesDone(t.size, restoreTotal: sweep)
         } else if !box.cancelled {
             let s = sweep ? counters.recordSweepFail(t.id) : counters.recordFail(t.id)
             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
                               line: "✗ \(t.name) — \(sweep ? "still failing after the sweep" : "failed after \(maxAttempts) tries")")
+            if !sweep { await self.dropFromTotal(t.size) }
         }
         await self.workerDelta(-1)
     }

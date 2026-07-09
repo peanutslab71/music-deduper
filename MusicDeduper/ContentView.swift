@@ -328,6 +328,16 @@ struct OperationSheet: View {
                 Text("✓ \(store.opOK)    • \(store.opSkip)    ✗ \(store.opFail)").foregroundStyle(.secondary)
             }
             .font(.caption).monospaced()
+            // ticking elapsed / rate / ETA footer (copy runs only)
+            if let start = store.opStartDate, store.opStreamLimit > 0, !store.opFinished {
+                TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                    Text(Self.statsLine(now: ctx.date, start: start,
+                                        bytesDone: store.opBytesDone, bytesTotal: store.opBytesTotal,
+                                        filesDone: store.opDone))
+                        .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
             if !store.opNote.isEmpty {
                 Text(store.opNote)
                     .font(.caption)
@@ -390,5 +400,32 @@ struct OperationSheet: View {
         .padding(16)
         .frame(width: 580)
         .interactiveDismissDisabled(!store.opFinished)
+    }
+
+    private static let etaClock: DateFormatter = {
+        let f = DateFormatter(); f.timeStyle = .short; f.dateStyle = .none; return f
+    }()
+
+    private static func fmtClock(_ t: TimeInterval) -> String {
+        let s = Int(t.rounded())
+        return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60)
+                         : String(format: "%d:%02d", s / 60, s % 60)
+    }
+
+    static func statsLine(now: Date, start: Date, bytesDone: Int64, bytesTotal: Int64,
+                          filesDone: Int) -> String {
+        let elapsed = max(1, now.timeIntervalSince(start))
+        var s = "⏱ \(fmtClock(elapsed))"
+        guard bytesDone > 0, elapsed >= 3 else { return s + "  ·  estimating…" }
+        let rate = Double(bytesDone) / elapsed
+        s += "  ·  \(fmtBytes(Int64(rate)))/s"
+        if filesDone > 0 {
+            s += "  ·  avg \(String(format: "%.1f", elapsed / Double(filesDone)))s/file"
+        }
+        if bytesTotal > bytesDone {
+            let left = Double(bytesTotal - bytesDone) / rate
+            s += "  ·  ~\(fmtClock(left)) left  ·  finishes ≈ \(etaClock.string(from: now.addingTimeInterval(left)))"
+        }
+        return s
     }
 }
