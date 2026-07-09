@@ -89,11 +89,17 @@ library isn't touched — this builds a clean copy alongside it.
 This is the step I built for feeding a Roon server: point it at the mounted network
 share and let it run.
 
-**If you're copying to a Roon ROCK server, stop the Roon Server first — from inside
-Roon's web UI (the ROCK admin page) — before starting the copy.** Roon watches its
-music folder live, and a large copy landing while the server is running can cause it
-to stop or hang. Stop the server, run the copy, then start it again and let it import
-the new files in one go.
+**If you're copying to a Roon ROCK server, Roon Server must be stopped first.** Roon
+watches its music folder live, and a large copy landing while the server is running
+can cause it to stop or hang.
+
+From v1.1 the app enforces this itself: when you pick a copy destination it checks
+whether that machine is a ROCK with Roon Server running (using the same local API as
+the ROCK's own settings page). If it is, the copy will not start — you'll be offered
+**Stop Roon Server, then copy** (the app stops it, waits for confirmation, then runs
+the copy) or **Cancel**. There is deliberately no "copy anyway". When the copy
+finishes, the app offers to **start Roon Server again** so it imports all the new
+files in one clean pass.
 
 Two other behaviours worth knowing:
 

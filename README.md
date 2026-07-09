@@ -21,6 +21,10 @@ each, and lets you review everything before a single file is touched.
 - **Copy keepers to…** rebuilds a clean Artist/Album tree at any destination — handy
   for populating a Roon server or NAS share. Files already there are skipped, and if
   the network share drops mid-copy the app can re-mount and carry on.
+- **ROCK-aware copying** (v1.1): if the destination is a Roon ROCK server with Roon
+  Server running, the copy is blocked — copying under a live server can hang it. The
+  app offers to stop Roon Server for you, runs the copy, then offers to start it
+  again so it imports everything in one clean pass.
 
 There's a full walkthrough in [USAGE.md](USAGE.md).
 

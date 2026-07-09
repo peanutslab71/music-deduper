@@ -14,6 +14,14 @@ struct ContentView: View {
     @State private var deletePhase: DeletePhase = .none
     @State private var chosenMode: DeleteMode = .trash
 
+    // ROCK copy gate — copying into a ROCK share while Roon Server runs can
+    // hang it, so the copy is blocked until the server is stopped. No bypass.
+    struct RockPrompt: Identifiable { let id = UUID(); let host: String; let dest: URL }
+    @State private var rockPrompt: RockPrompt? = nil
+    @State private var rockStopFailedHost: String? = nil
+    @State private var rockRestartHost: String? = nil          // offer to start again after the copy
+    @State private var restartHostAfterCopy: String? = nil     // we stopped it for this copy
+
     var body: some View {
         VStack(spacing: 0) {
             toolbar
@@ -64,6 +72,40 @@ struct ContentView: View {
         // progress dialog for copy / delete, with live log + Cancel
         .sheet(isPresented: $store.opActive) {
             OperationSheet(store: store)
+        }
+        // ROCK gate: Roon Server MUST be stopped before copying into a ROCK share
+        .alert("Roon Server is running",
+               isPresented: Binding(get: { rockPrompt != nil },
+                                    set: { if !$0 { rockPrompt = nil } }),
+               presenting: rockPrompt) { p in
+            Button("Stop Roon Server, then copy") { stopRoonThenCopy(p) }
+            Button("Cancel", role: .cancel) { rockPrompt = nil }
+        } message: { p in
+            Text("The destination is a Roon ROCK server (\(p.host)) and Roon Server is running. Copying while it runs can cause it to stop or hang, so it must be stopped first. The app can stop it now and will offer to start it again when the copy finishes.")
+        }
+        .alert("Couldn't stop Roon Server",
+               isPresented: Binding(get: { rockStopFailedHost != nil },
+                                    set: { if !$0 { rockStopFailedHost = nil } }),
+               presenting: rockStopFailedHost) { host in
+            Button("Open ROCK settings page") {
+                if let u = URL(string: "http://\(host)/") { NSWorkspace.shared.open(u) }
+            }
+            Button("OK", role: .cancel) { }
+        } message: { host in
+            Text("The ROCK at \(host) did not report Roon Server as stopped. Stop it manually from its settings page, then start the copy again.")
+        }
+        .alert("Start Roon Server again?",
+               isPresented: Binding(get: { rockRestartHost != nil },
+                                    set: { if !$0 { rockRestartHost = nil } }),
+               presenting: rockRestartHost) { host in
+            Button("Start Roon Server") { startRoonAgain(host) }
+            Button("Not now", role: .cancel) { }
+        } message: { host in
+            Text("The copy has finished. Roon Server on \(host) was stopped for the copy — start it again now so it can import the new files?")
+        }
+        .onChange(of: store.opActive) { active in
+            // when the copy's progress sheet closes, offer to restart the server we stopped
+            if !active, let h = restartHostAfterCopy { restartHostAfterCopy = nil; rockRestartHost = h }
         }
     }
 
@@ -278,8 +320,112 @@ struct ContentView: View {
         p.prompt = "Choose"; p.message = "Choose output folder (e.g. a mounted ROCK / NAS share)"
         if p.runModal() == .OK, let dest = p.url {
             captureRemountAddress(from: dest)   // keep the auto-reconnect address in sync
-            store.copyKeepers(to: dest)
+            Task { @MainActor in await guardedCopy(to: dest) }
         }
+    }
+
+    /// If the destination is a ROCK with Roon Server running, block the copy
+    /// until the server is stopped (no bypass). Anything that isn't a ROCK —
+    /// local folder, plain NAS, no answer on the admin port — copies as before.
+    @MainActor private func guardedCopy(to dest: URL) async {
+        if let host = RockGuard.hostForDestination(dest, smbAddress: store.smbAddress) {
+            store.status = "Checking \(host) for a running Roon Server…"
+            let state = await RockGuard.getState(host: host)
+            store.status = ""
+            if let s = state, s.isRock, s.roonRunning {
+                rockPrompt = RockPrompt(host: host, dest: dest)
+                return
+            }
+        }
+        store.copyKeepers(to: dest)
+    }
+
+    private func stopRoonThenCopy(_ p: RockPrompt) {
+        rockPrompt = nil
+        Task { @MainActor in
+            store.status = "Stopping Roon Server on \(p.host)…"
+            let stopped = await RockGuard.stopRoon(host: p.host)
+            store.status = ""
+            if stopped {
+                restartHostAfterCopy = p.host
+                store.copyKeepers(to: p.dest)
+            } else {
+                rockStopFailedHost = p.host
+            }
+        }
+    }
+
+    private func startRoonAgain(_ host: String) {
+        Task { @MainActor in
+            store.status = await RockGuard.startRoon(host: host)
+                ? "Roon Server starting on \(host)."
+                : "Couldn't reach \(host) — start Roon Server from its settings page."
+        }
+    }
+}
+
+// MARK: - ROCK admin API client
+
+/// Minimal client for the Roon ROCK web-admin API — the same endpoints the
+/// device's own Settings page calls (POST /1/getstate, /1/stop, /1/restart).
+/// Used to gate copies: a mass copy into a ROCK share while Roon Server is
+/// running can make it stop or hang, so the server must be stopped first.
+enum RockGuard {
+    struct State { let isRock: Bool; let roonRunning: Bool; let model: String }
+
+    /// Host to probe for a given copy destination: the smb:// remount host of
+    /// the destination's volume. Falls back to the reconnect-target address
+    /// only for network volumes (never probes for purely local destinations).
+    static func hostForDestination(_ dest: URL, smbAddress: String) -> String? {
+        if let vals = try? dest.resourceValues(forKeys: [.volumeURLForRemountingKey]),
+           let remount = vals.volumeURLForRemounting, let h = remount.host {
+            return h
+        }
+        if dest.path.hasPrefix("/Volumes/"),
+           let u = URL(string: smbAddress), let h = u.host {
+            return h
+        }
+        return nil
+    }
+
+    static func getState(host: String) async -> State? {
+        guard let data = await post(host: host, path: "1/getstate", timeout: 2.5),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (obj["status"] as? String) == "Success",
+              let d = obj["data"] as? [String: Any] else { return nil }
+        let vendor = d["device_vendor"] as? String ?? ""
+        let model = d["device_model"] as? String ?? ""
+        let st = d["state"] as? [String: Any]
+        let running = st?["roon_running"] as? Bool ?? false
+        let isRock = vendor.localizedCaseInsensitiveContains("roon")
+                  || model.localizedCaseInsensitiveContains("core kit")
+        return State(isRock: isRock, roonRunning: running, model: model)
+    }
+
+    /// Ask the ROCK to stop Roon Server, then poll until it reports stopped.
+    /// Returns false if the stop wasn't confirmed within ~30 seconds.
+    static func stopRoon(host: String) async -> Bool {
+        guard await post(host: host, path: "1/stop", timeout: 10) != nil else { return false }
+        for _ in 0..<20 {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if let s = await getState(host: host), !s.roonRunning { return true }
+        }
+        return false
+    }
+
+    static func startRoon(host: String) async -> Bool {
+        await post(host: host, path: "1/restart", timeout: 10) != nil
+    }
+
+    private static func post(host: String, path: String, timeout: TimeInterval) async -> Data? {
+        guard let url = URL(string: "http://\(host)/\(path)") else { return nil }
+        var req = URLRequest(url: url, timeoutInterval: timeout)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Data("{}".utf8)
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+        return data
     }
 }
 

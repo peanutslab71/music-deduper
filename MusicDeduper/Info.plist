@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The ROCK admin API is plain HTTP on the LAN; allow local-network cleartext only. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<!-- macOS local-network privacy prompt (Sequoia+) -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Music Deduper contacts your Roon ROCK server on the local network to check whether Roon Server is running before copying music to it, and to stop/start it around the copy.</string>
+</dict>
+</plist>
