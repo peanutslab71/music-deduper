@@ -1,6 +1,8 @@
 # Using Music Deduper
 
-A walkthrough of the whole workflow, from first scan to a clean library.
+A walkthrough of the whole workflow, from first scan to a clean library. The app is
+a four-step wizard — **Source → Review → Clean up → Copy** — with the step bar across
+the top. Steps unlock once a scan has run, and you can hop back to any completed step.
 
 One piece of advice before anything else: **have a backup of your library before you
 delete anything.** The app is careful — keepers are never touched, deletes default to
@@ -10,15 +12,21 @@ And the formal bit: this software is provided free, **as is, with no warranty of
 kind, express or implied** — use it at your own risk. No liability is accepted for
 data loss or any other damage arising from its use. Full terms in the LICENSE file (MIT).
 
-## 1. Scan your library
+## 1. Source — scan your library
 
-Click **Pick source folder** and choose the top of your music library. The app walks
-the whole tree, reading the real tags and durations from each file (via AVFoundation),
-and then works out which tracks are copies of each other. The status bar at the bottom
-shows progress; big libraries take a few minutes on the first pass because the app also
+Drop your music folder onto the window (or **Browse…**). Recent folders are remembered
+as one-click links. The app walks the whole tree, reading the real tags and durations
+from each file (via AVFoundation), then works out which tracks are copies of each
+other. Big libraries take a few minutes on the first pass because the app also
 fingerprints file contents.
 
-**Rescan** repeats the scan on the same folder — use it after you've made changes.
+The **Matching options** disclosure (match mode, duration tolerance, across-albums)
+lives on this screen — change them and **Rescan** (top-right of the Review step).
+
+When the scan finishes you land on the right screen automatically: **Duplicates** if
+any were found, otherwise straight to the **Library** — an album-artwork grid of
+everything it found (covers come from your files' own tags; click an album for its
+track list).
 
 ## 2. Understand what it matched
 
@@ -31,7 +39,7 @@ Every duplicate group shows a reason:
   tolerance. This catches the same recording in different formats — an MP3 next to
   its FLAC replacement, for example.
 
-Three controls in the toolbar tune the matching:
+Three controls under **Matching options** (on the Source step) tune the matching:
 
 - **Match mode**
   - **Strict** — content fingerprints only. Every file is fingerprinted and only
@@ -46,12 +54,12 @@ Three controls in the toolbar tune the matching:
   an album track vs the same song on a compilation). Off by default; think before
   turning it on — a studio track and a best-of version may genuinely both be wanted.
 
-If you change any of these, hit **Rescan** to regroup.
+If you change any of these, hit **Rescan** (top-right of the Review step) to regroup.
 
 ## 3. Review the groups
 
-The **Duplicates** tab lists each group: artist and title, how many copies, why they
-matched, and how much space deleting the extras saves.
+The **Duplicates** tab lists each group with its album artwork: artist and title, how
+many copies, why they matched, and how much space deleting the extras saves.
 
 Inside a group, every file shows its format, duration, size and full path. One row is
 marked **KEEP** — the app's pick for the best copy. The choice is a quality ranking:
@@ -64,11 +72,12 @@ marked **KEEP** — the app's pick for the best copy. The choice is a quality ra
 **Click any other row to make it the keeper instead.** Do this wherever you know
 better than the ranking — say the "worse" file is the properly tagged one.
 
-The **Library** tab is a plain browser of everything the scan found — artist → album →
-track listing — useful for sanity-checking what's actually in the folder.
+The **Library** tab is an album-artwork grid of everything the scan found — click any
+album for its track listing. Useful for sanity-checking what's actually in the folder.
 
-## 4. Delete the duplicates
+## 4. Clean up — delete the duplicates
 
+The Clean up step shows the totals (groups, files to remove, space reclaimed).
 Click **Delete duplicates…** and pick:
 
 - **Move to Trash (recoverable)** — the sane default. You can pull anything back out.
@@ -82,12 +91,19 @@ A progress sheet shows ✓ done, • skipped and ✗ failed counts as it runs.
 
 ## 5. Copy keepers to a clean tree (optional)
 
-**Copy keepers to…** takes the best copy of every track and writes a tidy
-`Artist/Album/track` folder structure at whatever destination you choose. Your source
-library isn't touched — this builds a clean copy alongside it.
+The Copy step takes the best copy of every track and writes a tidy
+`Artist/Album/track` folder structure at a destination of your choice. Your source
+library isn't touched — this builds a clean copy alongside it. It's an explicit
+three-part sequence on one screen:
 
-This is the step I built for feeding a Roon server: point it at the mounted network
-share and let it run.
+1. **Where is your Roon server (or NAS)?** — browse to the share (Network → your
+   server → its music share). Picking it also captures the share's `smb://` address
+   for automatic reconnects (see below).
+2. **Which folder inside it?** — where the Artist/Album tree gets created.
+3. **Copy.**
+
+This is the step I built for feeding a Roon server: point it at the share and let
+it run.
 
 **If you're copying to a Roon ROCK server, Roon Server must be stopped first.** Roon
 watches its music folder live, and a large copy landing while the server is running
@@ -103,30 +119,17 @@ files in one clean pass.
 
 Two other behaviours worth knowing:
 
-- **Already-copied files are skipped** (matched by size), so you can re-run the copy
-  any time to top up a destination — it only transfers what's missing.
+- **Files that already exist ask first.** If a file is already at the destination —
+  identical or different — the copy pauses and shows a conflict panel:
+  **Overwrite / Overwrite All / Skip / Skip All**. Step file-by-file, or hit an
+  "All" button once and the rest runs unattended. (Topping up a destination =
+  first prompt → **Skip All**; refreshing everything = **Overwrite All**.)
+  Nothing is skipped or overwritten silently.
 - **Network drops don't kill the run.** Long copies to a network share are exactly
   where connections wobble; the app retries each file until it succeeds rather than
-  skipping, and can re-mount the share itself — see below.
-
-### Setting up "Reconnect target" for network copies
-
-If your destination is an SMB share (a Roon ROCK server, a NAS), set up the
-**Reconnect target (SMB guest)** row below the toolbar *before* starting a big copy:
-
-1. Click **Connect…** — a browse dialog opens.
-2. Navigate to the share under **Network** (e.g. Network → your server → **Data** for
-   a ROCK) and select it.
-3. The app reads the share's `smb://` remount address automatically and fills the
-   field — you don't need to type it (though you can, e.g. `smb://rock/Data`).
-
-The address is remembered between launches. With it set, if the share disconnects
-mid-copy — sleep, a network blip, the server restarting — the app re-mounts it as
-guest and carries on from where it was. Without it, a drop would leave the copy
-stuck retrying against a vanished folder.
-
-Connects as **guest**, so the share needs guest access enabled (ROCK's Data share
-has this out of the box).
+  skipping, and re-mounts the share itself using the address captured in part 1
+  (as **guest** — ROCK's Data share allows that out of the box). The address is
+  remembered between launches.
 
 ## Suggested first run
 

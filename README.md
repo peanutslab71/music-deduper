@@ -11,16 +11,20 @@ each, and lets you review everything before a single file is touched.
 
 ## What it does
 
-- Point it at your music folder and it scans every track — proper tags and durations
+A four-step wizard: **Source → Review → Clean up → Copy.**
+
+- Drop your music folder in and it scans every track — proper tags and durations
   read via AVFoundation, not filename guessing.
-- Duplicates are grouped and shown for review. The best copy in each group is marked
-  **KEEP** — lossless beats lossy, then higher bitrate, then better tags. Click any
-  row if you disagree.
-- **Delete duplicates…** sends the rest to the Trash (or deletes permanently, if you
+- Review lands where it should: duplicates grouped for review if there are any,
+  otherwise an **album-artwork grid** of your whole library. The best copy in each
+  group is marked **KEEP** — lossless beats lossy, then higher bitrate, then better
+  tags. Click any row if you disagree.
+- **Clean up** sends the duplicates to the Trash (or deletes permanently, if you
   ask twice). Keepers are never touched.
-- **Copy keepers to…** rebuilds a clean Artist/Album tree at any destination — handy
-  for populating a Roon server or NAS share. Files already there are skipped, and if
-  the network share drops mid-copy the app can re-mount and carry on.
+- **Copy** rebuilds a clean Artist/Album tree on a server or NAS share, as an
+  explicit sequence: locate the share → pick the folder → copy. Files that already
+  exist **ask first** (Overwrite / Skip, each or All — nothing silent), and if the
+  network share drops mid-copy the app re-mounts it and carries on.
 - **ROCK-aware copying** (v1.1): if the destination is a Roon ROCK server with Roon
   Server running, the copy is blocked — copying under a live server can hang it. The
   app offers to stop Roon Server for you, runs the copy, then offers to start it
