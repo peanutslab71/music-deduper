@@ -116,14 +116,17 @@ A few of macOS's SMB client defaults hurt small servers:
 - it tries **multichannel** (parallel connections), which simple servers
   often mishandle, causing stalls and session drops;
 - it subscribes to **change notifications** from the server — constant
-  chatter that basic servers handle badly.
+  chatter that basic servers handle badly;
+- it **caches directory listings**, which go stale (or outright corrupt)
+  against old servers — Apple documents turning this off for third-party
+  servers in support article 101918.
 
-All three are fixed with one small system config file. The repo includes
+All four are fixed with one small system config file. The repo includes
 [`tune-smb.sh`](tune-smb.sh), which does it with a backup and an undo note,
 or do it by hand — open Terminal and paste:
 
 ```
-printf '[default]\nsigning_required=no\nmc_on=no\nnotify_off=yes\n' | sudo tee /etc/nsmb.conf
+printf '[default]\nsigning_required=no\nmc_on=no\nnotify_off=yes\ndir_cache_off=yes\n' | sudo tee /etc/nsmb.conf
 ```
 
 (One tempting setting to avoid: `max_resp_timeout`. Raising it sounds like
