@@ -38,6 +38,13 @@ A signed and notarized build is available from
 [my profile page on AllSports.World](https://allsports.world/profiles/neilcotty/) —
 open the DMG, drag the app to Applications. Needs macOS 13 (Ventura) or later.
 
+## Problems or ideas?
+
+Report bugs and requests on the
+[GitHub issues page](https://github.com/peanutslab71/music-deduper/issues) —
+include your macOS version and, for copy problems, what the destination is
+(local folder, NAS, Roon ROCK).
+
 ## Building from source
 
 You'll need Xcode (free on the Mac App Store).
