@@ -273,23 +273,22 @@ struct SMBServer: Identifiable, Hashable {
     var id: String { host }
 }
 
-/// Finds SMB servers two ways at once: Bonjour (modern Macs/NASes advertise
-/// there) AND an active sweep of the local subnet for machines answering on
-/// the SMB port — old servers like Roon ROCK's 2015 Samba only announce via
-/// NetBIOS, which Bonjour never sees, but they all answer port 445.
+/// Finds SMB servers two gentle ways: Bonjour (modern Macs/NASes advertise
+/// there) AND a NetBIOS name broadcast — one UDP packet that old servers like
+/// Roon ROCK answer with their names. NetBIOS is how Finder finds these boxes;
+/// a single broadcast can't look like a port scan, so it never trips a router's
+/// intrusion protection (which a 254-address connection sweep does).
 @MainActor
 final class SMBServerBrowser: ObservableObject {
     @Published var servers: [SMBServer] = []
     @Published var scanning = false
     private var browser: NWBrowser?
-    private var live: [String: NWConnection] = [:]   // ip → in-flight probe
-    // servers seen this session, so reopening the picker shows them at once
     private static var remembered: [SMBServer] = []
-    private var generation = 0                        // invalidates an old scan's callbacks
+    private var generation = 0
 
     func start() {
         stop()
-        servers = Self.remembered      // show what we already know immediately
+        servers = Self.remembered
         generation += 1
         let gen = generation
 
@@ -306,67 +305,26 @@ final class SMBServerBrowser: ObservableObject {
         }
         b.start(queue: .main)
         browser = b
-        // 2) subnet sweep, bounded so we never open hundreds of sockets at once
-        scanSubnet(gen: gen)
+
+        // 2) NetBIOS broadcast — one packet, off the main thread
+        scanning = true
+        Task.detached { [weak self] in
+            let hits = NetBIOS.discover(seconds: 3)
+            await MainActor.run {
+                guard let self, gen == self.generation else { return }
+                for hit in hits {
+                    self.merge([SMBServer(host: hit.ip,
+                                          display: hit.name.map { "\($0)  (\(hit.ip))" } ?? hit.ip)])
+                }
+                self.scanning = false
+            }
+        }
     }
 
     func stop() {
-        generation += 1                // orphan any pending callbacks
+        generation += 1
         browser?.cancel(); browser = nil
-        for c in live.values { c.cancel() }
-        live = [:]
         scanning = false
-    }
-
-    private var scanPending: [String] = []
-    private var scanDone = Set<String>()   // ips already accounted for (idempotent)
-
-    private func scanSubnet(gen: Int) {
-        guard let (base, myIP) = Self.localIPv4Base() else { return }
-        scanning = true
-        scanDone = []
-        scanPending = Array(1...254).map { "\(base).\($0)" }.filter { $0 != myIP }
-        // Keep this modest: some home routers treat a burst of connection
-        // attempts as a SYN-flood and start dropping the source, which makes
-        // the scan find nothing. 12-at-a-time still sweeps a /24 in seconds.
-        let maxConcurrent = 12
-        for _ in 0..<maxConcurrent { launchProbe(gen: gen) }
-    }
-
-    private func launchProbe(gen: Int) {
-        guard gen == generation else { return }
-        guard !scanPending.isEmpty else {
-            if live.isEmpty { scanning = false }
-            return
-        }
-        let ip = scanPending.removeFirst()
-        let queue = DispatchQueue(label: "smb-scan")
-        let tcp = NWProtocolTCP.Options()
-        tcp.connectionTimeout = 2
-        let conn = NWConnection(host: NWEndpoint.Host(ip), port: 445,
-                                using: NWParameters(tls: nil, tcp: tcp))
-        live[ip] = conn
-        conn.stateUpdateHandler = { [weak self] st in
-            switch st {
-            case .ready:
-                Task { @MainActor in self?.finishProbe(ip: ip, gen: gen, found: true) }
-            case .failed:
-                Task { @MainActor in self?.finishProbe(ip: ip, gen: gen, found: false) }
-            default:
-                break   // ignore .cancelled etc — finishProbe drives everything once
-            }
-        }
-        conn.start(queue: queue)
-    }
-
-    private func finishProbe(ip: String, gen: Int, found: Bool) {
-        guard gen == generation else { return }
-        guard !scanDone.contains(ip) else { return }   // only the first result counts
-        scanDone.insert(ip)
-        if let c = live.removeValue(forKey: ip) { c.cancel() }
-        if found { addScanned(ip: ip) }
-        launchProbe(gen: gen)                            // exactly one replacement
-        if live.isEmpty && scanPending.isEmpty { scanning = false }
     }
 
     func rescan() {
@@ -375,39 +333,120 @@ final class SMBServerBrowser: ObservableObject {
     }
 
     private func merge(_ found: [SMBServer]) {
-        for s in found where !servers.contains(where: { $0.host == s.host }) {
-            servers.append(s)
+        for s in found {
+            // an IP-only entry is replaced if a nicer named entry for the same box arrives
+            if let idx = servers.firstIndex(where: { $0.host == s.host }) {
+                if servers[idx].display != s.display && s.display != s.host {
+                    servers[idx] = s
+                }
+            } else {
+                servers.append(s)
+            }
         }
         servers.sort { $0.display.lowercased() < $1.display.lowercased() }
         Self.remembered = servers
     }
+}
 
-    private func addScanned(ip: String) {
-        guard !servers.contains(where: { $0.host == ip }) else { return }
-        // show the responder immediately — the reverse name lookup can block
-        // for many seconds on networks without reverse DNS, so it happens in
-        // the background and upgrades the label when (if) it answers
-        servers.append(SMBServer(host: ip, display: ip))
-        servers.sort { $0.display.lowercased() < $1.display.lowercased() }
-        Self.remembered = servers
-        Task.detached { [weak self] in
-            guard let name = Self.reverseName(ip) else { return }
-            let short = String(name.split(separator: ".").first ?? "")
-            await MainActor.run {
-                guard let self else { return }
-                if self.servers.contains(where: { $0.display.lowercased() == short.lowercased() }) {
-                    self.servers.removeAll { $0.host == ip }
-                } else if let idx = self.servers.firstIndex(where: { $0.host == ip }) {
-                    self.servers[idx] = SMBServer(host: ip, display: "\(short)  (\(ip))")
-                    self.servers.sort { $0.display.lowercased() < $1.display.lowercased() }
+/// Minimal NetBIOS Name Service (NBNS) client — the old broadcast name protocol
+/// SMB servers still answer, used here to discover them and read their names.
+enum NetBIOS {
+    struct Hit { let ip: String; let name: String? }
+
+    /// Broadcast a wildcard node-status query and collect responders + names.
+    static func discover(seconds: Int) -> [Hit] {
+        guard let bcast = broadcastAddress() else { return [] }
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0 else { return [] }
+        defer { close(fd) }
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &on, socklen_t(MemoryLayout<Int32>.size))
+        var tv = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+        sendQuery(fd: fd, to: bcast, nbstat: true, broadcast: true)
+
+        var names: [String: String?] = [:]
+        let deadline = Date().addingTimeInterval(Double(seconds))
+        while Date() < deadline {
+            var from = sockaddr_in()
+            var flen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            var buf = [UInt8](repeating: 0, count: 2048)
+            let n = withUnsafeMutablePointer(to: &from) { fp in
+                fp.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    recvfrom(fd, &buf, buf.count, 0, $0, &flen)
                 }
-                Self.remembered = self.servers
+            }
+            guard n > 0 else { continue }
+            var ipbuf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            inet_ntop(AF_INET, &from.sin_addr, &ipbuf, socklen_t(INET_ADDRSTRLEN))
+            let ip = String(cString: ipbuf)
+            if names[ip] == nil {
+                names[ip] = parseNodeStatus(Array(buf[0..<n]))
+            }
+        }
+        return names.map { Hit(ip: $0.key, name: $0.value) }
+    }
+
+    private static func sendQuery(fd: Int32, to ip: String, nbstat: Bool, broadcast: Bool) {
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(137).bigEndian
+        inet_pton(AF_INET, ip, &addr.sin_addr)
+        let pkt = query(qtype: nbstat ? 0x0021 : 0x0020, broadcast: broadcast)
+        _ = pkt.withUnsafeBytes { raw in
+            withUnsafePointer(to: &addr) { ap in
+                ap.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    sendto(fd, raw.baseAddress, pkt.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
             }
         }
     }
 
-    /// First three octets of this Mac's primary IPv4, plus its own address.
-    private static func localIPv4Base() -> (String, String)? {
+    /// Build an NBNS query for the wildcard "*" name.
+    private static func query(qtype: UInt16, broadcast: Bool) -> [UInt8] {
+        var p: [UInt8] = [0xF0, 0x00]                 // txn id
+        let flags: UInt16 = broadcast ? 0x0110 : 0x0000
+        p += [UInt8(flags >> 8), UInt8(flags & 0xFF)]
+        p += [0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]   // qd=1, others 0
+        // wildcard name '*' + 15 nulls, first-level encoded to 32 bytes
+        var name16: [UInt8] = [0x2A] + [UInt8](repeating: 0, count: 15)
+        name16 = Array(name16.prefix(16))
+        p.append(0x20)
+        for b in name16 { p.append(0x41 + (b >> 4)); p.append(0x41 + (b & 0x0F)) }
+        p.append(0x00)
+        p += [UInt8(qtype >> 8), UInt8(qtype & 0xFF)]
+        p += [0x00, 0x01]                              // class IN
+        return p
+    }
+
+    /// Pull the machine name out of an NBSTAT node-status response.
+    private static func parseNodeStatus(_ b: [UInt8]) -> String? {
+        var i = 12
+        guard i < b.count, b[i] == 0x20 else { return nil }
+        i += 34 + 2 + 2 + 4          // encoded name + type + class + ttl
+        guard i + 2 <= b.count else { return nil }
+        i += 2                       // rdlength
+        guard i < b.count else { return nil }
+        let num = Int(b[i]); i += 1
+        for _ in 0..<num {
+            guard i + 18 <= b.count else { break }
+            let nameBytes = Array(b[i..<i+15])
+            let suffix = b[i+15]
+            let flags = (UInt16(b[i+16]) << 8) | UInt16(b[i+17])
+            i += 18
+            let isGroup = (flags & 0x8000) != 0
+            if !isGroup, suffix == 0x20 || suffix == 0x00 {
+                let name = String(bytes: nameBytes, encoding: .ascii)?
+                    .trimmingCharacters(in: .whitespaces) ?? ""
+                if !name.isEmpty, name != "__MSBROWSE__" { return name }
+            }
+        }
+        return nil
+    }
+
+    /// Directed-broadcast address of the primary IPv4 interface (x.x.x.255).
+    private static func broadcastAddress() -> String? {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
         defer { freeifaddrs(ifaddr) }
@@ -422,30 +461,14 @@ final class SMBServerBrowser: ObservableObject {
                                &addr, socklen_t(addr.count), nil, 0, NI_NUMERICHOST) == 0 {
                     let ip = String(cString: addr)
                     let parts = ip.split(separator: ".")
-                    if parts.count == 4, parts[0] != "169" {   // skip link-local
-                        return (parts[0...2].joined(separator: "."), ip)
+                    if parts.count == 4, parts[0] != "169" {
+                        return "\(parts[0]).\(parts[1]).\(parts[2]).255"
                     }
                 }
             }
             ptr = ifa.ifa_next
         }
         return nil
-    }
-
-    nonisolated private static func reverseName(_ ip: String) -> String? {
-        var sa = sockaddr_in()
-        sa.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        sa.sin_family = sa_family_t(AF_INET)
-        guard inet_pton(AF_INET, ip, &sa.sin_addr) == 1 else { return nil }
-        let saLen = socklen_t(sa.sin_len)
-        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        let ok = withUnsafePointer(to: &sa) { p in
-            p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                getnameinfo($0, saLen, &host, socklen_t(host.count),
-                            nil, 0, NI_NAMEREQD) == 0
-            }
-        }
-        return ok ? String(cString: host) : nil
     }
 }
 
