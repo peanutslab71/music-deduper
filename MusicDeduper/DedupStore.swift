@@ -380,6 +380,7 @@ final class DedupStore: ObservableObject {
                 // file — a listing costs the same round trip but answers for the
                 // whole album, so new albums cost zero per-file checks.
                 var dirCache: [String: [String: (size: Int64, date: Date?)]] = [:]
+                var claimedTargets = Set<String>()
                 var lastLimit = 3
                 for t in keepers {
                     if box.cancelled { break }
@@ -401,6 +402,17 @@ final class DedupStore: ObservableObject {
                     let dir = dest.appendingPathComponent(sanitizeName(t.displayArtist.isEmpty ? "Unknown Artist" : t.displayArtist))
                                     .appendingPathComponent(sanitizeName(t.album.isEmpty ? "Unknown Album" : t.album))
                     let target = dir.appendingPathComponent(t.name)
+
+                    // Two different source tracks can map to the same destination
+                    // (same filename + same album tag from different folders) —
+                    // parallel workers would then fight over one file. First one
+                    // in claims it; the rest are skipped with an honest line.
+                    if !claimedTargets.insert(target.path).inserted {
+                        let s = counters.recordSkip()
+                        await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
+                                          line: "• skipped \(t.name) — another selected track already copies to this exact destination")
+                        continue
+                    }
 
                     // Existence check via the cached album-folder listing (one
                     // watchdogged round trip per folder, not per file). A folder
@@ -520,15 +532,35 @@ final class DedupStore: ObservableObject {
             let result = await runBlockingFileOp(timeout: opTimeout, cancel: box) {
                 let fm = FileManager.default
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-                if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: target) }
-                try fm.copyItem(at: srcURL, to: target)
-                // verify the whole file landed — a mid-copy stall can leave a truncated file
-                let landed = ((try? fm.attributesOfItem(atPath: target.path))?[.size] as? NSNumber)?.int64Value
-                guard landed == wantSize else {
-                    try? fm.removeItem(at: target)
-                    throw NSError(domain: "MusicDeduper", code: 1, userInfo: [
-                        NSLocalizedDescriptionKey:
-                            "incomplete copy (\(landed ?? 0) of \(wantSize) bytes landed)"])
+                // Copy to a hidden temp name first: a half-copied file is never
+                // visible under its real name, and replacing the target becomes
+                // a cheap rename at the end.
+                let tmp = dir.appendingPathComponent("." + target.lastPathComponent + ".mdtmp")
+                try? fm.removeItem(at: tmp)
+                do {
+                    try fm.copyItem(at: srcURL, to: tmp)
+                    // verify the whole file landed — a mid-copy stall can leave a truncated file
+                    let landed = ((try? fm.attributesOfItem(atPath: tmp.path))?[.size] as? NSNumber)?.int64Value
+                    guard landed == wantSize else {
+                        throw NSError(domain: "MusicDeduper", code: 1, userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "incomplete copy (\(landed ?? 0) of \(wantSize) bytes landed)"])
+                    }
+                    // remove whatever is at the target — and if that fails, say so
+                    // honestly instead of letting the rename report "already exists"
+                    do { try fm.removeItem(at: target) }
+                    catch let e as NSError {
+                        if !(e.domain == NSCocoaErrorDomain && e.code == NSFileNoSuchFileError)
+                            && fm.fileExists(atPath: target.path) {
+                            throw NSError(domain: "MusicDeduper", code: 3, userInfo: [
+                                NSLocalizedDescriptionKey:
+                                    "couldn't replace the existing file: \(e.localizedDescription)"])
+                        }
+                    }
+                    try fm.moveItem(at: tmp, to: target)
+                } catch {
+                    try? fm.removeItem(at: tmp)
+                    throw error
                 }
             }
             if case .success = result { copied = true; break }
