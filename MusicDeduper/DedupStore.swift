@@ -26,6 +26,27 @@ final class DedupStore: ObservableObject {
     @Published var smbAddress: String = UserDefaults.standard.string(forKey: "smbAddress") ?? "" {
         didSet { UserDefaults.standard.set(smbAddress, forKey: "smbAddress") }
     }
+    // the name the share was located under, when smbAddress was converted to an IP
+    @Published var smbOriginalName: String = UserDefaults.standard.string(forKey: "smbOriginalName") ?? "" {
+        didSet { UserDefaults.standard.set(smbOriginalName, forKey: "smbOriginalName") }
+    }
+
+    /// Store a newly-located share address, converting its hostname to an IP in the
+    /// background (name lookup is often the first casualty of a flaky network, so
+    /// reconnects go straight at the IP). The name is kept for display.
+    func setShareAddress(_ address: String) {
+        smbAddress = address
+        smbOriginalName = ""
+        Task.detached { [address] in
+            guard let ip = ipVersionOfSMBAddress(address) else { return }
+            await MainActor.run {
+                if self.smbAddress == address {   // unchanged since we started resolving
+                    self.smbOriginalName = address
+                    self.smbAddress = ip
+                }
+            }
+        }
+    }
 
     // recently used source folders (paths, newest first)
     @Published var recentSources: [String] = UserDefaults.standard.stringArray(forKey: "recentSources") ?? []

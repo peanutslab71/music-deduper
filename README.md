@@ -34,7 +34,9 @@ A four-step wizard: **Source → Review → Clean up → Copy.**
   app offers to stop Roon Server for you, runs the copy, then offers to start it
   again so it imports everything in one clean pass.
 
-There's a full walkthrough in [USAGE.md](USAGE.md).
+There's a full walkthrough in [USAGE.md](USAGE.md), and [HELP.md](HELP.md)
+covers performance tuning (including a fix for macOS's slow SMB defaults),
+troubleshooting, and uninstalling.
 
 ## Download
 

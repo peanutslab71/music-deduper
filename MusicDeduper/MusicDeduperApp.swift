@@ -18,6 +18,13 @@ struct MusicDeduperApp: App {
             CommandGroup(replacing: .appInfo) {
                 AboutMenuButton()
             }
+            CommandGroup(replacing: .help) {
+                Button("Music Deduper Help") {
+                    NSWorkspace.shared.open(
+                        URL(string: "https://github.com/peanutslab71/music-deduper/blob/main/HELP.md")!)
+                }
+                .keyboardShortcut("?", modifiers: .command)
+            }
         }
 
         Window("About Music Deduper", id: "about") {
@@ -62,6 +69,9 @@ struct AboutView: View {
                 aboutLink("Usage guide",
                           "https://github.com/peanutslab71/music-deduper/blob/main/USAGE.md",
                           icon: "book")
+                aboutLink("Help — performance & troubleshooting",
+                          "https://github.com/peanutslab71/music-deduper/blob/main/HELP.md",
+                          icon: "questionmark.circle")
                 aboutLink("Source code on GitHub",
                           "https://github.com/peanutslab71/music-deduper",
                           icon: "chevron.left.forwardslash.chevron.right")

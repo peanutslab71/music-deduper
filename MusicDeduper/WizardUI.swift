@@ -477,6 +477,13 @@ struct CopyStepView: View {
         guard let u = URL(string: store.smbAddress), let h = u.host else { return "" }
         return "\(h)\(u.path)"
     }
+    private var shareDetail: String {
+        guard !store.smbOriginalName.isEmpty,
+              let o = URL(string: store.smbOriginalName), let oh = o.host else {
+            return "Connected share: \(shareName)  — remembered for automatic reconnects."
+        }
+        return "Connected share: \(shareName)  — “\(oh)” converted to its IP address, so reconnects don't depend on name lookup."
+    }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -488,7 +495,7 @@ struct CopyStepView: View {
             numbered(1, title: "Where is your Roon server (or NAS)?",
                      detail: store.smbAddress.isEmpty
                         ? "Locate the music share so the app can reconnect to it if the network drops mid-copy."
-                        : "Connected share: \(shareName)  — remembered for automatic reconnects.") {
+                        : shareDetail) {
                 Button {
                     locateServer()
                 } label: {
@@ -557,7 +564,7 @@ struct CopyStepView: View {
         if p.runModal() == .OK, let url = p.url {
             if let vals = try? url.resourceValues(forKeys: [.volumeURLForRemountingKey]),
                let remount = vals.volumeURLForRemounting {
-                store.smbAddress = remount.absoluteString
+                store.setShareAddress(remount.absoluteString)
             }
             destFolder = url
         }
@@ -577,7 +584,7 @@ struct CopyStepView: View {
             // keep the reconnect address in sync if they picked on another share
             if let vals = try? url.resourceValues(forKeys: [.volumeURLForRemountingKey]),
                let remount = vals.volumeURLForRemounting {
-                store.smbAddress = remount.absoluteString
+                store.setShareAddress(remount.absoluteString)
             }
         }
     }
