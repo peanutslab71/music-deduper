@@ -701,21 +701,27 @@ struct ServerPickerSheet: View {
                     if browser.servers.isEmpty {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small)
-                            Text("Looking for servers on your network…")
+                            Text("Scanning your network for SMB servers…")
                                 .foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        List(browser.servers, id: \.self) { name in
+                        List(browser.servers) { s in
                             Button {
-                                connect(host: name + ".local")
+                                connect(host: s.host)
                             } label: {
-                                Label(name, systemImage: "server.rack")
+                                Label(s.display, systemImage: "server.rack")
                             }
                             .buttonStyle(.plain)
                             .disabled(connecting)
                         }
                         .listStyle(.inset)
+                    }
+                }
+                if browser.scanning && !browser.servers.isEmpty {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.mini)
+                        Text("still scanning…").font(.caption).foregroundStyle(.tertiary)
                     }
                 }
                 HStack(spacing: 8) {

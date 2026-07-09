@@ -201,26 +201,148 @@ extension DirectSMBClient {
     }
 }
 
-/// Finds SMB servers announcing themselves on the local network (Bonjour).
+struct SMBServer: Identifiable, Hashable {
+    let host: String        // what we connect to (name.local or IP)
+    let display: String     // what the user sees
+    var id: String { host }
+}
+
+/// Finds SMB servers two ways at once: Bonjour (modern Macs/NASes advertise
+/// there) AND an active sweep of the local subnet for machines answering on
+/// the SMB port — old servers like Roon ROCK's 2015 Samba only announce via
+/// NetBIOS, which Bonjour never sees, but they all answer port 445.
 @MainActor
 final class SMBServerBrowser: ObservableObject {
-    @Published var servers: [String] = []   // advertised names, e.g. "rock"
+    @Published var servers: [SMBServer] = []
+    @Published var scanning = false
     private var browser: NWBrowser?
+    private var probes: [NWConnection] = []
 
     func start() {
         stop()
+        // 1) Bonjour
         let b = NWBrowser(for: .bonjour(type: "_smb._tcp", domain: nil), using: NWParameters())
         b.browseResultsChangedHandler = { [weak self] results, _ in
-            let names = results.compactMap { r -> String? in
-                if case .service(let name, _, _, _) = r.endpoint { return name }
+            let found = results.compactMap { r -> SMBServer? in
+                if case .service(let name, _, _, _) = r.endpoint {
+                    return SMBServer(host: name + ".local", display: name)
+                }
                 return nil
-            }.sorted()
-            Task { @MainActor in self?.servers = names }
+            }
+            Task { @MainActor in
+                guard let self else { return }
+                for s in found where !self.servers.contains(where: { $0.host == s.host }) {
+                    self.servers.append(s)
+                    self.servers.sort { $0.display.lowercased() < $1.display.lowercased() }
+                }
+            }
         }
         b.start(queue: .main)
         browser = b
+        // 2) subnet sweep for port 445
+        scanSubnet()
     }
-    func stop() { browser?.cancel(); browser = nil }
+
+    func stop() {
+        browser?.cancel(); browser = nil
+        for p in probes { p.cancel() }
+        probes = []
+        scanning = false
+    }
+
+    private func scanSubnet() {
+        guard let (base, myIP) = Self.localIPv4Base() else { return }
+        scanning = true
+        let queue = DispatchQueue(label: "smb-scan", attributes: .concurrent)
+        var remaining = 0
+        for i in 1...254 {
+            let ip = "\(base).\(i)"
+            if ip == myIP { continue }
+            remaining += 1
+            let tcp = NWProtocolTCP.Options()
+            tcp.connectionTimeout = 2
+            let conn = NWConnection(host: NWEndpoint.Host(ip), port: 445,
+                                    using: NWParameters(tls: nil, tcp: tcp))
+            conn.stateUpdateHandler = { [weak self] st in
+                switch st {
+                case .ready:
+                    conn.cancel()
+                    Task { @MainActor in self?.addScanned(ip: ip) }
+                    Task { @MainActor in self?.probeDone() }
+                case .failed:
+                    conn.cancel()
+                    Task { @MainActor in self?.probeDone() }
+                default:
+                    break
+                }
+            }
+            probes.append(conn)
+            conn.start(queue: queue)
+        }
+        let total = remaining
+        Task { @MainActor in self.probeTotal = total }
+    }
+
+    private var probeTotal = 0
+    private var probeCount = 0
+    private func probeDone() {
+        probeCount += 1
+        if probeCount >= probeTotal { scanning = false }
+    }
+
+    private func addScanned(ip: String) {
+        guard !servers.contains(where: { $0.host == ip }) else { return }
+        // don't duplicate a Bonjour entry that resolves to this same box
+        let name = Self.reverseName(ip)
+        if let name, servers.contains(where: { $0.display.lowercased() == name.split(separator: ".").first.map(String.init)?.lowercased() ?? "" }) {
+            return
+        }
+        let short = name?.split(separator: ".").first.map(String.init)
+        servers.append(SMBServer(host: ip, display: short.map { "\($0)  (\(ip))" } ?? ip))
+        servers.sort { $0.display.lowercased() < $1.display.lowercased() }
+    }
+
+    /// First three octets of this Mac's primary IPv4, plus its own address.
+    private static func localIPv4Base() -> (String, String)? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        defer { freeifaddrs(ifaddr) }
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let p = ptr {
+            let ifa = p.pointee
+            if ifa.ifa_addr?.pointee.sa_family == sa_family_t(AF_INET),
+               (Int32(ifa.ifa_flags) & IFF_LOOPBACK) == 0,
+               (Int32(ifa.ifa_flags) & IFF_UP) != 0 {
+                var addr = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(ifa.ifa_addr, socklen_t(ifa.ifa_addr.pointee.sa_len),
+                               &addr, socklen_t(addr.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    let ip = String(cString: addr)
+                    let parts = ip.split(separator: ".")
+                    if parts.count == 4, parts[0] != "169" {   // skip link-local
+                        return (parts[0...2].joined(separator: "."), ip)
+                    }
+                }
+            }
+            ptr = ifa.ifa_next
+        }
+        return nil
+    }
+
+    private static func reverseName(_ ip: String) -> String? {
+        var sa = sockaddr_in()
+        sa.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        sa.sin_family = sa_family_t(AF_INET)
+        guard inet_pton(AF_INET, ip, &sa.sin_addr) == 1 else { return nil }
+        let saLen = socklen_t(sa.sin_len)
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let ok = withUnsafePointer(to: &sa) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getnameinfo($0, saLen, &host, socklen_t(host.count),
+                            nil, 0, NI_NAMEREQD) == 0
+            }
+        }
+        return ok ? String(cString: host) : nil
+    }
 }
 
 /// A small pool of independent connections to one share. Each parallel copy
