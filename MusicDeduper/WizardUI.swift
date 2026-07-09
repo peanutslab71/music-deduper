@@ -13,7 +13,7 @@ import UniformTypeIdentifiers
 // MARK: - Wizard steps
 
 enum WizardStep: Int, CaseIterable, Identifiable {
-    case source, review, cleanup, copy
+    case source, review, cleanup, copy, browse
     var id: Int { rawValue }
     var title: String {
         switch self {
@@ -21,6 +21,7 @@ enum WizardStep: Int, CaseIterable, Identifiable {
         case .review:  return "Review"
         case .cleanup: return "Clean up"
         case .copy:    return "Copy"
+        case .browse:  return "Browse"
         }
     }
     var icon: String {
@@ -29,6 +30,7 @@ enum WizardStep: Int, CaseIterable, Identifiable {
         case .review:  return "rectangle.grid.2x2"
         case .cleanup: return "trash"
         case .copy:    return "externaldrive.badge.icloud"
+        case .browse:  return "externaldrive.connected.to.line.below"
         }
     }
 }
@@ -39,7 +41,7 @@ struct StepBar: View {
     let hasScan: Bool
 
     private func reachable(_ s: WizardStep) -> Bool {
-        s == .source || hasScan
+        s == .source || s == .browse || hasScan   // Browse is a tool, not a step — always open
     }
 
     var body: some View {
@@ -64,7 +66,13 @@ struct StepBar: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!reachable(s))
-                if s != .copy {
+                if s == .copy {
+                    // Browse (File Commander) is a separate tool — pipe, not chevron
+                    Text("|")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.quaternary)
+                        .padding(.horizontal, 8)
+                } else if s != .browse {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.quaternary)

@@ -10,7 +10,6 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var store = DedupStore()
-    @Environment(\.openWindow) private var openWindow
     @State private var step: WizardStep = .source
     @State private var reviewTab = 0            // 0 duplicates · 1 library
     @State private var destFolder: URL? = nil
@@ -41,6 +40,8 @@ struct ContentView: View {
             CopyStepView(store: store, destFolder: $destFolder) { dest in
                 Task { @MainActor in await guardedCopy(to: dest) }
             }
+        case .browse:
+            ServerFilesView()
         }
     }
 
@@ -55,16 +56,6 @@ struct ContentView: View {
             footer
         }
         .frame(minWidth: 940, minHeight: 620)
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Button {
-                    openWindow(id: "files")
-                } label: {
-                    Label("File Commander", systemImage: "externaldrive.connected.to.line.below")
-                }
-                .help("File Commander — browse and manage files on your server: rename, move, organise, delete")
-            }
-        }
         // when a scan finishes, land on the right Review screen automatically:
         // duplicates if there are any, otherwise straight to the Library grid
         .onChange(of: store.busy) { busy in
