@@ -83,7 +83,15 @@ A progress sheet shows ✓ done, • skipped and ✗ failed counts as it runs.
 library isn't touched — this builds a clean copy alongside it.
 
 This is the step I built for feeding a Roon server: point it at the mounted network
-share and let it run. Two behaviours worth knowing:
+share and let it run.
+
+**If you're copying to a Roon ROCK server, stop the Roon Server first — from inside
+Roon's web UI (the ROCK admin page) — before starting the copy.** Roon watches its
+music folder live, and a large copy landing while the server is running can cause it
+to stop or hang. Stop the server, run the copy, then start it again and let it import
+the new files in one go.
+
+Two other behaviours worth knowing:
 
 - **Already-copied files are skipped** (matched by size), so you can re-run the copy
   any time to top up a destination — it only transfers what's missing.
