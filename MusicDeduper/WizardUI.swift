@@ -595,7 +595,8 @@ struct ConflictPanel: View {
                     ? "This file already exists (identical size)"
                     : "This file already exists — and it's different",
                   systemImage: conflict.identical ? "doc.on.doc" : "exclamationmark.triangle.fill")
-                .font(.headline).foregroundStyle(conflict.identical ? .secondary : .orange)
+                .font(.headline)
+                .foregroundStyle(conflict.identical ? Color.secondary : Color.orange)
             HStack(spacing: 12) {
                 ArtworkView(key: conflict.srcURL.deletingLastPathComponent().path,
                             sampleURL: conflict.srcURL, size: 44, corner: 6)
