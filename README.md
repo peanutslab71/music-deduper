@@ -1,46 +1,57 @@
-# Music Library Deduper — native macOS app (SwiftUI)
+# Music Deduper
 
-A real Cocoa/SwiftUI app: native folder pickers, accurate metadata via AVFoundation,
-native "Move to Trash", and fast file I/O. No Tkinter, no rendering bugs, no Terminal.
+A small native Mac app that finds and removes duplicate tracks in a music library.
+
+I wrote it because my own library had years of accumulated mess in it — the same album
+ripped twice, MP3s sitting next to the FLAC versions that replaced them, "Track 01 (1).flac"
+copies from old backups. Cleaning that up by hand across thousands of files isn't realistic,
+and I didn't trust anything else to make the right call about which copy to keep. This does
+the tedious part: it scans the library, groups the copies together, picks the best one of
+each, and lets you review everything before a single file is touched.
 
 ## What it does
-- Pick a source folder → scans tags + duration (AVFoundation) → finds duplicates.
-- Review duplicate groups; the best copy is marked **KEEP** (click any row to change the keeper).
-- **Delete duplicates…** → choose **Trash** or **Permanent**, then confirm **twice**.
-- **Copy keepers to…** → rebuilds a clean Artist/Album tree at a destination
-  (e.g. a mounted Roon ROCK / NAS share); skips files already there by size.
 
-## How to build & run (first time ~ a few minutes)
+- Point it at your music folder and it scans every track — proper tags and durations
+  read via AVFoundation, not filename guessing.
+- Duplicates are grouped and shown for review. The best copy in each group is marked
+  **KEEP** — lossless beats lossy, then higher bitrate, then better tags. Click any
+  row if you disagree.
+- **Delete duplicates…** sends the rest to the Trash (or deletes permanently, if you
+  ask twice). Keepers are never touched.
+- **Copy keepers to…** rebuilds a clean Artist/Album tree at any destination — handy
+  for populating a Roon server or NAS share. Files already there are skipped, and if
+  the network share drops mid-copy the app can re-mount and carry on.
 
-You need **Xcode** (free from the Mac App Store).
+There's a full walkthrough in [USAGE.md](USAGE.md).
 
-1. Double-click **`MusicDeduper.xcodeproj`** to open it in Xcode.
-2. In the top toolbar, make sure the scheme says **MusicDeduper** and the run
-   destination is **My Mac**.
-3. Click the **▶ Run** button (or press ⌘R). Xcode compiles it and the app window opens.
-   - If Xcode asks about signing, select the target **MusicDeduper** → **Signing & Capabilities**
-     tab → set **Team** to your Apple ID (a free personal team is fine), or leave
-     "Automatically manage signing" on. For running on your own Mac this is all you need.
+## Download
 
-That's it — the app runs. To get a standalone `.app` you can keep, use
-**Product → Archive** (or find the built app under
-`~/Library/Developer/Xcode/DerivedData/MusicDeduper-*/Build/Products/`).
+A signed and notarized build is available from
+[my profile page on AllSports.World](https://allsports.world/profiles/neilcotty/) —
+open the DMG, drag the app to Applications. Needs macOS 13 (Ventura) or later.
 
-### If the project ever won't open ("damaged")
-Fallback that always works — build a fresh project and drop these files in:
-1. Xcode → **File → New → Project… → macOS → App** → Next.
-   - Product Name: **MusicDeduper**, Interface: **SwiftUI**, Language: **Swift**. Create it.
-2. In the new project, delete the auto-generated `ContentView.swift` and the
-   `…App.swift` file (Move to Trash).
-3. Drag the four files from the **`MusicDeduper/`** folder here
-   (`MusicDeduperApp.swift`, `Engine.swift`, `DedupStore.swift`, `ContentView.swift`)
-   into the project's yellow group, ticking **Copy items if needed**.
-4. Press **▶ Run**.
+## Building from source
+
+You'll need Xcode (free on the Mac App Store).
+
+1. Open `MusicDeduper.xcodeproj`.
+2. Check the scheme says **MusicDeduper** and the destination is **My Mac**.
+3. Press ⌘R. If Xcode asks about signing, set the target's Team to your own Apple ID
+   under Signing & Capabilities — a free personal team is fine for running locally.
+
+To produce a standalone `.app`, use Product → Archive. `make_dmg.sh` turns an exported
+app into a drag-to-Applications DMG, and `DISTRIBUTION.md` covers the Developer ID
+signing and notarization steps if you want a build other Macs will open without warnings.
 
 ## Notes
-- Minimum macOS: 13 (Ventura) or later.
-- The app is **not sandboxed**, so it can read the folder you pick and delete files.
+
+- The scanner never modifies your library. Nothing is written or deleted until you
+  explicitly run a delete or copy, and deletes are confirmed twice.
+- The app is not sandboxed, so it can read the folder you pick and delete files.
   macOS may prompt once for access to certain folders — click Allow.
-- For iCloud sources set to "Optimize Storage," download the files first
-  (Finder → right-click the folder → Download Now) or some may read as unreadable.
-- No app icon yet (generic). Once it builds, I can add the custom icon.
+- If your source lives in iCloud with "Optimize Storage" on, download the files first
+  (Finder → right-click the folder → Download Now), or some tracks may read as unreadable.
+- Duplicate matching runs at three strictness levels (Strict / Balanced / Aggressive) —
+  see [USAGE.md](USAGE.md) for what each level actually compares.
+- If the Xcode project file itself ever refuses to open, there's a rebuild recipe in
+  [docs/xcode-recovery.md](docs/xcode-recovery.md).
