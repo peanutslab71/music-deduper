@@ -298,14 +298,25 @@ final class DedupStore: ObservableObject {
         runCopy(items, to: dest, title: "Retrying \(items.count) failed file(s) → \(dest.lastPathComponent)")
     }
 
+    // auto-pause: the run pauses itself after this many consecutive failures
+    // (the server has clearly gone away — grinding on just multiplies timeouts)
+    private static let pauseAfterConsecutiveFails = 3
+    @Published var opPaused = false
+    let resumeBox = ResumeBox()
+    func resumeCopy() { resumeBox.resumed = true }
+    private func setPaused(_ p: Bool) { opPaused = p }
+
     private func runCopy(_ items: [Track], to dest: URL, title: String) {
         let keepers = items
         lastCopyDest = dest
         failedCopyIDs = []
         opStart(title: title, total: keepers.count)
+        opPaused = false
         let box = cancelBox
         let conflicts = conflictBox
         conflicts.reset()
+        let pause = resumeBox
+        pause.reset()
         let addr = smbAddress
 
         // Keep-alive: touch the destination every 30s so the SMB session never
@@ -319,10 +330,6 @@ final class DedupStore: ObservableObject {
         }
 
         Task.detached(priority: .userInitiated) {
-            var ok = 0, skip = 0, fail = 0, cancelled = false
-            var failedIDs: [Int] = []
-            let fm = FileManager.default
-
             // Resolve the share's hostname to an IP now, while the connection is
             // healthy — re-mounts then use the IP directly instead of also having
             // to win a name lookup on a network that's already misbehaving.
@@ -333,132 +340,175 @@ final class DedupStore: ObservableObject {
             if reconnectAddr != addr {
                 await self.opLogLine("ℹ \(addr) is \(reconnectAddr) — reconnects will use the IP")
             }
+            let counters = CopyCounters()
+            let throttle = MountThrottle()
 
-            for (n, t) in keepers.enumerated() {
-                if box.cancelled { cancelled = true; break }
-                let dir = dest.appendingPathComponent(sanitizeName(t.displayArtist.isEmpty ? "Unknown Artist" : t.displayArtist))
-                                .appendingPathComponent(sanitizeName(t.album.isEmpty ? "Unknown Album" : t.album))
-                let target = dir.appendingPathComponent(t.name)
+            // The lead loop stays sequential (conflict prompts must appear one at
+            // a time); the actual data copies fan out to at most 3 at once —
+            // parallel streams amortise the per-file round trips that dominate
+            // small-file transfers on old SMB dialects.
+            await withTaskGroup(of: Void.self) { group in
+                var inFlight = 0
+                for t in keepers {
+                    if box.cancelled { break }
 
-                // Existence check with a watchdog — even a stat can hang for
-                // minutes on a wedged share. On timeout we skip the conflict
-                // check and let the copy attempt below deal with the share.
-                let statResult = await runBlockingFileOp(timeout: 15, cancel: box) {
-                    try? target.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-                }
-                if statResult == nil && box.cancelled { cancelled = true; break }
+                    // server clearly gone → pause and wait for Resume (or Cancel)
+                    if counters.consecutiveFailCount >= Self.pauseAfterConsecutiveFails {
+                        await self.opLogLine("⏸ \(Self.pauseAfterConsecutiveFails) files in a row failed — the server has gone away. Paused; press Resume when it's back.")
+                        await self.setPaused(true)
+                        while !box.cancelled && !pause.resumed {
+                            try? await Task.sleep(nanoseconds: 300_000_000)
+                        }
+                        counters.resetConsecutive()
+                        pause.reset()
+                        await self.setPaused(false)
+                        if box.cancelled { break }
+                        await self.opLogLine("▶ Resumed.")
+                    }
 
-                // file already exists at the destination → that's a conflict,
-                // the user decides (Overwrite / Skip, each or All). No silent skips.
-                if case .success(let maybeVals) = statResult, let vals = maybeVals,
-                   let exSize = vals.fileSize {
-                    let identical = Int64(exSize) == t.size
-                    var decision = conflicts.policy
-                    if decision == nil {
-                        await self.presentConflict(CopyConflict(
-                            name: t.name,
-                            artist: t.displayArtist, album: t.album,
-                            srcURL: t.url, srcSize: t.size,
-                            dstSize: Int64(exSize), dstDate: vals.contentModificationDate,
-                            identical: identical))
-                        while !box.cancelled {
-                            if let d = conflicts.take() { decision = d; break }
-                            try? await Task.sleep(nanoseconds: 200_000_000)
-                        }
-                        await self.presentConflict(nil)
-                        if box.cancelled { cancelled = true; break }
-                    }
-                    if decision == .skip || decision == .skipAll {
-                        skip += 1
-                        await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail,
-                                          line: "• kept existing \(t.name)\(identical ? " (identical size)" : "")")
-                        continue
-                    }
-                    // overwrite falls through to the copy below (target removed there)
-                }
+                    let dir = dest.appendingPathComponent(sanitizeName(t.displayArtist.isEmpty ? "Unknown Artist" : t.displayArtist))
+                                    .appendingPathComponent(sanitizeName(t.album.isEmpty ? "Unknown Album" : t.album))
+                    let target = dir.appendingPathComponent(t.name)
 
-                // Retry this file up to 5 times (re-mounting the share if it dropped),
-                // then mark it failed and move on — one bad file must not stall the run.
-                var copied = false
-                var attempt = 0
-                let maxAttempts = 5
-                // watchdog: 10s base + 1.5s per MB — a healthy copy never gets near
-                // it, a wedged share is declared hung instead of blocking for minutes
-                let opTimeout = min(90.0, 10.0 + Double(t.size) / 1_000_000.0 * 1.5)
-                while !box.cancelled {
-                    let srcURL = t.url, wantSize = t.size
-                    let result = await runBlockingFileOp(timeout: opTimeout, cancel: box) {
-                        let fm = FileManager.default
-                        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-                        if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: target) }
-                        try fm.copyItem(at: srcURL, to: target)
-                        // verify the whole file landed — a mid-copy stall can leave a truncated file
-                        let landed = ((try? fm.attributesOfItem(atPath: target.path))?[.size] as? NSNumber)?.int64Value
-                        guard landed == wantSize else {
-                            try? fm.removeItem(at: target)
-                            throw NSError(domain: "MusicDeduper", code: 1, userInfo: [
-                                NSLocalizedDescriptionKey:
-                                    "incomplete copy (\(landed ?? 0) of \(wantSize) bytes landed)"])
-                        }
+                    // Existence check with a watchdog — even a stat can hang for
+                    // minutes on a wedged share. On timeout we skip the conflict
+                    // check and let the copy attempt below deal with the share.
+                    let statResult = await runBlockingFileOp(timeout: 15, cancel: box) {
+                        try? target.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
                     }
-                    if case .success = result { copied = true; break }
-                    if result == nil && box.cancelled { break }
-                    do {
-                        if case .failure(let e) = result { throw e }
-                        throw NSError(domain: "MusicDeduper", code: 2, userInfo: [
-                            NSLocalizedDescriptionKey:
-                                "no response after \(Int(opTimeout))s — share not answering"])
-                    } catch {
-                        attempt += 1
-                        if attempt >= maxAttempts {
-                            await self.opLogLine("✗ giving up on “\(t.name)” after \(maxAttempts) tries: \(error.localizedDescription)")
-                            break
+                    if statResult == nil && box.cancelled { break }
+
+                    // file already exists at the destination → that's a conflict,
+                    // the user decides (Overwrite / Skip, each or All). No silent skips.
+                    if case .success(let maybeVals) = statResult, let vals = maybeVals,
+                       let exSize = vals.fileSize {
+                        let identical = Int64(exSize) == t.size
+                        var decision = conflicts.policy
+                        if decision == nil {
+                            await self.presentConflict(CopyConflict(
+                                name: t.name,
+                                artist: t.displayArtist, album: t.album,
+                                srcURL: t.url, srcSize: t.size,
+                                dstSize: Int64(exSize), dstDate: vals.contentModificationDate,
+                                identical: identical))
+                            while !box.cancelled {
+                                if let d = conflicts.take() { decision = d; break }
+                                try? await Task.sleep(nanoseconds: 200_000_000)
+                            }
+                            await self.presentConflict(nil)
+                            if box.cancelled { break }
                         }
-                        let waitS = min(attempt * 2, 10)   // back off: 2s, 4s … capped at 10s
-                        // log the first stall on this file
-                        if attempt == 1 {
-                            await self.opLogLine("… waiting on “\(t.name)”: \(error.localizedDescription)")
+                        if decision == .skip || decision == .skipAll {
+                            let s = counters.recordSkip()
+                            await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
+                                              line: "• kept existing \(t.name)\(identical ? " (identical size)" : "")")
+                            continue
                         }
-                        // if the share has dropped, actively re-mount it (guest) so we self-heal
-                        var reconn = ""
-                        if !addr.isEmpty && !destReachable(dest) {
-                            let launched = mountSMBGuest(reconnectAddr)
-                            reconn = launched ? "  · reconnecting to \(reconnectAddr)…" : "  · reconnect failed"
-                            await self.opLogLine(launched ? "⟳ Reconnecting to \(reconnectAddr)…" : "⚠ Reconnect to \(reconnectAddr) failed")
-                        }
-                        await self.setNote("⟳ Retrying “\(t.name)” (attempt \(attempt)): \(error.localizedDescription)\(reconn)  · waiting \(waitS)s")
-                        var slept = 0.0
-                        while slept < Double(waitS) && !box.cancelled {
-                            try? await Task.sleep(nanoseconds: 400_000_000); slept += 0.4
-                        }
+                        // overwrite falls through to the copy below (target removed there)
                     }
+
+                    if inFlight >= 3 {
+                        await group.next()
+                        inFlight -= 1
+                    }
+                    group.addTask {
+                        await self.copyOneFile(t, dir: dir, target: target, dest: dest,
+                                               box: box, counters: counters, throttle: throttle,
+                                               reconnectAddr: reconnectAddr, addr: addr)
+                    }
+                    inFlight += 1
                 }
-                await self.setNote("")
-                if copied {
-                    ok += 1
-                    let suffix = attempt > 0 ? "  (after \(attempt) retr\(attempt == 1 ? "y" : "ies"))" : ""
-                    await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail,
-                                      line: "✓ \(sanitizeName(t.displayArtist))/\(sanitizeName(t.album))/\(t.name)\(suffix)")
-                } else if box.cancelled {
-                    cancelled = true; break
-                } else {
-                    // out of attempts — record it and carry on with the rest
-                    fail += 1
-                    failedIDs.append(t.id)
-                    await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail,
-                                      line: "✗ \(t.name) — failed after \(maxAttempts) tries")
-                }
+                await group.waitForAll()
             }
+
             keepAlive.cancel()
-            let summary = cancelled
-                ? "■ Cancelled — copied \(ok), skipped \(skip)."
-                : "✔ Done — copied \(ok), skipped \(skip)"
-                  + (fail > 0 ? ", \(fail) failed — use Retry failed." : ".")
-            await self.finishCopy(summary: summary, failedIDs: failedIDs)
+            let c = counters.finalSnapshot()
+            let summary = box.cancelled
+                ? "■ Cancelled — copied \(c.ok), skipped \(c.skip)."
+                : "✔ Done — copied \(c.ok), skipped \(c.skip)"
+                  + (c.fail > 0 ? ", \(c.fail) failed — use Retry failed." : ".")
+            await self.finishCopy(summary: summary, failedIDs: c.failedIDs)
         }
     }
+
+    /// Copy one file with retries, watchdog, and (throttled) share re-mount.
+    /// Runs off the main actor; up to 3 of these are in flight at once.
+    nonisolated private func copyOneFile(_ t: Track, dir: URL, target: URL, dest: URL,
+                                         box: CancelBox, counters: CopyCounters,
+                                         throttle: MountThrottle,
+                                         reconnectAddr: String, addr: String) async {
+        var copied = false
+        var attempt = 0
+        let maxAttempts = 5
+        // watchdog: 10s base + 1.5s per MB — a healthy copy never gets near
+        // it, a wedged share is declared hung instead of blocking for minutes
+        let opTimeout = min(90.0, 10.0 + Double(t.size) / 1_000_000.0 * 1.5)
+        while !box.cancelled {
+            let srcURL = t.url, wantSize = t.size
+            let result = await runBlockingFileOp(timeout: opTimeout, cancel: box) {
+                let fm = FileManager.default
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+                if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: target) }
+                try fm.copyItem(at: srcURL, to: target)
+                // verify the whole file landed — a mid-copy stall can leave a truncated file
+                let landed = ((try? fm.attributesOfItem(atPath: target.path))?[.size] as? NSNumber)?.int64Value
+                guard landed == wantSize else {
+                    try? fm.removeItem(at: target)
+                    throw NSError(domain: "MusicDeduper", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "incomplete copy (\(landed ?? 0) of \(wantSize) bytes landed)"])
+                }
+            }
+            if case .success = result { copied = true; break }
+            if result == nil && box.cancelled { break }
+
+            let desc: String
+            if case .failure(let e) = result { desc = e.localizedDescription }
+            else { desc = "no response after \(Int(opTimeout))s — share not answering" }
+            attempt += 1
+            if attempt >= maxAttempts {
+                await self.opLogLine("✗ giving up on “\(t.name)” after \(maxAttempts) tries: \(desc)")
+                break
+            }
+            if attempt == 1 {
+                await self.opLogLine("… waiting on “\(t.name)”: \(desc)")
+            }
+            // if the share has dropped, actively re-mount it (guest, directly via
+            // the system mounter — never through Finder) at most once per 30s
+            // across all workers, itself under a watchdog
+            var reconn = ""
+            if !addr.isEmpty && !destReachable(dest) && throttle.shouldAttempt() {
+                let mountResult = await runBlockingFileOp(timeout: 30, cancel: box) {
+                    mountSMBGuest(reconnectAddr)
+                }
+                let mounted = { if case .success(true) = mountResult { return true }; return false }()
+                reconn = mounted ? "  · reconnected to \(reconnectAddr)" : "  · reconnect pending"
+                await self.opLogLine(mounted ? "⟳ Reconnected to \(reconnectAddr)" : "⚠ Reconnect to \(reconnectAddr) didn't complete")
+            }
+            let waitS = min(attempt * 2, 10)   // back off: 2s, 4s … capped at 10s
+            await self.setNote("⟳ Retrying “\(t.name)” (attempt \(attempt)): \(desc)\(reconn)  · waiting \(waitS)s")
+            var slept = 0.0
+            while slept < Double(waitS) && !box.cancelled {
+                try? await Task.sleep(nanoseconds: 400_000_000); slept += 0.4
+            }
+        }
+        await self.setNote("")
+        if copied {
+            let s = counters.recordOK()
+            let suffix = attempt > 0 ? "  (after \(attempt) retr\(attempt == 1 ? "y" : "ies"))" : ""
+            await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
+                              line: "✓ \(sanitizeName(t.displayArtist))/\(sanitizeName(t.album))/\(t.name)\(suffix)")
+        } else if !box.cancelled {
+            // out of attempts — record it; the lead loop may auto-pause
+            let s = counters.recordFail(t.id)
+            await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
+                              line: "✗ \(t.name) — failed after \(maxAttempts) tries")
+        }
+    }
+
     private func finishCopy(summary: String, failedIDs: [Int]) {
         failedCopyIDs = failedIDs
+        opPaused = false
         opFinishLine(summary)
     }
     private func presentConflict(_ c: CopyConflict?) { pendingConflict = c }
@@ -467,6 +517,56 @@ final class DedupStore: ObservableObject {
 /// Simple thread-shared cancel flag readable from a background task without hopping actors.
 final class CancelBox: @unchecked Sendable {
     var cancelled = false
+}
+
+/// Resume flag for the auto-pause (same pattern as CancelBox).
+final class ResumeBox: @unchecked Sendable {
+    var resumed = false
+    func reset() { resumed = false }
+}
+
+/// Shared, locked progress counters for the parallel copy workers.
+final class CopyCounters: @unchecked Sendable {
+    struct Snap { let done: Int; let ok: Int; let skip: Int; let fail: Int }
+    private let lock = NSLock()
+    private var ok = 0, skip = 0, fail = 0, done = 0, consec = 0
+    private var failed: [Int] = []
+
+    var consecutiveFailCount: Int { lock.lock(); defer { lock.unlock() }; return consec }
+    func resetConsecutive() { lock.lock(); consec = 0; lock.unlock() }
+
+    func recordOK() -> Snap {
+        lock.lock(); defer { lock.unlock() }
+        ok += 1; done += 1; consec = 0
+        return Snap(done: done, ok: ok, skip: skip, fail: fail)
+    }
+    func recordSkip() -> Snap {
+        lock.lock(); defer { lock.unlock() }
+        skip += 1; done += 1; consec = 0
+        return Snap(done: done, ok: ok, skip: skip, fail: fail)
+    }
+    func recordFail(_ id: Int) -> Snap {
+        lock.lock(); defer { lock.unlock() }
+        fail += 1; done += 1; consec += 1; failed.append(id)
+        return Snap(done: done, ok: ok, skip: skip, fail: fail)
+    }
+    func finalSnapshot() -> (ok: Int, skip: Int, fail: Int, failedIDs: [Int]) {
+        lock.lock(); defer { lock.unlock() }
+        return (ok, skip, fail, failed)
+    }
+}
+
+/// Rate-limits share re-mount attempts to one per 30s across all copy workers —
+/// hammering a dead server with mount requests just piles up hung work.
+final class MountThrottle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last: Date?
+    func shouldAttempt() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if let l = last, Date().timeIntervalSince(l) < 30 { return false }
+        last = Date()
+        return true
+    }
 }
 
 // MARK: - Copy-conflict plumbing

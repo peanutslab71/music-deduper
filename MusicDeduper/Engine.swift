@@ -11,6 +11,7 @@ import AVFoundation
 import AudioToolbox
 import CryptoKit
 import AppKit
+import NetFS
 
 // MARK: - Models
 
@@ -377,15 +378,22 @@ func ipVersionOfSMBAddress(_ address: String) -> String? {
     return "smb://" + ip + path
 }
 
-/// Ask macOS to (re)mount an SMB share as guest, without stealing focus.
-/// Returns true if the mount command launched. Mounting completes shortly after.
+/// (Re)mount an SMB share as guest, directly through the system mounter (NetFS).
+/// This deliberately does NOT go through Finder ("open smb://…" hands the mount
+/// to Finder's machinery, which piles work onto Finder exactly when the server
+/// is dead and Finder is already struggling). Blocking — call under a watchdog.
+/// Returns true if the share is mounted when the call returns.
 @discardableResult
 func mountSMBGuest(_ address: String) -> Bool {
     var s = address.trimmingCharacters(in: .whitespaces)
     guard !s.isEmpty else { return false }
     if !s.lowercased().hasPrefix("smb://") { s = "smb://" + s }
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    p.arguments = ["-g", s]          // -g: don't bring anything to the foreground
-    do { try p.run(); p.waitUntilExit(); return true } catch { return false }
+    guard let url = URL(string: s) else { return false }
+    let openOpts = NSMutableDictionary()
+    openOpts[kNetFSUseGuestKey] = true
+    openOpts[kNAUIOptionKey] = kNAUIOptionNoUI      // never pop a login dialog
+    let mountOpts = NSMutableDictionary()
+    mountOpts[kNetFSSoftMountKey] = true            // soft: error out rather than hang forever
+    let rc = NetFSMountURLSync(url as CFURL, nil, nil, nil, openOpts, mountOpts, nil)
+    return rc == 0 || rc == EEXIST                  // EEXIST: already mounted — fine
 }

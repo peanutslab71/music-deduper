@@ -24,11 +24,14 @@ A four-step wizard: **Source → Review → Clean up → Copy.**
 - **Copy** rebuilds a clean Artist/Album tree on a server or NAS share, as an
   explicit sequence: locate the share → pick the folder → copy. Files that already
   exist **ask first** (Overwrite / Skip, each or All — nothing silent). The copy is
-  built for flaky network shares: macOS is told not to throttle the app or sleep
-  mid-run, the share is nudged every 30 seconds so the connection can't idle out,
-  every copied file is verified byte-for-byte-count against the source, and a file
-  that fails is retried up to 5 times (re-mounting the share if it dropped) before
-  being set aside — a **Retry failed** button at the end re-runs just those.
+  built for flaky network shares: **three files copy in parallel** (per-file round
+  trips dominate on the old SMB dialects small servers speak), macOS is told not
+  to throttle the app or sleep mid-run, the share is nudged every 30 seconds so
+  the connection can't idle out, every copied file is verified against the source,
+  and a file that fails is retried up to 5 times (re-mounting the share directly —
+  never through Finder — if it dropped) before being set aside, with a **Retry
+  failed** button at the end. If the server disappears entirely, the run **pauses
+  itself** and offers Resume rather than grinding through timeouts.
 - **ROCK-aware copying** (v1.1): if the destination is a Roon ROCK server with Roon
   Server running, the copy is blocked — copying under a live server can hang it. The
   app offers to stop Roon Server for you, runs the copy, then offers to start it

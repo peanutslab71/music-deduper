@@ -329,6 +329,20 @@ struct OperationSheet: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            // several files in a row failed — server is gone, run paused itself
+            if store.opPaused {
+                HStack(spacing: 10) {
+                    Label("The server has stopped responding — copy paused.",
+                          systemImage: "pause.circle.fill")
+                        .foregroundStyle(.orange)
+                        .fontWeight(.medium)
+                    Spacer()
+                    Button("Resume") { store.resumeCopy() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+            }
             // copy paused on a differing file — decide before anything continues
             if let c = store.pendingConflict {
                 ConflictPanel(conflict: c) { store.resolveConflict($0) }

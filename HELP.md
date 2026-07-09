@@ -26,10 +26,19 @@ remove duplicates and never copy anything anywhere.
 Network shares — especially over Wi-Fi, especially on small NAS boxes and
 Roon ROCK — drop out. The copy step assumes they will:
 
+- **Three files copy at once.** On the old SMB dialects small servers speak,
+  the per-file back-and-forth costs more than the data itself; parallel
+  streams keep the link busy and roughly halve big-run times.
 - Every copied file's size is **verified against the source**; a file that
   arrives incomplete is deleted and re-copied.
 - A failing file is retried up to **5 times** with increasing waits, and the
-  share is **re-mounted automatically** if it has dropped.
+  share is **re-mounted automatically** if it has dropped — directly through
+  the system mounter, never via Finder, and at most once per 30 seconds, so
+  a dead server doesn't get hammered (and Finder doesn't get dragged in).
+- If several files in a row fail, the run **pauses itself** — "the server has
+  stopped responding" with a **Resume** button — instead of timing out on
+  every remaining file. Fix the network (or the server), press Resume, and
+  it picks up where it stopped.
 - Re-mounts use the server's **IP address**, not its name. When you locate the
   share the app converts the name (e.g. `rock`) to its IP and says so on the
   Copy page — a network that's already misbehaving often can't answer name
