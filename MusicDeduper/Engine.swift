@@ -312,6 +312,41 @@ func destReachable(_ url: URL) -> Bool {
     return (try? url.checkResourceIsReachable()) == true
 }
 
+/// Resolve a hostname to its IPv4 address using the system resolver.
+/// Returns nil if it can't be resolved. May block for a few seconds — call
+/// off the main thread, and ideally while the network is healthy.
+func resolveIPv4(_ host: String) -> String? {
+    var hints = addrinfo()
+    hints.ai_family = AF_INET
+    hints.ai_socktype = SOCK_STREAM
+    var res: UnsafeMutablePointer<addrinfo>?
+    guard getaddrinfo(host, nil, &hints, &res) == 0, let r = res else { return nil }
+    defer { freeaddrinfo(r) }
+    var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+    guard getnameinfo(r.pointee.ai_addr, r.pointee.ai_addrlen,
+                      &buf, socklen_t(buf.count), nil, 0, NI_NUMERICHOST) == 0 else { return nil }
+    return String(cString: buf)
+}
+
+/// Rewrite an SMB address ("rock/Data", "smb://rock/Data") to use the host's
+/// IPv4 address ("smb://192.168.1.128/Data"), so a re-mount doesn't also depend
+/// on name lookup. Returns nil if the host is already an IP or can't be resolved
+/// (bare names are also tried with ".local" appended, for mDNS-only hosts).
+func ipVersionOfSMBAddress(_ address: String) -> String? {
+    var s = address.trimmingCharacters(in: .whitespaces)
+    guard !s.isEmpty else { return nil }
+    if s.lowercased().hasPrefix("smb://") { s.removeFirst(6) }
+    let parts = s.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+    let host = String(parts[0])
+    let path = parts.count > 1 ? "/" + parts[1] : ""
+    guard !host.isEmpty else { return nil }
+    var addr4 = in_addr()
+    if inet_pton(AF_INET, host, &addr4) == 1 { return nil }   // already an IP
+    let ip = resolveIPv4(host) ?? (host.contains(".") ? nil : resolveIPv4(host + ".local"))
+    guard let ip else { return nil }
+    return "smb://" + ip + path
+}
+
 /// Ask macOS to (re)mount an SMB share as guest, without stealing focus.
 /// Returns true if the mount command launched. Mounting completes shortly after.
 @discardableResult

@@ -289,6 +289,18 @@ final class DedupStore: ObservableObject {
             var ok = 0, skip = 0, fail = 0, cancelled = false
             var failedIDs: [Int] = []
             let fm = FileManager.default
+
+            // Resolve the share's hostname to an IP now, while the connection is
+            // healthy — re-mounts then use the IP directly instead of also having
+            // to win a name lookup on a network that's already misbehaving.
+            let reconnectAddr: String = {
+                guard !addr.isEmpty, let ip = ipVersionOfSMBAddress(addr) else { return addr }
+                return ip
+            }()
+            if reconnectAddr != addr {
+                await self.opLogLine("ℹ \(addr) is \(reconnectAddr) — reconnects will use the IP")
+            }
+
             for (n, t) in keepers.enumerated() {
                 if box.cancelled { cancelled = true; break }
                 let dir = dest.appendingPathComponent(sanitizeName(t.displayArtist.isEmpty ? "Unknown Artist" : t.displayArtist))
@@ -357,9 +369,9 @@ final class DedupStore: ObservableObject {
                         // if the share has dropped, actively re-mount it (guest) so we self-heal
                         var reconn = ""
                         if !addr.isEmpty && !destReachable(dest) {
-                            let launched = mountSMBGuest(addr)
-                            reconn = launched ? "  · reconnecting to \(addr)…" : "  · reconnect failed"
-                            await self.opLogLine(launched ? "⟳ Reconnecting to \(addr)…" : "⚠ Reconnect to \(addr) failed")
+                            let launched = mountSMBGuest(reconnectAddr)
+                            reconn = launched ? "  · reconnecting to \(reconnectAddr)…" : "  · reconnect failed"
+                            await self.opLogLine(launched ? "⟳ Reconnecting to \(reconnectAddr)…" : "⚠ Reconnect to \(reconnectAddr) failed")
                         }
                         await self.setNote("⟳ Retrying “\(t.name)” (attempt \(attempt)): \(error.localizedDescription)\(reconn)  · waiting \(waitS)s")
                         var slept = 0.0
