@@ -941,7 +941,7 @@ final class DedupStore: ObservableObject {
             let s = sweep ? counters.recordSweepOK() : counters.recordOK(clean: attempt == 0)
             let suffix = attempt > 0 ? "  (after \(attempt) retr\(attempt == 1 ? "y" : "ies"))" : ""
             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
-                              line: "\(sweep ? "⟲ swept " : "✓ ")\(targetPath)\(suffix)")
+                              line: "\(sweep ? "⟲ swept " : "✓ ")\(sanitizeName(t.displayArtist))/\(sanitizeName(t.album))/\(t.name)\(suffix)")
         } else if !box.cancelled {
             let s = sweep ? counters.recordSweepFail(t.id) : counters.recordFail(t.id)
             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
