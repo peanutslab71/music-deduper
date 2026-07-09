@@ -35,11 +35,27 @@ final class PaneModel: ObservableObject {
 
     private(set) var client: DirectSMBClient?
 
-    /// This pane as a transfer endpoint (source or destination).
-    var endpoint: DedupStore.XferEnd {
+    /// This pane as a transfer endpoint (source or destination), optionally into
+    /// a named sub-folder of the current folder (for drops onto a folder row).
+    func endpoint(appendingSub sub: String? = nil) -> DedupStore.XferEnd {
         switch kind {
-        case .local: return .local(localURL)
-        case .server: return .server(client ?? DirectSMBClient(address: "smb://x/y")!, serverDir)
+        case .local:
+            return .local(sub.map { localURL.appendingPathComponent($0) } ?? localURL)
+        case .server:
+            let base = [serverDir, sub].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "/")
+            return .server(client ?? DirectSMBClient(address: "smb://x/y")!, base)
+        }
+    }
+    var endpoint: DedupStore.XferEnd { endpoint(appendingSub: nil) }
+
+    /// True when two panes are the same location (same server+share, or both
+    /// local) — a drag between them is a move, not a copy (Finder convention).
+    static func sameLocation(_ a: PaneModel, _ b: PaneModel) -> Bool {
+        switch (a.kind, b.kind) {
+        case (.local, .local): return true
+        case (.server, .server):
+            return a.client?.host == b.client?.host && a.client?.share == b.client?.share
+        default: return false
         }
     }
     var selectedItems: [(name: String, isDir: Bool)] {
@@ -299,20 +315,33 @@ final class PaneModel: ObservableObject {
     }
 }
 
+// MARK: - Drag payload (in-process — both panes share the view tree)
+
+@MainActor
+final class DragState: ObservableObject {
+    weak var source: PaneModel?
+    var items: [(name: String, isDir: Bool)] = []
+    func begin(_ pane: PaneModel, items: [(name: String, isDir: Bool)]) {
+        source = pane; self.items = items
+    }
+    func clear() { source = nil; items = [] }
+}
+
 // MARK: - The window
 
 struct ServerFilesView: View {
     @ObservedObject var store: DedupStore
     @StateObject private var left = PaneModel()
     @StateObject private var right = PaneModel()
+    @StateObject private var drag = DragState()
     @State private var appeared = false
     @State private var activeLeft = true      // which pane is the source
 
     var body: some View {
         HSplitView {
-            PaneView(model: left, other: right, store: store, arrow: "arrow.right",
+            PaneView(model: left, other: right, store: store, drag: drag, arrow: "arrow.right",
                      isActive: activeLeft, makeActive: { activeLeft = true })
-            PaneView(model: right, other: left, store: store, arrow: "arrow.left",
+            PaneView(model: right, other: left, store: store, drag: drag, arrow: "arrow.left",
                      isActive: !activeLeft, makeActive: { activeLeft = false })
         }
         .frame(minWidth: 860, minHeight: 480)
@@ -342,9 +371,11 @@ struct PaneView: View {
     @ObservedObject var model: PaneModel
     @ObservedObject var other: PaneModel
     @ObservedObject var store: DedupStore
+    @ObservedObject var drag: DragState
     let arrow: String
     let isActive: Bool
     let makeActive: () -> Void
+    @State private var dropTargeted = false
 
     private func transfer(move: Bool) {
         let picked = model.selectedItems
@@ -357,6 +388,28 @@ struct PaneView: View {
         store.runTransfer(picked, from: model.endpoint, to: other.endpoint, move: move) {
             model.reload(); other.reload()
         }
+    }
+
+    /// A drop landed on this pane (optionally into a sub-folder here). Source is
+    /// the dragged-from pane; same-location drops move, cross-location copy —
+    /// the Finder convention.
+    private func handleDrop(intoSubfolder sub: String? = nil) -> Bool {
+        guard let sp = drag.source, !drag.items.isEmpty else { return false }
+        let picked = drag.items
+        drag.clear()
+        // dropping onto the same folder it came from with no sub-target = no-op
+        if sp === model && sub == nil { return false }
+        let destEnd = model.endpoint(appendingSub: sub)
+        let move = PaneModel.sameLocation(sp, model)
+        if move, sub == nil, sp.canMoveInstantly(to: model) {
+            sp.selection = Set(picked.map(\.name))
+            sp.moveSelection(to: model)
+            return true
+        }
+        store.runTransfer(picked, from: sp.endpoint, to: destEnd, move: move) {
+            sp.reload(); model.reload()
+        }
+        return true
     }
 
     @State private var showPicker = false
@@ -422,6 +475,19 @@ struct PaneView: View {
                 TableColumn("Name") { item in
                     Label(item.name, systemImage: item.isDir ? "folder.fill" : "music.note")
                         .labelStyle(.titleAndIcon)
+                        .contentShape(Rectangle())
+                        .onDrag {
+                            // drag the whole selection if this row is part of it,
+                            // otherwise just this row
+                            let names = model.selection.contains(item.name)
+                                ? model.selectedItems
+                                : [(item.name, item.isDir)]
+                            drag.begin(model, items: names)
+                            return NSItemProvider(object: item.name as NSString)
+                        }
+                        .onDrop(of: [.text], isTargeted: nil) { _ in
+                            item.isDir ? handleDrop(intoSubfolder: item.name) : false
+                        }
                 }
                 .width(min: 200, ideal: 320)
                 TableColumn("Size") { item in
@@ -507,13 +573,14 @@ struct PaneView: View {
             }
             .padding(8)
         }
-        .background(isActive ? Color.accentColor.opacity(0.04) : Color.clear)
+        .background((isActive || dropTargeted) ? Color.accentColor.opacity(dropTargeted ? 0.12 : 0.04) : Color.clear)
         .overlay(alignment: .top) {
             Rectangle().fill(isActive ? Color.accentColor : Color.clear).frame(height: 2)
         }
         .contentShape(Rectangle())
         .onTapGesture { makeActive() }
         .onChange(of: model.selection) { sel in if !sel.isEmpty { makeActive() } }
+        .onDrop(of: [.text], isTargeted: $dropTargeted) { _ in handleDrop() }
         .sheet(isPresented: $showPicker) {
             ServerPickerSheet { host, share in
                 model.setServer(host: host, share: share)
