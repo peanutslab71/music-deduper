@@ -33,6 +33,14 @@ A four-step wizard: **Source → Review → Clean up → Copy.**
   never through Finder — if it dropped) before being set aside, with a **Retry
   failed** button at the end. If the server disappears entirely, the run **pauses
   itself** and offers Resume rather than grinding through timeouts.
+- **Built-in network engine** (v1.3): the app finds servers on your network,
+  lists their shares, browses folders and copies files by talking SMB
+  **directly to the server** — macOS's own network mount (the thing that
+  beachballs Finder when a NAS hiccups) is not involved at any point, and
+  can even be ejected during copies. Old, fussy servers (Roon ROCK's
+  ten-year-old Samba very much included) get the patient timeouts,
+  instant reconnects and honest errors macOS refuses to give them. The
+  classic mount-based engine remains one toggle away.
 - **ROCK-aware copying** (v1.1): if the destination is a Roon ROCK server with Roon
   Server running, the copy is blocked — copying under a live server can hang it. The
   app offers to stop Roon Server for you, runs the copy, then offers to start it
@@ -78,6 +86,9 @@ warranty of any kind, express or implied**, and no liability is accepted for any
 loss of data or other damage arising from its use. Deletes default to the Trash
 and are confirmed twice, but you should **back up your library before letting
 this (or any) tool loose on it**. See [LICENSE](LICENSE) for the full terms (MIT).
+
+The app's own code is MIT; the built-in network engine uses the LGPL-licensed
+AMSMB2/libsmb2 libraries — see [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).
 
 ## Notes
 

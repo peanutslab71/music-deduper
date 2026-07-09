@@ -96,10 +96,19 @@ struct AboutView: View {
 
             Divider().frame(width: 260)
 
-            Text("© 2026 Neil Cotty. MIT licensed —\nprovided as-is, with no warranty of any kind.")
+            Text("© 2026 Neil Cotty. App code MIT licensed —\nprovided as-is, with no warranty of any kind.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+
+            Text("Network engine built on AMSMB2 and libsmb2,\n© their authors, LGPL 2.1 — see Acknowledgements.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+
+            Link("Acknowledgements & licences",
+                 destination: URL(string: "https://github.com/peanutslab71/music-deduper/blob/main/ACKNOWLEDGEMENTS.md")!)
+                .font(.caption2)
         }
         .padding(28)
         .frame(width: 340)

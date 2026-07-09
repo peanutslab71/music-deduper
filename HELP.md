@@ -21,6 +21,31 @@ asking:
 You can stop after any step. Plenty of people only ever use it to find and
 remove duplicates and never copy anything anywhere.
 
+## The built-in network engine (v1.3)
+
+From v1.3 the app has its own SMB networking — it discovers servers, lists
+shares, browses folders and copies files by talking to the server directly,
+without macOS's network mount in the path. Why that matters: the macOS
+mount declares a session dead after a ~30-second stall and (against old
+servers with no session-recovery features) can never resume it — that's
+where hung Finders, "Server connections interrupted" and mystery errors
+come from. The built-in engine uses its own timeouts, reconnects instantly
+by redialling, and reports the server's actual errors.
+
+- **Choose server…** scans your network (both Bonjour and a direct sweep —
+  old servers like Roon ROCK don't advertise the modern way) and lists what
+  it finds; click a server to see its shares, click a share, done. A typed
+  address works too.
+- **Browse…** on the folder step drills into the share over the same
+  connection.
+- During copies the engine runs several connections in parallel and tunes
+  how many (2–6) from measured throughput, second by second.
+- The **"Disconnect the Finder mount while copying"** option (on by
+  default) ejects any macOS mount of the share for the duration, so the
+  OS's own client can't interfere. Remount any time with ⌘K.
+- The classic mount-based engine is still there — untick "Built-in network
+  engine" on the Copy step.
+
 ## Copying to a server — how the app protects itself
 
 Network shares — especially over Wi-Fi, especially on small NAS boxes and
