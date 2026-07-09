@@ -508,7 +508,7 @@ struct CopyStepView: View {
             }
 
             numbered(3, title: "Copy",
-                     detail: "\(store.keeperTracks.count) keeper tracks · identical files are skipped automatically · a Roon ROCK destination is checked and Roon Server stopped first.") {
+                     detail: "\(store.keeperTracks.count) keeper tracks · any file that already exists asks Overwrite/Skip (or All) · a Roon ROCK destination is checked and Roon Server stopped first.") {
                 Button {
                     if let d = destFolder { onCopy(d) }
                 } label: {
@@ -591,8 +591,11 @@ struct ConflictPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("This file already exists — and it's different", systemImage: "exclamationmark.triangle.fill")
-                .font(.headline).foregroundStyle(.orange)
+            Label(conflict.identical
+                    ? "This file already exists (identical size)"
+                    : "This file already exists — and it's different",
+                  systemImage: conflict.identical ? "doc.on.doc" : "exclamationmark.triangle.fill")
+                .font(.headline).foregroundStyle(conflict.identical ? .secondary : .orange)
             HStack(spacing: 12) {
                 ArtworkView(key: conflict.srcURL.deletingLastPathComponent().path,
                             sampleURL: conflict.srcURL, size: 44, corner: 6)

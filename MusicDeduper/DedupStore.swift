@@ -258,22 +258,19 @@ final class DedupStore: ObservableObject {
                                 .appendingPathComponent(sanitizeName(t.album.isEmpty ? "Unknown Album" : t.album))
                 let target = dir.appendingPathComponent(t.name)
 
-                // already present with matching size → skip, no copy
+                // file already exists at the destination → that's a conflict,
+                // the user decides (Overwrite / Skip, each or All). No silent skips.
                 if let vals = try? target.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
                    let exSize = vals.fileSize {
-                    if Int64(exSize) == t.size {
-                        skip += 1
-                        await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail, line: "• skip \(t.name)")
-                        continue
-                    }
-                    // exists but DIFFERS → pause and ask (unless an All policy is set)
+                    let identical = Int64(exSize) == t.size
                     var decision = conflicts.policy
                     if decision == nil {
                         await self.presentConflict(CopyConflict(
                             name: t.name,
                             artist: t.displayArtist, album: t.album,
                             srcURL: t.url, srcSize: t.size,
-                            dstSize: Int64(exSize), dstDate: vals.contentModificationDate))
+                            dstSize: Int64(exSize), dstDate: vals.contentModificationDate,
+                            identical: identical))
                         while !box.cancelled {
                             if let d = conflicts.take() { decision = d; break }
                             try? await Task.sleep(nanoseconds: 200_000_000)
@@ -283,7 +280,8 @@ final class DedupStore: ObservableObject {
                     }
                     if decision == .skip || decision == .skipAll {
                         skip += 1
-                        await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail, line: "• kept existing \(t.name)")
+                        await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail,
+                                          line: "• kept existing \(t.name)\(identical ? " (identical size)" : "")")
                         continue
                     }
                     // overwrite falls through to the copy below (target removed there)
@@ -355,6 +353,7 @@ struct CopyConflict: Identifiable {
     let srcSize: Int64
     let dstSize: Int64
     let dstDate: Date?
+    let identical: Bool     // same size as the source (likely the same file)
 }
 
 enum ConflictDecision { case overwrite, skip, overwriteAll, skipAll }
