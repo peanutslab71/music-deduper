@@ -138,6 +138,17 @@ final class DirectSMBClient: @unchecked Sendable {
         try await ensure().createDirectory(atPath: path)
     }
 
+    /// Delete a file, or a folder with everything inside it. SMB has no
+    /// Trash — this is permanent, and the UI must say so.
+    func removeItem(_ path: String, isDir: Bool) async throws {
+        let m = try await ensure()
+        if isDir {
+            try await m.removeDirectory(atPath: path, recursive: true)
+        } else {
+            try await m.removeFile(atPath: path)
+        }
+    }
+
     /// Rename/move that refuses to replace anything — the manager's version.
     func moveNoReplace(_ from: String, to: String) async throws {
         let m = try await ensure()

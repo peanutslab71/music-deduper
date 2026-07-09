@@ -60,9 +60,9 @@ struct ContentView: View {
                 Button {
                     openWindow(id: "files")
                 } label: {
-                    Label("Server Files", systemImage: "externaldrive.connected.to.line.below")
+                    Label("File Commander", systemImage: "externaldrive.connected.to.line.below")
                 }
-                .help("Browse and manage files on your server — rename, move, organise")
+                .help("File Commander — browse and manage files on your server: rename, move, organise, delete")
             }
         }
         // when a scan finishes, land on the right Review screen automatically:

@@ -35,6 +35,11 @@ struct MusicDeduperApp: App {
                 }
                 .keyboardShortcut("?", modifiers: .command)
             }
+            // File Commander gets its own top-level menu — it's a separate
+            // tool, not a step of the wizard
+            CommandMenu("File Commander") {
+                FileCommanderMenuButton()
+            }
         }
 
         Window("About Music Deduper", id: "about") {
@@ -42,9 +47,18 @@ struct MusicDeduperApp: App {
         }
         .windowResizability(.contentSize)
 
-        Window("Server Files", id: "files") {
+        Window("File Commander", id: "files") {
             ServerFilesView()
         }
+    }
+}
+
+/// Menu item that opens (or brings forward) the File Commander window.
+private struct FileCommanderMenuButton: View {
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Button("Open File Commander") { openWindow(id: "files") }
+            .keyboardShortcut("k", modifiers: [.command, .shift])
     }
 }
 

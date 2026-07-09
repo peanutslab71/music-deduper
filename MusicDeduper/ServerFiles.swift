@@ -172,8 +172,65 @@ final class PaneModel: ObservableObject {
             Task {
                 do {
                     try await client.moveNoReplace(base + oldName, to: base + DirectSMBClient.nfc(n))
+                    PaneModel.log("renamed (server): \(base + oldName) → \(base + n)")
                     self.reload()
                 } catch { self.errorMsg = "Couldn't rename: \(error.localizedDescription)" }
+            }
+        }
+    }
+
+    /// Everything File Commander changes gets a line in
+    /// ~/Library/Logs/MusicDeduper/commander.log — deletions especially.
+    static func log(_ s: String) {
+        let dir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Logs/MusicDeduper", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("commander.log")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        if let h = try? FileHandle(forWritingTo: url) {
+            defer { try? h.close() }
+            _ = try? h.seekToEnd()
+            let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            h.write(Data("\(f.string(from: Date()))  \(s)\n".utf8))
+        }
+    }
+
+    /// Delete the selection. Local items go to the Trash (recoverable);
+    /// server items are gone for good — the view's confirm flow says so.
+    func deleteSelection() {
+        let names = selection
+        guard !names.isEmpty else { return }
+        let picked = items.filter { names.contains($0.name) }
+        switch kind {
+        case .local:
+            let fm = FileManager.default
+            for item in picked {
+                let url = localURL.appendingPathComponent(item.name)
+                do {
+                    try fm.trashItem(at: url, resultingItemURL: nil)
+                    Self.log("trashed (local): \(url.path)")
+                } catch { errorMsg = error.localizedDescription; break }
+            }
+            reload()
+        case .server:
+            guard let client else { return }
+            let base = serverDir.isEmpty ? "" : serverDir + "/"
+            let label = "\(client.host)/\(client.share)"
+            Task {
+                var failed: String?
+                for item in picked {
+                    do {
+                        try await client.removeItem(base + item.name, isDir: item.isDir)
+                        PaneModel.log("DELETED (server \(label)): \(base + item.name)\(item.isDir ? " [folder + contents]" : "")")
+                    } catch {
+                        failed = "Couldn't delete “\(item.name)”: \(error.localizedDescription)"
+                        break
+                    }
+                }
+                self.errorMsg = failed
+                self.reload()
             }
         }
     }
@@ -211,7 +268,10 @@ final class PaneModel: ObservableObject {
             Task {
                 var failed: String?
                 for name in names {
-                    do { try await client.moveNoReplace(fromBase + name, to: toBase + name) }
+                    do {
+                        try await client.moveNoReplace(fromBase + name, to: toBase + name)
+                        PaneModel.log("moved (server): \(fromBase + name) → \(toBase + name)")
+                    }
                     catch { failed = "Couldn't move “\(name)”: \(error.localizedDescription)"; break }
                 }
                 self.errorMsg = failed
@@ -268,6 +328,22 @@ struct PaneView: View {
     @State private var showRename = false
     @State private var renameFrom = ""
     @State private var renameTo = ""
+    @State private var confirmDelete1 = false
+    @State private var confirmDelete2 = false
+
+    private var deleteSummary: (files: Int, folders: Int, bytes: Int64) {
+        let picked = model.items.filter { model.selection.contains($0.name) }
+        return (picked.filter { !$0.isDir }.count,
+                picked.filter { $0.isDir }.count,
+                picked.filter { !$0.isDir }.reduce(0) { $0 + $1.size })
+    }
+    private var deleteDetail: String {
+        let s = deleteSummary
+        var parts: [String] = []
+        if s.files > 0 { parts.append("\(s.files) file(s) · \(fmtBytes(s.bytes))") }
+        if s.folders > 0 { parts.append("\(s.folders) folder(s) including everything inside") }
+        return parts.joined(separator: ", plus ")
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -328,6 +404,12 @@ struct PaneView: View {
                         model.moveSelection(to: other)
                     }
                 }
+                if !sel.isEmpty {
+                    Button(model.kind == .local ? "Move to Trash" : "Delete…", role: .destructive) {
+                        model.selection = sel
+                        confirmDelete1 = true
+                    }
+                }
             } primaryAction: { sel in
                 if sel.count == 1, let name = sel.first { model.open(name) }
             }
@@ -356,6 +438,15 @@ struct PaneView: View {
                 .help(model.canMoveInstantly(to: other)
                       ? "Move the selection into the other pane's folder (instant)"
                       : "Move needs both panes on the same share (transfers between locations come in a later update)")
+                Button(role: .destructive) {
+                    confirmDelete1 = true
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .disabled(model.selection.isEmpty)
+                .help(model.kind == .local
+                      ? "Move the selection to the Trash"
+                      : "Delete from the server — there is no Trash there, this is permanent")
                 Spacer()
                 if let e = model.errorMsg {
                     Text(e).font(.caption).foregroundStyle(.red)
@@ -380,6 +471,25 @@ struct PaneView: View {
             namePrompt(title: "Rename “\(renameFrom)”", text: $renameTo, confirm: "Rename") {
                 model.rename(renameFrom, to: renameTo)
             }
+        }
+        .alert(model.kind == .local ? "Move to Trash?" : "Delete from the server?",
+               isPresented: $confirmDelete1) {
+            if model.kind == .local {
+                Button("Move to Trash", role: .destructive) { model.deleteSelection() }
+            } else {
+                Button("Continue…", role: .destructive) { confirmDelete2 = true }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text(model.kind == .local
+                 ? "Move \(deleteDetail) to the Trash? You can restore from there."
+                 : "Delete \(deleteDetail) from \(model.title)?")
+        }
+        .alert("This cannot be undone", isPresented: $confirmDelete2) {
+            Button("Delete permanently", role: .destructive) { model.deleteSelection() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Servers have no Trash — \(deleteDetail) will be permanently deleted from \(model.title). Are you absolutely sure?")
         }
     }
 
