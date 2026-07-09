@@ -355,6 +355,9 @@ struct OperationSheet: View {
             HStack {
                 Spacer()
                 if store.opFinished {
+                    if !store.failedCopyIDs.isEmpty {
+                        Button("Retry \(store.failedCopyIDs.count) failed") { store.retryFailedCopies() }
+                    }
                     Button("Close") { store.closeOp() }.keyboardShortcut(.defaultAction)
                 } else {
                     Button("Cancel", role: .destructive) { store.requestCancel() }

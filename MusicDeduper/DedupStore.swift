@@ -56,11 +56,18 @@ final class DedupStore: ObservableObject {
 
     func requestCancel() { cancelBox.cancelled = true }
 
+    // Keeps macOS from throttling us (App Nap) or idle-sleeping mid-operation.
+    private var activity: NSObjectProtocol?
+
     private func opStart(title: String, total: Int) {
         cancelBox.cancelled = false
         opActive = true; opFinished = false; opTitle = title
         opTotal = total; opDone = 0; opOK = 0; opSkip = 0; opFail = 0; opLog = []; opNote = ""
         busy = true
+        if activity == nil {
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .idleSystemSleepDisabled], reason: title)
+        }
     }
     private func opStep(done: Int, ok: Int, skip: Int, fail: Int, line: String) {
         opDone = done; opOK = ok; opSkip = skip; opFail = fail
@@ -74,6 +81,7 @@ final class DedupStore: ObservableObject {
     }
     private func opFinishLine(_ summary: String) {
         opLog.append(summary); opFinished = true; busy = false; status = summary; opNote = ""
+        if let a = activity { ProcessInfo.processInfo.endActivity(a); activity = nil }
     }
     func closeOp() { opActive = false }
 
@@ -242,15 +250,44 @@ final class DedupStore: ObservableObject {
 
     // MARK: Copy keepers
 
+    // files that gave up after all retries in the last copy run — offered a "Retry failed"
+    @Published var failedCopyIDs: [Int] = []
+    private var lastCopyDest: URL?
+
     func copyKeepers(to dest: URL) {
-        let keepers = keeperTracks
-        opStart(title: "Copying \(keepers.count) keeper(s) → \(dest.lastPathComponent)", total: keepers.count)
+        runCopy(keeperTracks, to: dest,
+                title: "Copying \(keeperTracks.count) keeper(s) → \(dest.lastPathComponent)")
+    }
+
+    func retryFailedCopies() {
+        guard let dest = lastCopyDest, !failedCopyIDs.isEmpty else { return }
+        let items = failedCopyIDs.compactMap { trackByID($0) }
+        runCopy(items, to: dest, title: "Retrying \(items.count) failed file(s) → \(dest.lastPathComponent)")
+    }
+
+    private func runCopy(_ items: [Track], to dest: URL, title: String) {
+        let keepers = items
+        lastCopyDest = dest
+        failedCopyIDs = []
+        opStart(title: title, total: keepers.count)
         let box = cancelBox
         let conflicts = conflictBox
         conflicts.reset()
         let addr = smbAddress
+
+        // Keep-alive: touch the destination every 30s so the SMB session never
+        // sits idle long enough for the server (or macOS) to drop it.
+        let keepAlive = Task.detached(priority: .background) {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                if Task.isCancelled { break }
+                _ = try? FileManager.default.contentsOfDirectory(atPath: dest.path)
+            }
+        }
+
         Task.detached(priority: .userInitiated) {
             var ok = 0, skip = 0, fail = 0, cancelled = false
+            var failedIDs: [Int] = []
             let fm = FileManager.default
             for (n, t) in keepers.enumerated() {
                 if box.cancelled { cancelled = true; break }
@@ -287,17 +324,31 @@ final class DedupStore: ObservableObject {
                     // overwrite falls through to the copy below (target removed there)
                 }
 
-                // Retry this file until it succeeds — never skip. Only Cancel breaks out.
+                // Retry this file up to 5 times (re-mounting the share if it dropped),
+                // then mark it failed and move on — one bad file must not stall the run.
                 var copied = false
                 var attempt = 0
+                let maxAttempts = 5
                 while !box.cancelled {
                     do {
                         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
                         if fm.fileExists(atPath: target.path) { try? fm.removeItem(at: target) }
                         try fm.copyItem(at: t.url, to: target)
+                        // verify the whole file landed — a mid-copy stall can leave a truncated file
+                        let landed = ((try? fm.attributesOfItem(atPath: target.path))?[.size] as? NSNumber)?.int64Value
+                        guard landed == t.size else {
+                            try? fm.removeItem(at: target)
+                            throw NSError(domain: "MusicDeduper", code: 1, userInfo: [
+                                NSLocalizedDescriptionKey:
+                                    "incomplete copy (\(landed ?? 0) of \(t.size) bytes landed)"])
+                        }
                         copied = true; break
                     } catch {
                         attempt += 1
+                        if attempt >= maxAttempts {
+                            await self.opLogLine("✗ giving up on “\(t.name)” after \(maxAttempts) tries: \(error.localizedDescription)")
+                            break
+                        }
                         let waitS = min(attempt * 2, 10)   // back off: 2s, 4s … capped at 10s
                         // log the first stall on this file
                         if attempt == 1 {
@@ -323,15 +374,27 @@ final class DedupStore: ObservableObject {
                     let suffix = attempt > 0 ? "  (after \(attempt) retr\(attempt == 1 ? "y" : "ies"))" : ""
                     await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail,
                                       line: "✓ \(sanitizeName(t.displayArtist))/\(sanitizeName(t.album))/\(t.name)\(suffix)")
+                } else if box.cancelled {
+                    cancelled = true; break
                 } else {
-                    cancelled = true; break   // reached only when the user cancels
+                    // out of attempts — record it and carry on with the rest
+                    fail += 1
+                    failedIDs.append(t.id)
+                    await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail,
+                                      line: "✗ \(t.name) — failed after \(maxAttempts) tries")
                 }
             }
+            keepAlive.cancel()
             let summary = cancelled
                 ? "■ Cancelled — copied \(ok), skipped \(skip)."
-                : "✔ Done — copied \(ok), skipped \(skip)" + (fail > 0 ? ", \(fail) failed." : ".")
-            await self.opFinishLine(summary)
+                : "✔ Done — copied \(ok), skipped \(skip)"
+                  + (fail > 0 ? ", \(fail) failed — use Retry failed." : ".")
+            await self.finishCopy(summary: summary, failedIDs: failedIDs)
         }
+    }
+    private func finishCopy(summary: String, failedIDs: [Int]) {
+        failedCopyIDs = failedIDs
+        opFinishLine(summary)
     }
     private func presentConflict(_ c: CopyConflict?) { pendingConflict = c }
 }
