@@ -41,7 +41,7 @@ struct ContentView: View {
                 Task { @MainActor in await guardedCopy(to: dest) }
             }
         case .browse:
-            ServerFilesView()
+            ServerFilesView(store: store)
         }
     }
 

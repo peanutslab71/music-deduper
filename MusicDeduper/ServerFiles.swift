@@ -35,6 +35,23 @@ final class PaneModel: ObservableObject {
 
     private(set) var client: DirectSMBClient?
 
+    /// This pane as a transfer endpoint (source or destination).
+    var endpoint: DedupStore.XferEnd {
+        switch kind {
+        case .local: return .local(localURL)
+        case .server: return .server(client ?? DirectSMBClient(address: "smb://x/y")!, serverDir)
+        }
+    }
+    var selectedItems: [(name: String, isDir: Bool)] {
+        items.filter { selection.contains($0.name) }.map { ($0.name, $0.isDir) }
+    }
+    var destFolderLabel: String {
+        switch kind {
+        case .local: return localURL.lastPathComponent.isEmpty ? "/" : localURL.lastPathComponent
+        case .server: return serverPath.last ?? client?.share ?? "share"
+        }
+    }
+
     var title: String {
         switch kind {
         case .local: return "This Mac — \(localURL.lastPathComponent.isEmpty ? "/" : localURL.lastPathComponent)"
@@ -285,14 +302,18 @@ final class PaneModel: ObservableObject {
 // MARK: - The window
 
 struct ServerFilesView: View {
+    @ObservedObject var store: DedupStore
     @StateObject private var left = PaneModel()
     @StateObject private var right = PaneModel()
     @State private var appeared = false
+    @State private var activeLeft = true      // which pane is the source
 
     var body: some View {
         HSplitView {
-            PaneView(model: left, other: right, arrow: "arrow.right")
-            PaneView(model: right, other: left, arrow: "arrow.left")
+            PaneView(model: left, other: right, store: store, arrow: "arrow.right",
+                     isActive: activeLeft, makeActive: { activeLeft = true })
+            PaneView(model: right, other: left, store: store, arrow: "arrow.left",
+                     isActive: !activeLeft, makeActive: { activeLeft = false })
         }
         .frame(minWidth: 860, minHeight: 480)
         .onAppear {
@@ -320,7 +341,23 @@ struct ServerFilesView: View {
 struct PaneView: View {
     @ObservedObject var model: PaneModel
     @ObservedObject var other: PaneModel
+    @ObservedObject var store: DedupStore
     let arrow: String
+    let isActive: Bool
+    let makeActive: () -> Void
+
+    private func transfer(move: Bool) {
+        let picked = model.selectedItems
+        guard !picked.isEmpty else { return }
+        makeActive()
+        if move && model.canMoveInstantly(to: other) {
+            model.moveSelection(to: other)   // instant same-share rename
+            return
+        }
+        store.runTransfer(picked, from: model.endpoint, to: other.endpoint, move: move) {
+            model.reload(); other.reload()
+        }
+    }
 
     @State private var showPicker = false
     @State private var showNewFolder = false
@@ -349,6 +386,9 @@ struct PaneView: View {
         VStack(spacing: 0) {
             // location + breadcrumb bar
             HStack(spacing: 8) {
+                Circle().fill(isActive ? Color.accentColor : Color.clear)
+                    .frame(width: 7, height: 7)
+                    .help(isActive ? "Source pane" : "")
                 Menu {
                     Button("This Mac — Home") { model.setLocal(FileManager.default.homeDirectoryForCurrentUser) }
                     Button("This Mac — Music") {
@@ -383,6 +423,7 @@ struct PaneView: View {
                     Label(item.name, systemImage: item.isDir ? "folder.fill" : "music.note")
                         .labelStyle(.titleAndIcon)
                 }
+                .width(min: 200, ideal: 320)
                 TableColumn("Size") { item in
                     Text(item.isDir ? "—" : fmtBytes(item.size))
                         .foregroundStyle(.secondary).monospacedDigit()
@@ -398,10 +439,12 @@ struct PaneView: View {
                 if sel.count == 1, let name = sel.first {
                     Button("Rename…") { beginRename(name) }
                 }
-                if !sel.isEmpty && model.canMoveInstantly(to: other) {
-                    Button("Move to other pane") {
-                        model.selection = sel
-                        model.moveSelection(to: other)
+                if !sel.isEmpty {
+                    Button("Copy to \(other.destFolderLabel)") {
+                        model.selection = sel; transfer(move: false)
+                    }
+                    Button("Move to \(other.destFolderLabel)") {
+                        model.selection = sel; transfer(move: true)
                     }
                 }
                 if !sel.isEmpty {
@@ -430,14 +473,21 @@ struct PaneView: View {
                 }
                 .disabled(model.selection.count != 1)
                 Button {
-                    model.moveSelection(to: other)
+                    transfer(move: false)
                 } label: {
-                    Label("Move", systemImage: arrow)
+                    Label("Copy", systemImage: arrow)
                 }
-                .disabled(model.selection.isEmpty || !model.canMoveInstantly(to: other))
+                .disabled(model.selection.isEmpty)
+                .help("Copy the selection into the other pane's folder (\(other.destFolderLabel))")
+                Button {
+                    transfer(move: true)
+                } label: {
+                    Label("Move", systemImage: arrow + ".square")
+                }
+                .disabled(model.selection.isEmpty)
                 .help(model.canMoveInstantly(to: other)
-                      ? "Move the selection into the other pane's folder (instant)"
-                      : "Move needs both panes on the same share (transfers between locations come in a later update)")
+                      ? "Move into the other pane (\(other.destFolderLabel)) — instant, same share"
+                      : "Move into the other pane (\(other.destFolderLabel)) — copies then removes the originals")
                 Button(role: .destructive) {
                     confirmDelete1 = true
                 } label: {
@@ -457,6 +507,13 @@ struct PaneView: View {
             }
             .padding(8)
         }
+        .background(isActive ? Color.accentColor.opacity(0.04) : Color.clear)
+        .overlay(alignment: .top) {
+            Rectangle().fill(isActive ? Color.accentColor : Color.clear).frame(height: 2)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { makeActive() }
+        .onChange(of: model.selection) { sel in if !sel.isEmpty { makeActive() } }
         .sheet(isPresented: $showPicker) {
             ServerPickerSheet { host, share in
                 model.setServer(host: host, share: share)

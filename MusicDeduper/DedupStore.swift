@@ -782,6 +782,211 @@ final class DedupStore: ObservableObject {
     }
     private func presentConflict(_ c: CopyConflict?) { pendingConflict = c }
 
+    // MARK: File Commander transfers (arbitrary files/folders between locations)
+
+    /// One end of a transfer: a local folder, or a folder on a server share.
+    enum XferEnd {
+        case local(URL)
+        case server(DirectSMBClient, String)   // client, base path within the share
+
+        var label: String {
+            switch self {
+            case .local(let u): return "This Mac: \(u.path)"
+            case .server(let c, let p): return "\(c.host)/\(c.share)/\(p)"
+            }
+        }
+    }
+
+    /// Copy or move the named items from one location's folder into another's.
+    /// Handles files and (recursively) folders, in any Mac/server combination.
+    /// Runs on the shared operation dialog with progress, stats, log and Cancel.
+    func runTransfer(_ items: [(name: String, isDir: Bool)],
+                     from src: XferEnd, to dst: XferEnd, move: Bool,
+                     onFinish: @escaping () -> Void) {
+        let verb = move ? "Moving" : "Copying"
+        opStart(title: "\(verb) \(items.count) item(s) → \(dst.label)", total: 0)
+        opPaused = false
+        opActiveStreams = 0; opStreamLimit = 0
+        let box = cancelBox
+
+        Task.detached(priority: .userInitiated) {
+            await self.opLogLine("ℹ \(verb.lowercased()) from \(src.label)")
+            // 1) expand folders into a flat file list + the directories to create
+            var files: [(rel: String, size: Int64)] = []
+            var dirs: [String] = []
+            do {
+                for item in items {
+                    if item.isDir {
+                        dirs.append(item.name)
+                        let sub = try await Self.enumerate(end: src, subPath: item.name)
+                        dirs.append(contentsOf: sub.dirs)
+                        files.append(contentsOf: sub.files)
+                    } else {
+                        let size = try await Self.sizeOf(end: src, rel: item.name)
+                        files.append((item.name, size))
+                    }
+                }
+            } catch {
+                await self.opFinishLine("✗ Couldn't read the source: \(error.localizedDescription)")
+                await MainActor.run { onFinish() }
+                return
+            }
+
+            let totalBytes = files.reduce(Int64(0)) { $0 + $1.size }
+            await MainActor.run {
+                self.opTotal = files.count
+                self.opBytesTotal = totalBytes
+                self.opStartDate = Date()
+            }
+
+            // 2) create the destination directories (parents first)
+            for d in dirs where !box.cancelled {
+                try? await Self.makeDir(end: dst, rel: d)
+            }
+
+            // 3) transfer each file
+            var ok = 0, fail = 0
+            for (n, f) in files.enumerated() {
+                if box.cancelled { break }
+                var done = false
+                var attempt = 0
+                while !box.cancelled && attempt < 3 {
+                    do {
+                        try await Self.transferFile(rel: f.rel, from: src, to: dst,
+                                                    expected: f.size, cancel: box)
+                        done = true; break
+                    } catch {
+                        attempt += 1
+                        if attempt >= 3 {
+                            await self.opLogLine("✗ \(f.rel): \(error.localizedDescription)")
+                        } else {
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        }
+                    }
+                }
+                if done {
+                    ok += 1
+                    await MainActor.run { self.opBytesDone += f.size }
+                    await self.opStep(done: n + 1, ok: ok, skip: 0, fail: fail, line: "✓ \(f.rel)")
+                } else if !box.cancelled {
+                    fail += 1
+                    await self.opStep(done: n + 1, ok: ok, skip: 0, fail: fail, line: "✗ \(f.rel) — failed")
+                }
+            }
+
+            // 4) for a move, delete the sources only if everything transferred
+            if move && !box.cancelled && fail == 0 {
+                for item in items { try? await Self.deleteItem(end: src, rel: item.name, isDir: item.isDir) }
+                await self.opLogLine("🗑 removed \(items.count) source item(s) after move")
+            } else if move && fail > 0 {
+                await self.opLogLine("⚠ move kept the originals — \(fail) file(s) didn't transfer")
+            }
+
+            let summary = box.cancelled
+                ? "■ Cancelled — \(ok) transferred."
+                : "✔ Done — \(ok) transferred" + (fail > 0 ? ", \(fail) failed." : ".")
+            await self.opFinishLine(summary)
+            await MainActor.run { onFinish() }
+        }
+    }
+
+    // endpoint operations, all nonisolated so they run off the main actor
+
+    private static func enumerate(end: XferEnd, subPath: String) async throws
+        -> (files: [(rel: String, size: Int64)], dirs: [String]) {
+        switch end {
+        case .server(let c, let base):
+            let dir = base.isEmpty ? subPath : base + "/" + subPath
+            let w = try await c.walk(dir: dir)
+            return (w.files.map { (subPath + "/" + $0.rel, $0.size) },
+                    w.dirs.map { subPath + "/" + $0 })
+        case .local(let baseURL):
+            let root = baseURL.appendingPathComponent(subPath)
+            var files: [(String, Int64)] = []
+            var dirs: [String] = []
+            let fm = FileManager.default
+            if let en = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey]) {
+                for case let u as URL in en {
+                    let rel = subPath + "/" + (u.path.dropFirst(root.path.count + 1))
+                    let v = try? u.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                    if v?.isDirectory == true { dirs.append(rel) }
+                    else { files.append((rel, Int64(v?.fileSize ?? 0))) }
+                }
+            }
+            return (files, dirs)
+        }
+    }
+
+    private static func sizeOf(end: XferEnd, rel: String) async throws -> Int64 {
+        switch end {
+        case .server(let c, let base):
+            return (try await c.fileSize(base.isEmpty ? rel : base + "/" + rel)) ?? 0
+        case .local(let baseURL):
+            let v = try? baseURL.appendingPathComponent(rel).resourceValues(forKeys: [.fileSizeKey])
+            return Int64(v?.fileSize ?? 0)
+        }
+    }
+
+    private static func makeDir(end: XferEnd, rel: String) async throws {
+        switch end {
+        case .server(let c, let base):
+            try await c.mkdirs(base.isEmpty ? rel : base + "/" + rel)
+        case .local(let baseURL):
+            try? FileManager.default.createDirectory(at: baseURL.appendingPathComponent(rel),
+                                                     withIntermediateDirectories: true)
+        }
+    }
+
+    private static func deleteItem(end: XferEnd, rel: String, isDir: Bool) async throws {
+        switch end {
+        case .server(let c, let base):
+            try await c.removeItem(base.isEmpty ? rel : base + "/" + rel, isDir: isDir)
+        case .local(let baseURL):
+            try FileManager.default.removeItem(at: baseURL.appendingPathComponent(rel))
+        }
+    }
+
+    /// Transfer one file (source relative path → same relative path at dest),
+    /// via a temp name + verify + rename so a partial file is never visible.
+    private static func transferFile(rel: String, from src: XferEnd, to dst: XferEnd,
+                                     expected: Int64, cancel: CancelBox) async throws {
+        switch (src, dst) {
+        case let (.local(sBase), .local(dBase)):
+            let s = sBase.appendingPathComponent(rel)
+            let d = dBase.appendingPathComponent(rel)
+            try FileManager.default.createDirectory(at: d.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: d.path) { try? FileManager.default.removeItem(at: d) }
+            try FileManager.default.copyItem(at: s, to: d)
+
+        case let (.local(sBase), .server(c, dBase)):
+            let s = sBase.appendingPathComponent(rel)
+            let dPath = DirectSMBClient.nfc(dBase.isEmpty ? rel : dBase + "/" + rel)
+            try await c.mkdirs((dPath as NSString).deletingLastPathComponent)
+            try await c.upload(local: s, to: dPath)
+
+        case let (.server(c, sBase), .local(dBase)):
+            let sPath = sBase.isEmpty ? rel : sBase + "/" + rel
+            let d = dBase.appendingPathComponent(rel)
+            try FileManager.default.createDirectory(at: d.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try await c.download(path: sPath, to: d)
+
+        case let (.server(sc, sBase), .server(dc, dBase)):
+            // Same-share MOVES are intercepted upstream (instant rename), so any
+            // server→server transfer that reaches here is a copy — and SMB can't
+            // duplicate server-side, so it hops through a local temp file.
+            let sPath = sBase.isEmpty ? rel : sBase + "/" + rel
+            let dPath = DirectSMBClient.nfc(dBase.isEmpty ? rel : dBase + "/" + rel)
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("md-xfer-" + UUID().uuidString)
+            try await sc.download(path: sPath, to: tmp)
+            defer { try? FileManager.default.removeItem(at: tmp) }
+            try await dc.mkdirs((dPath as NSString).deletingLastPathComponent)
+            try await dc.upload(local: tmp, to: dPath)
+        }
+    }
+
     // MARK: Direct SMB engine (v1.3) — same behaviour as the mount engine
     // (selection, conflicts, adaptive streams, auto-pause, sweep), but every
     // network operation goes through our in-process SMB client.

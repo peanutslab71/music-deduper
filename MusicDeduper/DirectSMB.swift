@@ -214,6 +214,31 @@ final class DirectSMBClient: @unchecked Sendable {
         try await m.moveItem(atPath: from, toPath: to)
     }
 
+    /// Download a server file to a local URL (any existing local file replaced).
+    func download(path: String, to local: URL) async throws {
+        let m = try await ensure()
+        try? FileManager.default.removeItem(at: local)
+        try await m.downloadItem(atPath: path, to: local, progress: nil)
+    }
+
+    /// Recursively enumerate a server folder. Returns file paths (relative to
+    /// `dir`) with sizes, and sub-directory paths (relative), parents first.
+    func walk(dir: String) async throws -> (files: [(rel: String, size: Int64)], dirs: [String]) {
+        var files: [(String, Int64)] = []
+        var dirs: [String] = []
+        var queue: [String] = [""]        // relative sub-paths still to visit
+        while !queue.isEmpty {
+            let rel = queue.removeFirst()
+            let full = rel.isEmpty ? dir : (dir.isEmpty ? rel : dir + "/" + rel)
+            for e in try await listEntries(dir: full) {
+                let childRel = rel.isEmpty ? e.name : rel + "/" + e.name
+                if e.isDir { dirs.append(childRel); queue.append(childRel) }
+                else { files.append((childRel, e.size)) }
+            }
+        }
+        return (files, dirs)
+    }
+
     /// Linux stores filenames composed (NFC); the Mac hands us decomposed
     /// (NFD). Normalize every path component we send, or accented names
     /// ("Dvořák") end up as mismatched duplicates.
