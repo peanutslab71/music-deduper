@@ -95,9 +95,28 @@ Two other behaviours worth knowing:
 
 - **Already-copied files are skipped** (matched by size), so you can re-run the copy
   any time to top up a destination — it only transfers what's missing.
-- **Network drops don't kill the run.** For an SMB destination there's a
-  **Reconnect target** row in the toolbar — give it the share address and the app
-  re-mounts the share and resumes if the connection goes away mid-copy.
+- **Network drops don't kill the run.** Long copies to a network share are exactly
+  where connections wobble; the app retries each file until it succeeds rather than
+  skipping, and can re-mount the share itself — see below.
+
+### Setting up "Reconnect target" for network copies
+
+If your destination is an SMB share (a Roon ROCK server, a NAS), set up the
+**Reconnect target (SMB guest)** row below the toolbar *before* starting a big copy:
+
+1. Click **Connect…** — a browse dialog opens.
+2. Navigate to the share under **Network** (e.g. Network → your server → **Data** for
+   a ROCK) and select it.
+3. The app reads the share's `smb://` remount address automatically and fills the
+   field — you don't need to type it (though you can, e.g. `smb://rock/Data`).
+
+The address is remembered between launches. With it set, if the share disconnects
+mid-copy — sleep, a network blip, the server restarting — the app re-mounts it as
+guest and carries on from where it was. Without it, a drop would leave the copy
+stuck retrying against a vanished folder.
+
+Connects as **guest**, so the share needs guest access enabled (ROCK's Data share
+has this out of the box).
 
 ## Suggested first run
 
