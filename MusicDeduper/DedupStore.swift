@@ -217,6 +217,7 @@ final class DedupStore: ObservableObject {
         self.unreadableCount = unreadable
         self.busy = false
         self.progress = 1
+        self.selectedIDs = Set(tracks.map { $0.id })   // default: everything selected
         var msg = "Scanned \(tracks.count) tracks · \(clusters.count) duplicate group(s)."
         if unreadable > 0 { msg += "  ⚠ \(unreadable) file(s) unreadable (iCloud not downloaded?)." }
         self.status = msg
@@ -237,6 +238,30 @@ final class DedupStore: ObservableObject {
         let keepers = Set(clusters.map { $0.keeperID })
         return tracks.filter { !inCluster.contains($0.id) || keepers.contains($0.id) }
     }
+
+    // MARK: Selection — which tracks the Copy step ships (everything else is untouched;
+    // Clean up deliberately ignores selection: dedupe is library-wide hygiene)
+
+    @Published var selectedIDs: Set<Int> = []
+
+    enum AlbumSelection { case all, partial, none }
+
+    func selectionState(of ids: [Int]) -> AlbumSelection {
+        let n = ids.reduce(0) { $0 + (selectedIDs.contains($1) ? 1 : 0) }
+        return n == 0 ? .none : (n == ids.count ? .all : .partial)
+    }
+    func setSelected(_ id: Int, _ on: Bool) {
+        if on { selectedIDs.insert(id) } else { selectedIDs.remove(id) }
+    }
+    /// Badge click: fully-selected album → none; partial or none → all.
+    func toggleAlbum(_ ids: [Int]) {
+        if selectionState(of: ids) == .all { selectedIDs.subtract(ids) }
+        else { selectedIDs.formUnion(ids) }
+    }
+    func selectAll() { selectedIDs = Set(tracks.map { $0.id }) }
+    func selectNone() { selectedIDs = [] }
+
+    var selectedKeeperTracks: [Track] { keeperTracks.filter { selectedIDs.contains($0.id) } }
     var dropTracks: [Track] {
         clusters.flatMap { c in c.memberIDs.filter { $0 != c.keeperID } }.compactMap { trackByID($0) }
     }
@@ -278,6 +303,7 @@ final class DedupStore: ObservableObject {
         for i in survivors.indices { survivors[i].id = i }
         tracks = survivors
         clusters = buildClusters(&tracks, mode: matchMode, tol: tolerance, crossAlbum: crossAlbum)
+        selectedIDs = Set(tracks.map { $0.id })   // IDs renumbered — reset to all
         opFinishLine(summary)
     }
 
@@ -288,8 +314,9 @@ final class DedupStore: ObservableObject {
     private var lastCopyDest: URL?
 
     func copyKeepers(to dest: URL) {
-        runCopy(keeperTracks, to: dest,
-                title: "Copying \(keeperTracks.count) keeper(s) → \(dest.lastPathComponent)")
+        let items = selectedKeeperTracks
+        runCopy(items, to: dest,
+                title: "Copying \(items.count) selected keeper(s) → \(dest.lastPathComponent)")
     }
 
     func retryFailedCopies() {
@@ -445,6 +472,26 @@ final class DedupStore: ObservableObject {
                 await group.waitForAll()
             }
 
+            // Sweep: one automatic retry pass over files that failed mid-run —
+            // by the time the run ends the share has usually recovered, so a
+            // second look often lands them. Files that fail again stay in the
+            // Retry-failed list for the manual button.
+            if !box.cancelled {
+                let sweepIDs = Set(counters.beginSweep())
+                if !sweepIDs.isEmpty {
+                    await self.opLogLine("⟲ Sweeping \(sweepIDs.count) failed file(s)…")
+                    for t in keepers where sweepIDs.contains(t.id) {
+                        if box.cancelled { break }
+                        let dir = dest.appendingPathComponent(sanitizeName(t.displayArtist.isEmpty ? "Unknown Artist" : t.displayArtist))
+                                        .appendingPathComponent(sanitizeName(t.album.isEmpty ? "Unknown Album" : t.album))
+                        let target = dir.appendingPathComponent(t.name)
+                        await self.copyOneFile(t, dir: dir, target: target, dest: dest,
+                                               box: box, counters: counters, throttle: throttle,
+                                               reconnectAddr: reconnectAddr, addr: addr, sweep: true)
+                    }
+                }
+            }
+
             keepAlive.cancel()
             let c = counters.finalSnapshot()
             let summary = box.cancelled
@@ -460,7 +507,8 @@ final class DedupStore: ObservableObject {
     nonisolated private func copyOneFile(_ t: Track, dir: URL, target: URL, dest: URL,
                                          box: CancelBox, counters: CopyCounters,
                                          throttle: MountThrottle,
-                                         reconnectAddr: String, addr: String) async {
+                                         reconnectAddr: String, addr: String,
+                                         sweep: Bool = false) async {
         var copied = false
         var attempt = 0
         let maxAttempts = 5
@@ -519,15 +567,15 @@ final class DedupStore: ObservableObject {
         }
         await self.setNote("")
         if copied {
-            let s = counters.recordOK(clean: attempt == 0)
+            let s = sweep ? counters.recordSweepOK() : counters.recordOK(clean: attempt == 0)
             let suffix = attempt > 0 ? "  (after \(attempt) retr\(attempt == 1 ? "y" : "ies"))" : ""
             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
-                              line: "✓ \(sanitizeName(t.displayArtist))/\(sanitizeName(t.album))/\(t.name)\(suffix)")
+                              line: "\(sweep ? "⟲ swept " : "✓ ")\(sanitizeName(t.displayArtist))/\(sanitizeName(t.album))/\(t.name)\(suffix)")
         } else if !box.cancelled {
             // out of attempts — record it; the lead loop may auto-pause
-            let s = counters.recordFail(t.id)
+            let s = sweep ? counters.recordSweepFail(t.id) : counters.recordFail(t.id)
             await self.opStep(done: s.done, ok: s.ok, skip: s.skip, fail: s.fail,
-                              line: "✗ \(t.name) — failed after \(maxAttempts) tries")
+                              line: "✗ \(t.name) — \(sweep ? "still failing after the sweep" : "failed after \(maxAttempts) tries")")
         }
     }
 
@@ -584,6 +632,23 @@ final class CopyCounters: @unchecked Sendable {
     func recordFail(_ id: Int) -> Snap {
         lock.lock(); defer { lock.unlock() }
         fail += 1; done += 1; consec += 1; failed.append(id)
+        return Snap(done: done, ok: ok, skip: skip, fail: fail)
+    }
+    /// Start the end-of-run sweep: hand back the failed IDs and clear the list
+    /// (sweep results re-populate it; `fail`/`done` already counted these files).
+    func beginSweep() -> [Int] {
+        lock.lock(); defer { lock.unlock() }
+        let f = failed; failed = []; consec = 0
+        return f
+    }
+    func recordSweepOK() -> Snap {
+        lock.lock(); defer { lock.unlock() }
+        ok += 1; fail -= 1   // it counted as failed; the sweep landed it after all
+        return Snap(done: done, ok: ok, skip: skip, fail: fail)
+    }
+    func recordSweepFail(_ id: Int) -> Snap {
+        lock.lock(); defer { lock.unlock() }
+        failed.append(id)    // fail/done already counted on the first pass
         return Snap(done: done, ok: ok, skip: skip, fail: fail)
     }
     func finalSnapshot() -> (ok: Int, skip: Int, fail: Int, failedIDs: [Int]) {

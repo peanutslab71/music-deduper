@@ -51,8 +51,17 @@ Roon ROCK — drop out. The copy step assumes they will:
   lookups either, so the app doesn't ask it to.
 - The share is **nudged every 30 seconds** during a copy so the connection is
   never idle long enough to be dropped.
-- A file that fails all its retries is set aside and the copy **moves on** —
-  a **Retry failed** button at the end re-runs just those files.
+- A file that fails all its retries is set aside and the copy **moves on**.
+  When the run reaches the end, a **sweep pass** automatically retries the
+  set-aside files once more (the share has usually recovered by then); any
+  that still fail are listed behind the **Retry failed** button.
+- **You choose what ships.** On the Review step's Library tab, every album
+  has a badge (top-left of the artwork): tick = whole album selected,
+  minus = some tracks, empty circle = none. Click the badge to toggle an
+  album, open an album for per-track checkboxes, or use All/None in the
+  header. Everything is selected by default; the Copy button copies exactly
+  the selected count it shows. (Selection affects copying only — Clean up
+  always works on the whole library.)
 - While a copy or delete runs, the app tells macOS not to throttle it and not
   to put the machine to sleep.
 

@@ -218,6 +218,13 @@ struct ReviewStepView: View {
                 .labelsHidden()
                 .frame(maxWidth: 340)
                 Spacer()
+                if reviewTab == 1 {
+                    Text("\(store.selectedIDs.count) of \(store.tracks.count) selected for copy")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("All") { store.selectAll() }.controlSize(.small)
+                    Button("None") { store.selectNone() }.controlSize(.small)
+                    Divider().frame(height: 14)
+                }
                 Text(statsText).font(.caption).foregroundStyle(.secondary)
                 Button {
                     store.scan()
@@ -230,7 +237,7 @@ struct ReviewStepView: View {
             if reviewTab == 0 { duplicatesList } else { albumGrid }
         }
         .sheet(item: $selectedAlbum) { key in
-            AlbumDetailSheet(key: key, tracks: albumTracks(key))
+            AlbumDetailSheet(store: store, key: key, tracks: albumTracks(key))
         }
     }
 
@@ -353,21 +360,34 @@ struct ReviewStepView: View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 180), spacing: 18)], spacing: 20) {
                 ForEach(albums(), id: \.key) { entry in
-                    Button {
-                        selectedAlbum = entry.key
-                    } label: {
-                        VStack(alignment: .leading, spacing: 6) {
+                    let ids = entry.tracks.map { $0.id }
+                    let sel = store.selectionState(of: ids)
+                    VStack(alignment: .leading, spacing: 6) {
+                        ZStack(alignment: .topLeading) {
                             ArtworkView(key: entry.tracks.first?.relDir ?? entry.key.id,
                                         sampleURL: entry.tracks.first?.url,
                                         size: 150, corner: 8)
-                            Text(entry.key.album).font(.callout).fontWeight(.medium)
-                                .lineLimit(1)
-                            Text("\(entry.key.artist) · \(entry.tracks.count) tracks")
-                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                .opacity(sel == .none ? 0.45 : 1)
+                            // selection badge: tick = all · minus = partial · circle = none
+                            Image(systemName: sel == .all ? "checkmark.circle.fill"
+                                             : sel == .partial ? "minus.circle.fill" : "circle")
+                                .font(.system(size: 22))
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(.white, sel == .none ? Color.gray : Color.accentColor)
+                                .shadow(color: .black.opacity(0.45), radius: 2)
+                                .padding(6)
+                                .contentShape(Rectangle())
+                                .onTapGesture { store.toggleAlbum(ids) }
+                                .help(sel == .all ? "Don't copy this album" : "Copy this whole album")
                         }
-                        .frame(width: 150, alignment: .leading)
+                        Text(entry.key.album).font(.callout).fontWeight(.medium)
+                            .lineLimit(1)
+                        Text("\(entry.key.artist) · \(entry.tracks.count) tracks")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
-                    .buttonStyle(.plain)
+                    .frame(width: 150, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { selectedAlbum = entry.key }
                 }
             }
             .padding(18)
@@ -375,13 +395,16 @@ struct ReviewStepView: View {
     }
 }
 
-/// Track list for one album.
+/// Track list for one album, with per-track copy selection.
 struct AlbumDetailSheet: View {
+    @ObservedObject var store: DedupStore
     let key: ReviewStepView.AlbumKey
     let tracks: [Track]
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        let ids = tracks.map { $0.id }
+        let sel = store.selectionState(of: ids)
         VStack(spacing: 12) {
             HStack(alignment: .top, spacing: 14) {
                 ArtworkView(key: tracks.first?.relDir ?? key.id, sampleURL: tracks.first?.url, size: 96, corner: 8)
@@ -392,13 +415,21 @@ struct AlbumDetailSheet: View {
                         .font(.caption).foregroundStyle(.tertiary)
                 }
                 Spacer()
+                Button(sel == .all ? "Deselect all" : "Select all") { store.toggleAlbum(ids) }
+                    .controlSize(.small)
             }
             List(tracks, id: \.id) { t in
+                let on = store.selectedIDs.contains(t.id)
                 HStack {
+                    Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(on ? Color.accentColor : Color.secondary)
+                        .onTapGesture { store.setSelected(t.id, !on) }
+                        .help(on ? "Don't copy this track" : "Copy this track")
                     Text(t.trackNo > 0 ? String(format: "%02d", t.trackNo) : "—")
                         .font(.caption).monospaced().foregroundStyle(.secondary)
                         .frame(width: 26, alignment: .trailing)
                     Text(t.title).lineLimit(1)
+                        .foregroundStyle(on ? Color.primary : Color.secondary)
                     Spacer()
                     Text("\(fmtDur(t.duration)) · \(t.formatLabel) · \(fmtBytes(t.size))")
                         .font(.caption).foregroundStyle(.secondary)
@@ -515,17 +546,17 @@ struct CopyStepView: View {
             }
 
             numbered(3, title: "Copy",
-                     detail: "\(store.keeperTracks.count) keeper tracks · any file that already exists asks Overwrite/Skip (or All) · a Roon ROCK destination is checked and Roon Server stopped first.") {
+                     detail: "\(store.selectedKeeperTracks.count) of \(store.keeperTracks.count) keeper tracks selected (choose albums/tracks on the Review step) · any file that already exists asks Overwrite/Skip (or All) · a Roon ROCK destination is checked and Roon Server stopped first.") {
                 VStack(alignment: .leading, spacing: 8) {
                     Button {
                         if let d = destFolder { onCopy(d) }
                     } label: {
-                        Label("Copy \(store.keeperTracks.count) keepers", systemImage: "arrow.right.doc.on.clipboard")
+                        Label("Copy \(store.selectedKeeperTracks.count) selected", systemImage: "arrow.right.doc.on.clipboard")
                             .frame(minWidth: 180)
                     }
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
-                    .disabled(destFolder == nil || store.busy || store.tracks.isEmpty)
+                    .disabled(destFolder == nil || store.busy || store.selectedKeeperTracks.isEmpty)
                     Toggle("Keep the display awake while copying (recommended on Wi-Fi — a sleeping display can power down Wi-Fi)",
                            isOn: $store.keepDisplayAwake)
                         .font(.caption)
