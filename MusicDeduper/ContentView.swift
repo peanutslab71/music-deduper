@@ -353,26 +353,29 @@ struct OperationSheet: View {
             if let c = store.pendingConflict {
                 ConflictPanel(conflict: c) { store.resolveConflict($0) }
             }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(store.opLog.enumerated()), id: \.offset) { idx, line in
-                            Text(line)
-                                .font(.system(size: 11, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(idx)
-                        }
+            // newest entry at the top — no scrolling needed to follow along
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(store.opLog.enumerated()).reversed(), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(6)
                 }
-                .frame(height: 240)
-                .background(Color(nsColor: .textBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .onChange(of: store.opLog.count) { _ in
-                    if !store.opLog.isEmpty { proxy.scrollTo(store.opLog.count - 1) }
-                }
+                .padding(6)
             }
+            .frame(height: 240)
+            .background(Color(nsColor: .textBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
             HStack {
+                if let start = store.opStartDate, store.opStreamLimit > 0, !store.opFinished {
+                    TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                        Text(Self.statsLine(now: ctx.date, start: start,
+                                            bytesDone: store.opBytesDone, bytesTotal: store.opBytesTotal,
+                                            filesDone: store.opDone))
+                            .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                    }
+                }
                 Spacer()
                 if store.opFinished {
                     if let log = store.lastRunLogURL {
@@ -390,5 +393,32 @@ struct OperationSheet: View {
         .padding(16)
         .frame(width: 580)
         .interactiveDismissDisabled(!store.opFinished)
+    }
+
+    private static let etaClock: DateFormatter = {
+        let f = DateFormatter(); f.timeStyle = .short; f.dateStyle = .none; return f
+    }()
+
+    private static func fmtClock(_ t: TimeInterval) -> String {
+        let s = Int(t.rounded())
+        return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60)
+                         : String(format: "%d:%02d", s / 60, s % 60)
+    }
+
+    static func statsLine(now: Date, start: Date, bytesDone: Int64, bytesTotal: Int64,
+                          filesDone: Int) -> String {
+        let elapsed = max(1, now.timeIntervalSince(start))
+        var s = "⏱ \(fmtClock(elapsed))"
+        guard bytesDone > 0, elapsed >= 3 else { return s + "  ·  estimating…" }
+        let rate = Double(bytesDone) / elapsed
+        s += "  ·  \(fmtBytes(Int64(rate)))/s"
+        if filesDone > 0 {
+            s += "  ·  avg \(String(format: "%.1f", elapsed / Double(filesDone)))s/file"
+        }
+        if bytesTotal > bytesDone {
+            let left = Double(bytesTotal - bytesDone) / rate
+            s += "  ·  ~\(fmtClock(left)) left  ·  finishes ≈ \(etaClock.string(from: now.addingTimeInterval(left)))"
+        }
+        return s
     }
 }
