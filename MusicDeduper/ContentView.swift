@@ -18,6 +18,7 @@ struct ContentView: View {
     // hang it, so the copy is blocked until the server is stopped. No bypass.
     struct RockPrompt: Identifiable { let id = UUID(); let host: String; let dest: URL }
     @State private var rockPrompt: RockPrompt? = nil
+    @State private var rockUnverified: RockPrompt? = nil       // host didn't answer — user must decide
     @State private var rockStopFailedHost: String? = nil
     @State private var rockRestartHost: String? = nil          // offer to start again after the copy
     @State private var restartHostAfterCopy: String? = nil     // we stopped it for this copy
@@ -83,6 +84,24 @@ struct ContentView: View {
         } message: { p in
             Text("The destination is a Roon ROCK server (\(p.host)) and Roon Server is running. Copying while it runs can cause it to stop or hang, so it must be stopped first. The app can stop it now and will offer to start it again when the copy finishes.")
         }
+        .alert("Couldn't verify the destination",
+               isPresented: Binding(get: { rockUnverified != nil },
+                                    set: { if !$0 { rockUnverified = nil } }),
+               presenting: rockUnverified) { p in
+            Button("Check again") {
+                let dest = p.dest
+                rockUnverified = nil
+                Task { @MainActor in await guardedCopy(to: dest) }
+            }
+            Button("It's not a ROCK — copy") {
+                let dest = p.dest
+                rockUnverified = nil
+                store.copyKeepers(to: dest)
+            }
+            Button("Cancel", role: .cancel) { rockUnverified = nil }
+        } message: { p in
+            Text("\(p.host) didn't answer the ROCK admin check. If this destination IS a Roon ROCK, do not copy until Roon Server is stopped. If the Local Network permission was just granted (or is off in System Settings → Privacy & Security), fix that and choose Check again. Only continue if you're sure this is not a ROCK.")
+        }
         .alert("Couldn't stop Roon Server",
                isPresented: Binding(get: { rockStopFailedHost != nil },
                                     set: { if !$0 { rockStopFailedHost = nil } }),
@@ -106,6 +125,13 @@ struct ContentView: View {
         .onChange(of: store.opActive) { active in
             // when the copy's progress sheet closes, offer to restart the server we stopped
             if !active, let h = restartHostAfterCopy { restartHostAfterCopy = nil; rockRestartHost = h }
+        }
+        .task {
+            // Surface the one-time macOS Local Network permission prompt at
+            // launch (harmless read-only status call) rather than mid-copy.
+            if let u = URL(string: store.smbAddress), let h = u.host {
+                _ = await RockGuard.getState(host: h)
+            }
         }
     }
 
@@ -327,31 +353,31 @@ struct ContentView: View {
     /// If the destination is a ROCK with Roon Server running, block the copy
     /// until the server is stopped (no bypass). Anything that isn't a ROCK —
     /// local folder, plain NAS, no answer on the admin port — copies as before.
+    /// The copy NEVER starts until the ROCK check has definitively answered.
+    /// Retries ride out the one-time macOS Local Network permission dialog;
+    /// if the host still can't be verified, the user must explicitly assert
+    /// it isn't a ROCK before anything is copied.
     @MainActor private func guardedCopy(to dest: URL) async {
-        if let host = RockGuard.hostForDestination(dest, smbAddress: store.smbAddress) {
-            store.status = "Checking \(host) for a running Roon Server…"
-            let state = await RockGuard.getState(host: host)
-            if let s = state, s.isRock, s.roonRunning {
-                store.status = ""
-                rockPrompt = RockPrompt(host: host, dest: dest)
-                return
-            }
-            // Make the check's outcome visible instead of silently proceeding —
-            // a plain NAS won't answer (fine), but "no answer" can also mean
-            // macOS denied Local Network access, which would defeat the gate.
-            switch state {
-            case .some(let s) where s.isRock:
-                store.status = "ROCK at \(host): Roon Server already stopped — copying."
-            case .some:
-                store.status = "\(host) is not a ROCK — copying."
-            case .none:
-                store.status = "No ROCK admin answer from \(host) (not a ROCK, or Local Network access is off in System Settings → Privacy & Security) — copying."
-                NSLog("[RockGuard] getstate failed for %@ — check Local Network permission", host)
-            }
-        } else {
-            NSLog("[RockGuard] no host resolved for destination %@ — skipping ROCK check", dest.path)
+        guard let host = RockGuard.hostForDestination(dest, smbAddress: store.smbAddress) else {
+            store.copyKeepers(to: dest)     // purely local destination
+            return
         }
-        store.copyKeepers(to: dest)
+        store.status = "Checking \(host) for a running Roon Server… (allow Local Network access if macOS asks)"
+        let state = await RockGuard.getStateWithRetry(host: host)
+        store.status = ""
+        switch state {
+        case .some(let s) where s.isRock && s.roonRunning:
+            rockPrompt = RockPrompt(host: host, dest: dest)
+        case .some(let s) where s.isRock:
+            store.status = "ROCK at \(host): Roon Server already stopped — copying."
+            store.copyKeepers(to: dest)
+        case .some:
+            store.status = "\(host) is not a ROCK — copying."
+            store.copyKeepers(to: dest)
+        case .none:
+            // Unverifiable network host — do NOT copy until the user decides.
+            rockUnverified = RockPrompt(host: host, dest: dest)
+        }
     }
 
     private func stopRoonThenCopy(_ p: RockPrompt) {
@@ -419,8 +445,10 @@ enum RockGuard {
 
     /// Ask the ROCK to stop Roon Server, then poll until it reports stopped.
     /// Returns false if the stop wasn't confirmed within ~30 seconds.
+    /// (Roon Server's endpoints are 1/stopsoftware & 1/restartsoftware —
+    /// the softwaretype is the empty string; "vendor" is the OS layer.)
     static func stopRoon(host: String) async -> Bool {
-        guard await post(host: host, path: "1/stop", timeout: 10) != nil else { return false }
+        guard await post(host: host, path: "1/stopsoftware", timeout: 10) != nil else { return false }
         for _ in 0..<20 {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             if let s = await getState(host: host), !s.roonRunning { return true }
@@ -429,7 +457,17 @@ enum RockGuard {
     }
 
     static func startRoon(host: String) async -> Bool {
-        await post(host: host, path: "1/restart", timeout: 10) != nil
+        await post(host: host, path: "1/restartsoftware", timeout: 10) != nil
+    }
+
+    /// getState with retries — rides out the one-time macOS Local Network
+    /// permission dialog instead of timing out past it on first run.
+    static func getStateWithRetry(host: String, attempts: Int = 4) async -> State? {
+        for i in 0..<attempts {
+            if let s = await getState(host: host) { return s }
+            if i < attempts - 1 { try? await Task.sleep(nanoseconds: 2_000_000_000) }
+        }
+        return nil
     }
 
     private static func post(host: String, path: String, timeout: TimeInterval) async -> Data? {
