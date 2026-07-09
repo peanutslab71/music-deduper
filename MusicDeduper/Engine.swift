@@ -368,7 +368,10 @@ func ipVersionOfSMBAddress(_ address: String) -> String? {
     guard !s.isEmpty else { return nil }
     if s.lowercased().hasPrefix("smb://") { s.removeFirst(6) }
     let parts = s.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
-    let host = String(parts[0])
+    // strip any login prefix ("GUEST:@rock" → "rock") — Finder-captured
+    // remount addresses include it
+    let hostPart = String(parts[0])
+    let host = hostPart.contains("@") ? String(hostPart.split(separator: "@").last ?? "") : hostPart
     let path = parts.count > 1 ? "/" + parts[1] : ""
     guard !host.isEmpty else { return nil }
     var addr4 = in_addr()

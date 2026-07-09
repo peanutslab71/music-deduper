@@ -420,6 +420,39 @@ final class DedupStore: ObservableObject {
             let counters = CopyCounters()
             let throttle = MountThrottle()
 
+            // Preflight: wake the share BEFORE feeding files, so an idled-out
+            // mount doesn't burn the first files' retries on waking it. Quick
+            // reachability probe (watchdogged — even a stat can hang), then up
+            // to 3 mount attempts, then pause for the user rather than fail.
+            if await !Self.destAlive(dest, box: box) {
+                await self.opLogLine("… destination isn't answering — waking the share")
+                var woke = false
+                for tryNo in 1...3 where !box.cancelled {
+                    if !addr.isEmpty {
+                        _ = await runBlockingFileOp(timeout: 30, cancel: box) { mountSMBGuest(reconnectAddr) }
+                    }
+                    var waited = 0.0
+                    while waited < 10 && !box.cancelled {
+                        if await Self.destAlive(dest, box: box) { woke = true; break }
+                        try? await Task.sleep(nanoseconds: 500_000_000); waited += 0.5
+                    }
+                    if woke { break }
+                    if !box.cancelled { await self.opLogLine("… still waking (try \(tryNo) of 3)") }
+                }
+                if woke {
+                    await self.opLogLine("✓ share is awake — starting")
+                } else if !box.cancelled {
+                    await self.opLogLine("⚠ the share didn't answer — paused before copying anything. Wake the server/share, then press Resume.")
+                    await self.setPaused(true)
+                    while !box.cancelled && !pause.resumed {
+                        try? await Task.sleep(nanoseconds: 300_000_000)
+                    }
+                    pause.reset()
+                    await self.setPaused(false)
+                    if !box.cancelled { await self.opLogLine("▶ Resumed.") }
+                }
+            }
+
             // The lead loop stays sequential (conflict prompts must appear one at
             // a time); the actual data copies fan out to at most 3 at once —
             // parallel streams amortise the per-file round trips that dominate
@@ -563,6 +596,13 @@ final class DedupStore: ObservableObject {
                   + (c.fail > 0 ? ", \(c.fail) failed — use Retry failed." : ".")
             await self.finishCopy(summary: summary, failedIDs: c.failedIDs)
         }
+    }
+
+    /// Quick reachability probe that can't hang: the stat runs under a 5s watchdog.
+    nonisolated private static func destAlive(_ dest: URL, box: CancelBox) async -> Bool {
+        let r = await runBlockingFileOp(timeout: 5, cancel: box) { destReachable(dest) }
+        if case .success(true) = r { return true }
+        return false
     }
 
     /// Copy one file with retries, watchdog, and (throttled) share re-mount.
