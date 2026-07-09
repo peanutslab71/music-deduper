@@ -392,7 +392,7 @@ final class SMBServerBrowser: ObservableObject {
         return nil
     }
 
-    private static func reverseName(_ ip: String) -> String? {
+    nonisolated private static func reverseName(_ ip: String) -> String? {
         var sa = sockaddr_in()
         sa.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         sa.sin_family = sa_family_t(AF_INET)
