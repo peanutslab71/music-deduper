@@ -154,6 +154,36 @@ struct RunRecord: Identifiable {
     let summary: String
 }
 
+// MARK: - Audio preview
+
+/// Plays a track so the user can listen and judge whether a proposed change is
+/// right. One at a time; tapping the playing track stops it.
+final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    static let shared = AudioPreview()
+    private var player: AVAudioPlayer?
+    @Published var playingURL: URL?
+
+    func toggle(_ url: URL) {
+        if playingURL == url { stop(); return }
+        stop()
+        do {
+            let p = try AVAudioPlayer(contentsOf: url)
+            p.delegate = self
+            p.play()
+            player = p
+            playingURL = url
+        } catch { playingURL = nil }
+    }
+
+    func stop() {
+        player?.stop(); player = nil; playingURL = nil
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        DispatchQueue.main.async { self.player = nil; self.playingURL = nil }
+    }
+}
+
 // MARK: - Store
 
 @MainActor

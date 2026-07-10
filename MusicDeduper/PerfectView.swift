@@ -10,6 +10,7 @@ import SwiftUI
 
 struct PerfectView: View {
     @ObservedObject var store: PerfectStore
+    @ObservedObject private var audio = AudioPreview.shared
     @State private var expanded: Set<String> = []   // all sections collapsed initially — reads as a summary
     @State private var showSettings = false
     @State private var queueIndex = 0                // position in the step-through review queue
@@ -188,6 +189,7 @@ struct PerfectView: View {
 
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 6) {
+                            playButton(p.url)
                             Text(p.newTitle.isEmpty ? p.curTitle : p.newTitle).font(.headline)
                             Text(String(format: "%.0f%% by sound", p.score * 100))
                                 .font(.caption2).foregroundStyle(p.score >= 0.9 ? .green : .orange)
@@ -529,18 +531,32 @@ struct PerfectView: View {
         .animation(.easeOut(duration: 0.25), value: store.recentFinds)
     }
 
+    private func playButton(_ url: URL) -> some View {
+        let playing = audio.playingURL == url
+        return Button { audio.toggle(url) } label: {
+            Image(systemName: playing ? "stop.circle.fill" : "play.circle")
+                .font(.system(size: 18)).foregroundStyle(playing ? .red : .teal)
+        }.buttonStyle(.plain).help(playing ? "Stop" : "Listen")
+    }
+
     private func proposalRow(_ p: TrackProposal) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Toggle("", isOn: Binding(
-                get: { p.accepted },
-                set: { v in if let i = store.proposals.firstIndex(where: { $0.id == p.id }) { store.proposals[i].accepted = v } }
-            )).labelsHidden().toggleStyle(.checkbox)
-            VStack(alignment: .leading, spacing: 2) {
+            playButton(p.url)
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(p.relPath).font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
                     Text(String(format: "%.0f%%", p.score * 100)).font(.caption2)
                         .foregroundStyle(p.score >= 0.9 ? .green : .orange)
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { p.accepted },
+                        set: { v in if let i = store.proposals.firstIndex(where: { $0.id == p.id }) { store.proposals[i].accepted = v } }
+                    )) {
+                        Text("Keep original").tag(false)
+                        Text("Use suggested").tag(true)
+                    }.pickerStyle(.segmented).labelsHidden().frame(width: 220).controlSize(.small)
+                        .disabled(!p.hasChange && !p.canAddArt)
                 }
                 fieldChange("Artist", p.curArtist, p.newArtist, p.artistChanged)
                 fieldChange("Title", p.curTitle, p.newTitle, p.titleChanged)
@@ -747,6 +763,12 @@ struct PerfectView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 11) {
+                    if store.enriching {
+                        Label("Credits are still being looked up — applying now writes the names, but not the credits/art still loading. You can wait for it to finish, or apply and run the rest later.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                            .padding(.bottom, 4)
+                    }
                     if rows.isEmpty {
                         Text("Nothing selected.").foregroundStyle(.secondary)
                     }
