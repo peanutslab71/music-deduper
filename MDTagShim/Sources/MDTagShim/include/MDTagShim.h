@@ -24,6 +24,12 @@ int md_add_performer(const char *path, const char *name, const char *role);
 /// Remove a performer credit (for undo). Returns 0 on success, negative on error.
 int md_remove_performer(const char *path, const char *name, const char *role);
 
+/// Embedded cover art (mp3). has: 1=present, 0=absent. set: embed a front cover
+/// (jpeg/png bytes). remove: strip cover art (for undo). 0 = ok, negative = error.
+int md_has_artwork(const char *path);
+int md_set_artwork(const char *path, const char *data, int len, const char *mime);
+int md_remove_artwork(const char *path);
+
 /* Back-compat convenience wrappers for the artist field. */
 char *md_get_artist(const char *path);
 int md_set_artist(const char *path, const char *artist);

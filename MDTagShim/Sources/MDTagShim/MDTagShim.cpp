@@ -12,6 +12,7 @@
 #include <taglib/id3v2tag.h>
 #include <taglib/id3v2header.h>
 #include <taglib/textidentificationframe.h>
+#include <taglib/attachedpictureframe.h>
 #include <taglib/tpropertymap.h>
 
 static bool hasSuffixCI(const char *p, const char *ext) {
@@ -99,7 +100,7 @@ extern "C" int md_set_field(const char *path, const char *field, const char *val
         if (!f.isValid()) return -1;
         TagLib::ID3v2::Tag *tag = f.ID3v2Tag(true);
         unsigned int mv = tag->header()->majorVersion();
-        TagLib::ID3v2::Version ver = (mv == 3) ? TagLib::ID3v2::v3 : TagLib::ID3v2::v4;
+        TagLib::ID3v2::Version ver = (mv >= 4) ? TagLib::ID3v2::v4 : TagLib::ID3v2::v3;
         tag->removeFrames(frameId);
         // an empty value clears the field (removes the frame) — so undoing a
         // gap-fill that started blank leaves no empty frame behind
@@ -129,7 +130,7 @@ extern "C" int md_add_performer(const char *path, const char *name, const char *
     if (!f.isValid()) return -1;
     TagLib::ID3v2::Tag *tag = f.ID3v2Tag(true);
     unsigned int mv = tag->header()->majorVersion();
-    TagLib::ID3v2::Version ver = (mv == 3) ? TagLib::ID3v2::v3 : TagLib::ID3v2::v4;
+    TagLib::ID3v2::Version ver = (mv >= 4) ? TagLib::ID3v2::v4 : TagLib::ID3v2::v3;
     TagLib::PropertyMap props = tag->properties();
     TagLib::String key = TagLib::String("PERFORMER:") + TagLib::String(role, TagLib::String::UTF8);
     props.insert(key, TagLib::StringList(TagLib::String(name, TagLib::String::UTF8)));
@@ -147,11 +148,55 @@ extern "C" int md_remove_performer(const char *path, const char *name, const cha
     if (!f.isValid()) return -1;
     TagLib::ID3v2::Tag *tag = f.ID3v2Tag(true);
     unsigned int mv = tag->header()->majorVersion();
-    TagLib::ID3v2::Version ver = (mv == 3) ? TagLib::ID3v2::v3 : TagLib::ID3v2::v4;
+    TagLib::ID3v2::Version ver = (mv >= 4) ? TagLib::ID3v2::v4 : TagLib::ID3v2::v3;
     TagLib::PropertyMap props = tag->properties();
     TagLib::String key = (TagLib::String("PERFORMER:") + TagLib::String(role, TagLib::String::UTF8)).upper();
     props.erase(key);
     tag->setProperties(props);
+    bool ok = f.save(TagLib::MPEG::File::ID3v2, TagLib::File::StripNone, ver, TagLib::File::DoNotDuplicate);
+    return ok ? 0 : -2;
+}
+
+// Does the file already have embedded cover art? 1 = yes, 0 = no.
+extern "C" int md_has_artwork(const char *path) {
+    if (path == nullptr) return -3;
+    if (hasSuffixCI(path, ".mp3")) {
+        TagLib::MPEG::File f(path);
+        if (!f.isValid() || !f.ID3v2Tag()) return 0;
+        return f.ID3v2Tag()->frameList("APIC").isEmpty() ? 0 : 1;
+    }
+    return 0;   // other formats: treated as "unknown / no" for now (mp3 gap-fill)
+}
+
+// Embed a front cover, replacing any existing one. Keeps the ID3 version.
+extern "C" int md_set_artwork(const char *path, const char *data, int len, const char *mime) {
+    if (path == nullptr || data == nullptr || len <= 0) return -3;
+    if (!hasSuffixCI(path, ".mp3")) return -4;
+    TagLib::MPEG::File f(path);
+    if (!f.isValid()) return -1;
+    TagLib::ID3v2::Tag *tag = f.ID3v2Tag(true);
+    unsigned int mv = tag->header()->majorVersion();
+    TagLib::ID3v2::Version ver = (mv >= 4) ? TagLib::ID3v2::v4 : TagLib::ID3v2::v3;
+    tag->removeFrames("APIC");
+    auto *pic = new TagLib::ID3v2::AttachedPictureFrame();
+    pic->setMimeType(TagLib::String(mime != nullptr ? mime : "image/jpeg"));
+    pic->setType(TagLib::ID3v2::AttachedPictureFrame::FrontCover);
+    pic->setPicture(TagLib::ByteVector(data, (unsigned int)len));
+    tag->addFrame(pic);   // tag takes ownership
+    bool ok = f.save(TagLib::MPEG::File::ID3v2, TagLib::File::StripNone, ver, TagLib::File::DoNotDuplicate);
+    return ok ? 0 : -2;
+}
+
+// Remove embedded cover art (for undo of an added cover).
+extern "C" int md_remove_artwork(const char *path) {
+    if (path == nullptr) return -3;
+    if (!hasSuffixCI(path, ".mp3")) return -4;
+    TagLib::MPEG::File f(path);
+    if (!f.isValid()) return -1;
+    TagLib::ID3v2::Tag *tag = f.ID3v2Tag(true);
+    unsigned int mv = tag->header()->majorVersion();
+    TagLib::ID3v2::Version ver = (mv >= 4) ? TagLib::ID3v2::v4 : TagLib::ID3v2::v3;
+    tag->removeFrames("APIC");
     bool ok = f.save(TagLib::MPEG::File::ID3v2, TagLib::File::StripNone, ver, TagLib::File::DoNotDuplicate);
     return ok ? 0 : -2;
 }
