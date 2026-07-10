@@ -137,6 +137,7 @@ struct PerfectView: View {
                     if store.groups.isEmpty && store.artists.isEmpty && store.renames.isEmpty && !store.checkingTags {
                         allClean
                     }
+                    albumCarousel
                     artistsSection
                     if !store.renames.isEmpty { renamesSection }
                     ForEach(store.groups, id: \.kind.rawValue) { group in
@@ -150,6 +151,53 @@ struct PerfectView: View {
             Divider()
             footer
         }
+    }
+
+    // Album cover carousel — the media-first overview of what's being tidied.
+    @ViewBuilder private var albumCarousel: some View {
+        let albums = store.albumChanges
+        if !albums.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.stack").foregroundStyle(.purple)
+                    Text("\(albums.count) album(s)").fontWeight(.semibold)
+                    Text("identified from the audio").font(.caption).foregroundStyle(.secondary)
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 16) {
+                        ForEach(albums) { a in albumCard(a) }
+                    }
+                    .padding(.horizontal, 2).padding(.bottom, 6)
+                }
+            }
+        }
+    }
+
+    private func albumCard(_ a: PerfectStore.AlbumChange) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ZStack(alignment: .bottomLeading) {
+                ArtworkView(key: a.id, sampleURL: a.sampleURL, size: 150, corner: 10)
+                HStack(spacing: 4) {
+                    if a.names { cardTag("Names", .blue) }
+                    if a.artwork { cardTag("+ Art", .pink) }
+                    if a.credits { cardTag("+ Credits", Color(red: 0.13, green: 0.6, blue: 0.3)) }
+                }
+                .padding(7)
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(a.title).font(.caption).fontWeight(.medium).lineLimit(1)
+                Text("\(a.subtitle) · \(a.trackCount) track(s)").font(.caption2)
+                    .foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+        .frame(width: 150)
+    }
+
+    private func cardTag(_ text: String, _ color: Color) -> some View {
+        Text(text).font(.system(size: 9, weight: .semibold)).foregroundStyle(.white)
+            .padding(.horizontal, 6).padding(.vertical, 3)
+            .background(Capsule().fill(color))
+            .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
     }
 
     // One artist-centric list — a folder split, a tag split, or both. One "keep"

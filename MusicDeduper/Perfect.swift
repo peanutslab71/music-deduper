@@ -253,6 +253,40 @@ final class PerfectStore: ObservableObject {
         if p.runModal() == .OK, let url = p.url { setRoot(url) }
     }
 
+    // One affected album for the carousel, aggregating the pending changes that
+    // touch the tracks in a single folder (names / artwork / credits).
+    struct AlbumChange: Identifiable {
+        let id: String            // album folder path
+        let dir: URL
+        let title: String
+        let subtitle: String
+        let sampleURL: URL?
+        let trackCount: Int
+        var names = false, artwork = false, credits = false
+    }
+
+    /// Albums touched by identify/enrich, for the cover carousel. Grouped by the
+    /// tracks' folder; each carries which kinds of change it will get.
+    var albumChanges: [AlbumChange] {
+        var byDir: [String: [TrackProposal]] = [:]
+        for p in proposals where p.accepted {
+            byDir[p.url.deletingLastPathComponent().path, default: []].append(p)
+        }
+        return byDir.map { (dirPath, props) -> AlbumChange in
+            let dir = URL(fileURLWithPath: dirPath)
+            let firstAlbum = props.first(where: { !$0.chosenAlbum.isEmpty })?.chosenAlbum
+            return AlbumChange(
+                id: dirPath, dir: dir,
+                title: firstAlbum ?? dir.lastPathComponent,
+                subtitle: props.first?.newArtist ?? "",
+                sampleURL: props.first?.url,
+                trackCount: props.count,
+                names: props.contains { $0.hasChange },
+                artwork: props.contains { $0.canAddArt },
+                credits: props.contains { !($0.enrichment?.isEmpty ?? true) })
+        }.sorted { $0.title.lowercased() < $1.title.lowercased() }
+    }
+
     // findings grouped by kind, in display order
     var groups: [(kind: FixKind, items: [PerfectFinding])] {
         let order: [FixKind] = [.junk, .emptyFolder, .drm]
