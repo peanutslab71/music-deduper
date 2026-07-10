@@ -54,6 +54,18 @@ struct MergeProposal: Identifiable {
     var accepted: Bool
 }
 
+/// A proposed rename of a folder with an obviously untidy name (trailing
+/// underscore from a stripped illegal character, stray/double spaces, etc.).
+/// The true name including any real illegal character comes later, from the
+/// metadata authority — this is only the safe cosmetic tidy.
+struct RenameProposal: Identifiable {
+    let id = UUID()
+    let relPath: String         // current path, root-relative
+    let oldName: String
+    var newName: String         // editable
+    var accepted: Bool
+}
+
 /// A committed run, reconstructed from its quarantine folder's run.json, so it
 /// can be listed and undone. Every change is one move (from → to), both paths
 /// relative to the library root; undo reverses them.
@@ -75,6 +87,7 @@ final class PerfectStore: ObservableObject {
     @Published var progress = ""
     @Published var findings: [PerfectFinding] = []
     @Published var merges: [MergeProposal] = []
+    @Published var renames: [RenameProposal] = []
     @Published var diagnosed = false
 
     // commit-result summary
@@ -203,8 +216,41 @@ final class PerfectStore: ObservableObject {
                                                fileCounts: counts, accepted: true))
             }
 
+            // bad folder names — safe cosmetic tidy. Skip empties (being removed)
+            // and anything under a merge source (its contents move during merge).
+            let emptyPaths = Set(found.filter { $0.kind == .emptyFolder }.map { $0.url.path })
+            let mergeSrcRoots = proposals.flatMap { p in p.sources.map { root.appendingPathComponent($0).path + "/" } }
+            var renameProposals: [RenameProposal] = []
+            for d in allDirs {
+                if emptyPaths.contains(d.path) { continue }
+                if d.lastPathComponent == "Music Librarian Quarantine" { continue }
+                if mergeSrcRoots.contains(where: { d.path.hasPrefix($0) || d.path + "/" == $0 }) { continue }
+                let old = d.lastPathComponent
+                let clean = Self.cleanFolderName(old)
+                guard clean != old, !clean.isEmpty else { continue }
+                // skip if a sibling with the cleaned name already exists (would collide)
+                let siblingClean = d.deletingLastPathComponent().appendingPathComponent(clean)
+                if fm.fileExists(atPath: siblingClean.path) { continue }
+                renameProposals.append(RenameProposal(relPath: Self.rel(d, root), oldName: old,
+                                                      newName: clean, accepted: true))
+            }
+
+            // drop any rename whose ancestor is also being renamed (keeps commit
+            // and undo ordering simple; nested cases resolve on a later re-diagnose)
+            let renameRels = Set(renameProposals.map { $0.relPath })
+            let filteredRenames = renameProposals.filter { p in
+                var parent = (p.relPath as NSString).deletingLastPathComponent
+                while !parent.isEmpty {
+                    if renameRels.contains(parent) { return false }
+                    parent = (parent as NSString).deletingLastPathComponent
+                }
+                return true
+            }
+
             let (ff, fo, fb) = (files, folders, bytes)
-            await self.finishDiagnose(found: found, merges: proposals.sorted { $0.canonical.lowercased() < $1.canonical.lowercased() },
+            await self.finishDiagnose(found: found,
+                                      merges: proposals.sorted { $0.canonical.lowercased() < $1.canonical.lowercased() },
+                                      renames: filteredRenames.sorted { $0.relPath.lowercased() < $1.relPath.lowercased() },
                                       files: ff, folders: fo, bytes: fb, cancelled: box.cancelled)
         }
     }
@@ -212,9 +258,11 @@ final class PerfectStore: ObservableObject {
     private func setProgress(_ s: String) { progress = s }
 
     private func finishDiagnose(found: [PerfectFinding], merges m: [MergeProposal],
+                               renames r: [RenameProposal],
                                files: Int, folders: Int, bytes: Int64, cancelled: Bool) {
         findings = found.sorted { $0.relPath.lowercased() < $1.relPath.lowercased() }
         merges = m
+        renames = r
         totalFiles = files; totalFolders = folders; totalBytes = bytes
         busy = false; diagnosed = !cancelled; progress = ""
         let junk = found.filter { $0.kind == .junk }.count
@@ -225,9 +273,20 @@ final class PerfectStore: ObservableObject {
         if junk > 0 { found2.append("\(junk) junk") }
         if empties > 0 { found2.append("\(empties) empty folder(s)") }
         if !m.isEmpty { found2.append("\(m.count) duplicate artist(s)") }
+        if !r.isEmpty { found2.append("\(r.count) untidy name(s)") }
         if drm > 0 { found2.append("\(drm) protected track(s)") }
         if !found2.isEmpty { parts.append("found " + found2.joined(separator: ", ")) }
         status = cancelled ? "Diagnosis cancelled." : parts.joined(separator: " — ") + "."
+    }
+
+    /// Safe cosmetic tidy of a folder name — trailing underscores (stripped
+    /// illegal chars), stray/doubled whitespace, trailing dots. Never invents.
+    nonisolated static func cleanFolderName(_ name: String) -> String {
+        var n = name
+        while n.contains("  ") { n = n.replacingOccurrences(of: "  ", with: " ") }
+        n = n.trimmingCharacters(in: .whitespaces)
+        while n.hasSuffix("_") || n.hasSuffix(".") || n.hasSuffix(" ") { n = String(n.dropLast()) }
+        return n.trimmingCharacters(in: .whitespaces)
     }
 
     /// Normalise an artist folder name to a collision key: drops a leading
@@ -245,7 +304,9 @@ final class PerfectStore: ObservableObject {
     // MARK: Commit — apply accepted removals + merges as a log of reversible moves
 
     var hasWork: Bool {
-        findings.contains { $0.accepted && $0.kind.safe } || merges.contains { $0.accepted }
+        findings.contains { $0.accepted && $0.kind.safe }
+            || merges.contains { $0.accepted }
+            || renames.contains { $0.accepted && $0.newName != $0.oldName }
     }
 
     func commit() {
@@ -253,6 +314,8 @@ final class PerfectStore: ObservableObject {
         busy = true; status = "Applying changes…"
         let removals = findings.filter { $0.accepted && $0.kind.safe }.map { ($0.relPath, $0.kind.rawValue) }
         let accMerges = merges.filter { $0.accepted }.map { ($0.canonical, $0.sources) }
+        let accRenames = renames.filter { $0.accepted && $0.newName != $0.oldName }
+            .map { ($0.relPath, $0.newName) }
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
@@ -306,6 +369,14 @@ final class PerfectStore: ObservableObject {
                 if move(rel, qRel + "/" + rel) { log += "QUARANTINED (\(kind)): \(rel)\n" }
             }
 
+            // 3) rename untidy folders (deepest first; nested renames were excluded
+            //    at detection so no parent-rename invalidates a child path)
+            for (rel, newName) in accRenames.sorted(by: { $0.0.count > $1.0.count }) {
+                let parent = (rel as NSString).deletingLastPathComponent
+                let toRel = parent.isEmpty ? newName : parent + "/" + newName
+                if move(rel, toRel) { log += "RENAMED: \(rel) → \(toRel)\n" }
+            }
+
             log += "\n\(ops.count) change(s). Restore with 'Undo this run'.\n"
             try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
 
@@ -328,6 +399,7 @@ final class PerfectStore: ObservableObject {
         lastRunSummary = "Applied \(count) change(s)."
         findings.removeAll { $0.accepted && $0.kind.safe }
         merges.removeAll { $0.accepted }
+        renames.removeAll { $0.accepted && $0.newName != $0.oldName }
         status = lastRunSummary ?? status
         loadRuns()
     }

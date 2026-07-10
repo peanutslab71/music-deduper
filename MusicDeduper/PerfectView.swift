@@ -91,12 +91,13 @@ struct PerfectView: View {
             if let summary = store.lastRunSummary {
                 committedBanner(summary)
             }
-            if store.groups.isEmpty && store.merges.isEmpty {
+            if store.groups.isEmpty && store.merges.isEmpty && store.renames.isEmpty {
                 allClean
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
                         if !store.merges.isEmpty { mergesSection }
+                        if !store.renames.isEmpty { renamesSection }
                         ForEach(store.groups, id: \.kind.rawValue) { group in
                             section(group.kind, group.items)
                         }
@@ -160,6 +161,53 @@ struct PerfectView: View {
                     }.labelsHidden().frame(maxWidth: 260)
                 }
             }
+            Spacer()
+        }
+        .padding(.vertical, 1)
+    }
+
+    // Untidy folder names — editable proposed name
+    private var renamesSection: some View {
+        let isOpen = expanded.contains("rename")
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    if isOpen { expanded.remove("rename") } else { expanded.insert("rename") }
+                } label: {
+                    Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption).foregroundStyle(.secondary)
+                }.buttonStyle(.plain)
+                Image(systemName: "character.cursor.ibeam").foregroundStyle(.indigo)
+                Text("Tidy folder names").fontWeight(.semibold)
+                Text("\(store.renames.count) · review each").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                let allOn = store.renames.allSatisfy { $0.accepted }
+                Button(allOn ? "Deselect all" : "Select all") {
+                    for i in store.renames.indices { store.renames[i].accepted = !allOn }
+                }.controlSize(.small)
+            }
+            .padding(.vertical, 6).padding(.horizontal, 10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.indigo.opacity(0.07)))
+            if isOpen {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(store.renames) { r in renameRow(r) }
+                }.padding(.top, 6).padding(.leading, 6)
+            }
+        }
+    }
+
+    private func renameRow(_ r: RenameProposal) -> some View {
+        HStack(spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { r.accepted },
+                set: { v in if let i = store.renames.firstIndex(where: { $0.id == r.id }) { store.renames[i].accepted = v } }
+            )).labelsHidden().toggleStyle(.checkbox)
+            Text(r.oldName).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                .strikethrough().lineLimit(1)
+            Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.tertiary)
+            TextField("", text: Binding(
+                get: { r.newName },
+                set: { v in if let i = store.renames.firstIndex(where: { $0.id == r.id }) { store.renames[i].newName = v } }
+            )).textFieldStyle(.roundedBorder).font(.system(size: 11, design: .monospaced)).frame(maxWidth: 260)
             Spacer()
         }
         .padding(.vertical, 1)
