@@ -99,9 +99,13 @@ extern "C" int md_set_field(const char *path, const char *field, const char *val
         unsigned int mv = tag->header()->majorVersion();
         TagLib::ID3v2::Version ver = (mv == 3) ? TagLib::ID3v2::v3 : TagLib::ID3v2::v4;
         tag->removeFrames(frameId);
-        auto *frame = new TagLib::ID3v2::TextIdentificationFrame(frameId, TagLib::String::UTF16);
-        frame->setText(v);
-        tag->addFrame(frame);  // tag takes ownership
+        // an empty value clears the field (removes the frame) — so undoing a
+        // gap-fill that started blank leaves no empty frame behind
+        if (!v.isEmpty()) {
+            auto *frame = new TagLib::ID3v2::TextIdentificationFrame(frameId, TagLib::String::UTF16);
+            frame->setText(v);
+            tag->addFrame(frame);  // tag takes ownership
+        }
         bool ok = f.save(TagLib::MPEG::File::ID3v2, TagLib::File::StripNone, ver, TagLib::File::DoNotDuplicate);
         return ok ? 0 : -2;
     }

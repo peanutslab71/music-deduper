@@ -671,6 +671,18 @@ final class PerfectStore: ObservableObject {
             if p.titleChanged  { accTagEdits.append((p.url, p.relPath, "title",  p.curTitle,  p.newTitle)) }
             if p.albumChanged  { accTagEdits.append((p.url, p.relPath, "album",  p.curAlbum,  p.chosenAlbum)) }
         }
+        // enrichment gap-fills (composer/label/date) — candidate values; only
+        // written where the file's field is actually blank (checked at apply time)
+        let accEnrich: [(URL, String, [(String, String)])] = tagWritingEnabled ? proposals
+            .filter { $0.accepted }
+            .compactMap { p in
+                guard let e = p.enrichment, !e.isEmpty else { return nil }
+                var fields: [(String, String)] = []
+                if let c = e.composer { fields.append(("composer", c)) }
+                if let l = e.label { fields.append(("label", l)) }
+                if let d = e.date { fields.append(("date", d)) }
+                return fields.isEmpty ? nil : (p.url, p.relPath, fields)
+            } : []
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
@@ -701,6 +713,18 @@ final class PerfectStore: ObservableObject {
                     tagEdits.append((rel, field, old))
                     log += "TAG: \(rel)  \(field) '\(old)' → '\(new)'\n"
                 } catch { log += "FAILED tag \(rel) \(field): \(error.localizedDescription)\n" }
+            }
+
+            // 0b) enrichment gap-fills — only fill a field that is actually BLANK,
+            //     never overwrite. Record old = "" so undo clears it again.
+            for (url, rel, fields) in accEnrich {
+                for (field, value) in fields where (Self.readField(url, field) ?? "").isEmpty {
+                    do {
+                        try Self.writeField(url, field, to: value)
+                        tagEdits.append((rel, field, ""))
+                        log += "TAG: \(rel)  + \(field) '\(value)' (was blank)\n"
+                    } catch { log += "FAILED enrich \(rel) \(field): \(error.localizedDescription)\n" }
+                }
             }
 
             // 1) merges — move each non-canonical source's contents into the canonical
