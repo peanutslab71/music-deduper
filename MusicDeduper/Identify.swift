@@ -58,7 +58,11 @@ struct TrackProposal: Identifiable {
     var accepted: Bool
 
     let recordingID: String?          // MusicBrainz recording, for the relationship lookups
+    let curHasArt: Bool               // does the file already have embedded cover art?
     var enrichment: Enrichment?       // composer/label/performers, filled by the MusicBrainz pass
+
+    /// artwork will be offered when the file has none and we found a release to fetch from
+    var canAddArt: Bool { !curHasArt && (enrichment?.releaseMBID != nil) }
 
     var artistChanged: Bool { !newArtist.isEmpty && newArtist != curArtist }
     var titleChanged: Bool  { !newTitle.isEmpty && newTitle != curTitle }
@@ -82,7 +86,8 @@ struct Identifier {
     /// Fingerprint one file and look it up. Returns nil on no match. `current*`
     /// are the file's existing tags, used to pick the closest album.
     func identify(url: URL, relPath: String,
-                  curArtist: String, curTitle: String, curAlbum: String) async throws -> TrackProposal? {
+                  curArtist: String, curTitle: String, curAlbum: String,
+                  curHasArt: Bool) async throws -> TrackProposal? {
         guard !apiKey.isEmpty else { throw IdentifyError.noKey }
 
         // Decode + fingerprint inside an autorelease pool so the (tens-of-MB) PCM
@@ -122,6 +127,7 @@ struct Identifier {
             chosenAlbum: chosen,
             accepted: true,
             recordingID: rec.id,
+            curHasArt: curHasArt,
             enrichment: nil)
         return proposal
     }
@@ -189,6 +195,7 @@ struct Enrichment {
     var catalogNumber: String?
     var date: String?
     var performers: [Performer] = []       // (name, role) — go in the credits field, never artist
+    var releaseMBID: String?               // for fetching cover art (not a credit itself)
     struct Performer { let name: String; let role: String }
 
     var isEmpty: Bool {
@@ -245,8 +252,9 @@ actor MusicBrainzClient {
             let w = await cachedWork(workID)
             e.composer = w.composer; e.lyricist = w.lyricist
         }
-        // label / catalog / date via the first release
+        // label / catalog / date via the first release; keep the release id for art
         if let releaseID = rec.releases?.first?.id {
+            e.releaseMBID = releaseID
             let r = await cachedRelease(releaseID)
             e.label = r.label; e.catalogNumber = r.catalog; e.date = r.date
         }
@@ -287,5 +295,28 @@ actor MusicBrainzClient {
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         guard let (data, _) = try? await session.data(for: req) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
+    }
+}
+
+/// Fetches front-cover images from the Cover Art Archive, keyed by release MBID.
+/// Caches per release so all of an album's tracks share one download.
+actor CoverArtClient {
+    private let session = URLSession(configuration: .ephemeral)
+    private var cache: [String: Data?] = [:]
+
+    func frontCover(releaseMBID: String) async -> Data? {
+        if let c = cache[releaseMBID] { return c }
+        var result: Data? = nil
+        // 500px front cover; the archive redirects to storage, URLSession follows it
+        if let url = URL(string: "https://coverartarchive.org/release/\(releaseMBID)/front-500") {
+            var req = URLRequest(url: url)
+            req.setValue("MusicDeduper ( neil.cottyincar@gmail.com )", forHTTPHeaderField: "User-Agent")
+            if let (data, resp) = try? await session.data(for: req),
+               (resp as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty {
+                result = data
+            }
+        }
+        cache[releaseMBID] = result
+        return result
     }
 }

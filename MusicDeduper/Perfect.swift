@@ -150,6 +150,7 @@ struct RunRecord: Identifiable {
     let ops: [(from: String, to: String)]   // each move, root-relative
     let tagEdits: [(rel: String, field: String, old: String)]  // each tag rewrite, for exact undo
     let perfEdits: [(rel: String, name: String, role: String)] // each performer credit added, for undo
+    let artEdits: [String]                                      // rels where cover art was added, for undo
     let summary: String
 }
 
@@ -601,8 +602,10 @@ final class PerfectStore: ObservableObject {
                 let curA = Self.readField(u, "artist") ?? ""
                 let curT = Self.readField(u, "title") ?? ""
                 let curAl = Self.readField(u, "album") ?? ""
+                let hasArt = md_has_artwork(u.path) == 1
                 if let p = try? await id.identify(url: u, relPath: rel,
-                                                  curArtist: curA, curTitle: curT, curAlbum: curAl),
+                                                  curArtist: curA, curTitle: curT, curAlbum: curAl,
+                                                  curHasArt: hasArt),
                    p.hasChange {
                     found.append(p)
                 }
@@ -704,6 +707,10 @@ final class PerfectStore: ObservableObject {
                 guard let e = p.enrichment, !e.performers.isEmpty else { return nil }
                 return (p.url, p.relPath, e.performers.map { ($0.name, $0.role) })
             } : []
+        // cover art: accepted proposals with no art and a release to fetch from
+        let accArt: [(URL, String, String)] = tagWritingEnabled ? proposals
+            .filter { $0.accepted && $0.canAddArt }
+            .compactMap { p in p.enrichment?.releaseMBID.map { (p.url, p.relPath, $0) } } : []
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
@@ -713,6 +720,7 @@ final class PerfectStore: ObservableObject {
             var ops: [(from: String, to: String)] = []   // recorded moves (root-relative)
             var tagEdits: [(rel: String, field: String, old: String)] = []  // recorded tag rewrites
             var perfEdits: [(rel: String, name: String, role: String)] = []  // recorded performer credits
+            var artEdits: [String] = []                                      // rels where art was added
             var log = "Music Librarian — change log \(Date())\nLibrary: \(root.path)\n\n"
 
             func move(_ fromRel: String, _ toRel: String) -> Bool {
@@ -761,6 +769,18 @@ final class PerfectStore: ObservableObject {
                 }
             }
 
+            // 0d) cover art — fetch from the Cover Art Archive and embed, only where
+            //     the file still has none. Recorded so undo strips exactly this art.
+            let artClient = CoverArtClient()
+            for (url, rel, releaseMBID) in accArt where md_has_artwork(url.path) == 0 {
+                guard let data = await artClient.frontCover(releaseMBID: releaseMBID) else { continue }
+                let rc = data.withUnsafeBytes { buf in
+                    md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(data.count), "image/jpeg")
+                }
+                if rc == 0 { artEdits.append(rel); log += "ART: \(rel)  + cover (\(data.count) bytes)\n" }
+                else { log += "FAILED art \(rel): rc \(rc)\n" }
+            }
+
             // 1) merges — move each non-canonical source's contents into the canonical
             //    folder, then quarantine the emptied source folder.
             for (canonical, sources) in accMerges {
@@ -802,7 +822,7 @@ final class PerfectStore: ObservableObject {
                 if move(rel, toRel) { log += "RENAMED: \(rel) → \(toRel)\n" }
             }
 
-            let total = ops.count + tagEdits.count + perfEdits.count
+            let total = ops.count + tagEdits.count + perfEdits.count + artEdits.count
             log += "\n\(total) change(s). Restore with 'Undo this run'.\n"
             try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
 
@@ -813,6 +833,7 @@ final class PerfectStore: ObservableObject {
                 "ops": ops.map { ["from": $0.from, "to": $0.to] },
                 "tagEdits": tagEdits.map { ["rel": $0.rel, "field": $0.field, "old": $0.old] },
                 "perfEdits": perfEdits.map { ["rel": $0.rel, "name": $0.name, "role": $0.role] },
+                "artEdits": artEdits,
             ]
             if let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) {
                 try? data.write(to: quarantine.appendingPathComponent("run.json"))
@@ -855,9 +876,10 @@ final class PerfectStore: ObservableObject {
                 let perfEdits = (obj["perfEdits"] as? [[String: String]] ?? []).compactMap { d -> (String, String, String)? in
                     guard let r = d["rel"], let n = d["name"], let ro = d["role"] else { return nil }; return (r, n, ro)
                 }
-                let n = ops.count + tagEdits.count + perfEdits.count
+                let artEdits = obj["artEdits"] as? [String] ?? []
+                let n = ops.count + tagEdits.count + perfEdits.count + artEdits.count
                 found.append(RunRecord(id: sub.lastPathComponent, folder: sub, date: date,
-                                       ops: ops, tagEdits: tagEdits, perfEdits: perfEdits,
+                                       ops: ops, tagEdits: tagEdits, perfEdits: perfEdits, artEdits: artEdits,
                                        summary: obj["summary"] as? String ?? "\(n) changes"))
             }
         }
@@ -869,7 +891,7 @@ final class PerfectStore: ObservableObject {
     func undo(_ run: RunRecord) {
         guard let root else { return }
         busy = true; status = "Undoing run…"
-        let folder = run.folder, ops = run.ops, tagEdits = run.tagEdits, perfEdits = run.perfEdits
+        let folder = run.folder, ops = run.ops, tagEdits = run.tagEdits, perfEdits = run.perfEdits, artEdits = run.artEdits
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var restored = 0, failed = 0
@@ -915,6 +937,12 @@ final class PerfectStore: ObservableObject {
                 let url = root.appendingPathComponent(edit.rel)
                 guard fm.fileExists(atPath: url.path) else { continue }
                 Self.removePerformer(url, name: edit.name, role: edit.role); restored += 1
+            }
+            // strip any cover art this run added
+            for rel in artEdits {
+                let url = root.appendingPathComponent(rel)
+                guard fm.fileExists(atPath: url.path) else { continue }
+                _ = md_remove_artwork(url.path); restored += 1
             }
 
             try? fm.removeItem(at: folder)

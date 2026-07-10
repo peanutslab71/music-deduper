@@ -344,19 +344,22 @@ struct PerfectView: View {
         .padding(.vertical, 2)
     }
 
-    private func creditStrings(_ e: Enrichment) -> [String] {
+    private func creditStrings(_ p: TrackProposal) -> [String] {
         var chips: [String] = []
-        if let c = e.composer { chips.append("+ Composer: \(c)") }
-        if let l = e.lyricist { chips.append("+ Lyricist: \(l)") }
-        if let lb = e.label { chips.append("+ Label: \(lb)") }
-        for pf in e.performers.prefix(3) { chips.append("+ \(pf.name) · \(pf.role)") }
+        if p.canAddArt { chips.append("+ Artwork") }
+        if let e = p.enrichment {
+            if let c = e.composer { chips.append("+ Composer: \(c)") }
+            if let l = e.lyricist { chips.append("+ Lyricist: \(l)") }
+            if let lb = e.label { chips.append("+ Label: \(lb)") }
+            for pf in e.performers.prefix(3) { chips.append("+ \(pf.name) · \(pf.role)") }
+        }
         return chips
     }
 
-    // Green "+" chips for the enrichment gap-fills (composer/label/performers).
+    // Green "+" chips for the gap-fills (artwork/composer/label/performers).
     @ViewBuilder private func creditChips(_ p: TrackProposal) -> some View {
-        if let e = p.enrichment, !e.isEmpty {
-            let chips = creditStrings(e)
+        let chips = creditStrings(p)
+        if !chips.isEmpty {
             HStack(spacing: 6) {
                 ForEach(chips, id: \.self) { c in
                     Text(c).font(.system(size: 10)).foregroundStyle(Color(red: 0.03, green: 0.4, blue: 0.15))
