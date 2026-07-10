@@ -829,7 +829,7 @@ final class DedupStore: ObservableObject {
         opPaused = false; opActiveStreams = 0; opStreamLimit = 0
         let box = cancelBox
         Task.detached(priority: .userInitiated) {
-            await self.opLogLine("ℹ instant move within \(dst.label)")
+            await self.opLogLine("ℹ moving into \(dst.label) (instant where the server allows a rename)")
             var ok = 0, fail = 0
             var needCopy: [(name: String, isDir: Bool)] = []   // items on a different device
             for (n, item) in items.enumerated() {
