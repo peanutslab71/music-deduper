@@ -389,6 +389,10 @@ final class DedupStore: ObservableObject {
     private func workerDelta(_ d: Int) { opActiveStreams += d }
     private func setStreamLimit(_ n: Int) { opStreamLimit = n }
 
+    // only files at least this big get a live per-file % (smaller ones finish
+    // fast enough that showing/hiding the line just flickers)
+    static let progressThreshold: Int64 = 8_000_000
+
     // byte accounting for the elapsed/rate/ETA footer
     @Published var opStartDate: Date?
     @Published var opBytesDone: Int64 = 0
@@ -981,12 +985,18 @@ final class DedupStore: ObservableObject {
                     }
                 }
 
-                await self.setNote("→ \(f.rel)  0%")
+                // only show a live per-file % for files big enough to matter —
+                // toggling it for tiny files that finish instantly just flickers
                 let fSize = f.size, fRel = f.rel
-                let onBytes: @Sendable (Int64) -> Void = { bytes in
-                    Task { @MainActor in
-                        let pct = fSize > 0 ? Int(Double(bytes) / Double(fSize) * 100) : 100
-                        self.opNote = "→ \(fRel)  \(pct)%  (\(fmtBytes(bytes)) / \(fmtBytes(fSize)))"
+                let showProgress = fSize >= Self.progressThreshold
+                if showProgress { await self.setNote("→ \(fRel)  0%  (0 KB / \(fmtBytes(fSize)))") }
+                var onBytes: (@Sendable (Int64) -> Void)? = nil
+                if showProgress {
+                    onBytes = { bytes in
+                        Task { @MainActor in
+                            let pct = fSize > 0 ? Int(Double(bytes) / Double(fSize) * 100) : 100
+                            self.opNote = "→ \(fRel)  \(pct)%  (\(fmtBytes(bytes)) / \(fmtBytes(fSize)))"
+                        }
                     }
                 }
                 var done = false
@@ -1005,7 +1015,7 @@ final class DedupStore: ObservableObject {
                         }
                     }
                 }
-                await self.setNote("")
+                if showProgress { await self.setNote("") }
                 if done {
                     ok += 1
                     await MainActor.run { self.opBytesDone += f.size }
@@ -1337,10 +1347,14 @@ final class DedupStore: ObservableObject {
         let maxAttempts = 5
         let tmpPath = dirPath + "/." + DirectSMBClient.nfc(t.name) + ".mdtmp"
         let tSize = t.size, tName = t.name
-        let onBytes: @Sendable (Int64) -> Void = { bytes in
-            Task { @MainActor in
-                let pct = tSize > 0 ? Int(Double(bytes) / Double(tSize) * 100) : 100
-                self.opNote = "→ \(tName)  \(pct)%  (\(fmtBytes(bytes)) / \(fmtBytes(tSize)))"
+        let showProgress = tSize >= Self.progressThreshold
+        var onBytes: (@Sendable (Int64) -> Void)? = nil
+        if showProgress {
+            onBytes = { bytes in
+                Task { @MainActor in
+                    let pct = tSize > 0 ? Int(Double(bytes) / Double(tSize) * 100) : 100
+                    self.opNote = "→ \(tName)  \(pct)%  (\(fmtBytes(bytes)) / \(fmtBytes(tSize)))"
+                }
             }
         }
         while !box.cancelled {

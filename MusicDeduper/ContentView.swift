@@ -342,13 +342,13 @@ struct OperationSheet: View {
                 Text("✓ \(store.opOK)    • \(store.opSkip)    ✗ \(store.opFail)").foregroundStyle(.secondary)
             }
             .font(.caption).monospaced()
-            if !store.opNote.isEmpty {
-                Text(store.opNote)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            // fixed-height row so showing/clearing the note never resizes the
+            // dialog (that resize was the flicker on runs of small files)
+            Text(store.opNote.isEmpty ? " " : store.opNote)
+                .font(.caption).monospacedDigit()
+                .foregroundStyle(.orange)
+                .frame(maxWidth: .infinity, minHeight: 15, alignment: .leading)
+                .lineLimit(1).truncationMode(.middle)
             // several files in a row failed — server is gone, run paused itself
             if store.opPaused {
                 HStack(spacing: 10) {
