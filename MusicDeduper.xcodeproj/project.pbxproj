@@ -19,7 +19,6 @@
 		DE0000000000000000000053 /* PerfectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE0000000000000000000051 /* PerfectView.swift */; };
 		DE0000000000000000000040 /* AMSMB2 in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000042 /* AMSMB2 */; };
 		DE0000000000000000000043 /* AMSMB2 in Embed Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000042 /* AMSMB2 */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
-		DE0000000000000000000060 /* SFBAudioEngine in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000062 /* SFBAudioEngine */; };
 		DE0000000000000000000070 /* MDTagShim in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000071 /* MDTagShim */; };
 /* End PBXBuildFile section */
 
@@ -43,7 +42,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				DE0000000000000000000040 /* AMSMB2 in Frameworks */,
-				DE0000000000000000000060 /* SFBAudioEngine in Frameworks */,
 				DE0000000000000000000070 /* MDTagShim in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -117,7 +115,6 @@
 			name = MusicDeduper;
 			packageProductDependencies = (
 				DE0000000000000000000042 /* AMSMB2 */,
-				DE0000000000000000000062 /* SFBAudioEngine */,
 				DE0000000000000000000071 /* MDTagShim */,
 			);
 			productName = MusicDeduper;
@@ -151,7 +148,6 @@
 			packageReferences = (
 				DE0000000000000000000072 /* XCLocalSwiftPackageReference "MDTagShim" */,
 				DE0000000000000000000041 /* XCRemoteSwiftPackageReference "AMSMB2" */,
-				DE0000000000000000000063 /* XCRemoteSwiftPackageReference "SFBAudioEngine" */,
 			);
 			productRefGroup = DE0000000000000000000003 /* Products */;
 			projectDirPath = "";
@@ -381,14 +377,6 @@
 				branch = "guest-anonymous-session";
 			};
 		};
-		DE0000000000000000000063 /* XCRemoteSwiftPackageReference "SFBAudioEngine" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/sbooth/SFBAudioEngine";
-			requirement = {
-				kind = upToNextMinorVersion;
-				minimumVersion = 0.13.0;
-			};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -396,11 +384,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = DE0000000000000000000041 /* XCRemoteSwiftPackageReference "AMSMB2" */;
 			productName = AMSMB2;
-		};
-		DE0000000000000000000062 /* SFBAudioEngine */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = DE0000000000000000000063 /* XCRemoteSwiftPackageReference "SFBAudioEngine" */;
-			productName = SFBAudioEngine;
 		};
 		DE0000000000000000000071 /* MDTagShim */ = {
 			isa = XCSwiftPackageProductDependency;

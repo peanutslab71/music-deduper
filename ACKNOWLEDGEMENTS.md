@@ -33,9 +33,6 @@ open-source tag reader/writer, dual-licensed under **LGPL 2.1 / MPL 1.1**:
 - A small in-repo shim, `MDTagShim`, wraps TagLib to change only the one tag
   field (the artist) while preserving the tag version and every other frame —
   a surgical, lossless edit.
-- **[SFBAudioEngine](https://github.com/sbooth/SFBAudioEngine)** (© Stephen F.
-  Booth, **MIT**) is also linked; it bundles TagLib and some audio codec
-  libraries, some of which (e.g. LAME, mpg123) are **LGPL 2.1**.
 
 As with the SMB engine above, the combined binary satisfies these licenses:
 this complete source repository and its build configuration are public, so
