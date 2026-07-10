@@ -349,10 +349,25 @@ delivers the cleaned result.
   album artist so compilations and guest-heavy albums stay together).
   Configurable.
 
-### Still open
-- Duplicate-artist merge granularity in the review (per-artist vs per-album).
-- Cover-art handling detail (sources, minimum resolution, overwrite vs fill-gaps).
-- Various-Artists / compilation and multi-disc tag conventions.
+- **Backup scope:** the pre-run backup covers **only the files a run will
+  change**, not the whole library — small and fast on any size, and sufficient
+  given the quarantine (deletes) and change log (renames/moves) already cover the
+  rest.
+- **Duplicate-artist merges:** resolved **per artist** (the canonical name is
+  chosen once and applies to all that artist's tracks), not per album.
+- **Cover art:** fill gaps and upgrade low-resolution art by default; always show
+  the authoritative art beside the current art in the review so the user can swap
+  even where it would not be auto-replaced.
+- **Compilations:** an album with many distinct track artists is tagged with
+  **Album Artist = "Various Artists"** while each track keeps its own artist, so
+  the compilation stays together as one album.
+- **Multi-disc albums:** kept in **one album folder** with disc and track numbers
+  in the tags (not split into per-disc subfolders), so servers treat them as a
+  single multi-disc album.
+- **Identification providers & unmatched:** a configurable multi-provider chain
+  (§5); tracks unmatched after the whole chain are left untouched and flagged.
+- **Settings:** a dedicated Settings area (gear icon + ⌘,) holds provider config
+  and all defaults (§5a).
 
 ---
 
