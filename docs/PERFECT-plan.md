@@ -328,6 +328,46 @@ dedupe and File Commander engines)*
 Everything runs against the local copy first; the existing copy-to-server step
 delivers the cleaned result.
 
+## 9b. Phase 2 detail (Identify & Tag)
+
+After the tidy diagnosis, an identification pass runs the provider chain
+(fingerprint first, then text/metadata) and produces matches with confidence.
+The review is **banded by confidence**:
+
+- **High confidence** (e.g. both fingerprinters agree) — collapsed, with a single
+  **Accept all**. Nothing is written until accepted.
+- **Needs review** — shown for a look; medium-confidence matches.
+- **Couldn't identify** — after the whole provider chain misses; left untouched,
+  offered a **manual editor**.
+
+Review UX decisions:
+- **Per album, with per-track drill-down** — accept a whole album's match in one
+  action, expand to see/override individual tracks. Matches how people think and
+  scales; the common case (a clean album match) is one click.
+- **Choosing a match:** an uncertain album shows the top 2–3 **candidate
+  releases** (cover art, year, track count, source) to pick from; if none fit, a
+  **manual search** looks the release up directly in the provider. Covers
+  near-miss and total-miss.
+- **Tag writing is non-destructive:** Perfect writes only the fields it manages
+  (artist, album, album artist, title, track/disc, year, genre, identifiers,
+  cover art) and **preserves all other existing tags** (ratings, ReplayGain,
+  lyrics, comments, custom). Optionally it can **add extra metadata** the
+  providers return (label, catalogue number, original release date, identifiers,
+  etc.) — a configurable enrichment option; never destroys, only adds.
+- Per-track DRM legitimate-route detection (via the Apple Music API) is added
+  here, upgrading the Phase 1 manifest.
+
+## 9c. Phase 3 detail (classical)
+
+- **Classical detection:** auto-detect classical releases from the match data
+  (MusicBrainz marks classical works/composers) and switch to the classical tag
+  model — but **confirm in the review**, because the classical/non-classical line
+  is fuzzy (film scores, crossover, jazz). Misdetection never silently applies
+  the wrong model.
+- Classical tag model: COMPOSER / WORK / MOVEMENT / ENSEMBLE / SOLOIST /
+  CONDUCTOR, with a classical-aware review row (composer + work prominent rather
+  than "artist").
+
 ### Phase 1 screen & flow
 
 Entered from **Source** (library chosen). On entry it runs a **diagnosis pass**
