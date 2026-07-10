@@ -966,20 +966,24 @@ struct ConflictPanel: View {
 @MainActor
 final class ArtworkCache: ObservableObject {
     static let shared = ArtworkCache()
-    private var images: [String: NSImage] = [:]
+    // NSCache auto-evicts (by count and under memory pressure) so browsing a big
+    // library can't grow images without bound. Plain dictionaries never freed.
+    private let images: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>(); c.countLimit = 400; return c
+    }()
     private var misses: Set<String> = []
     private var inflight: Set<String> = []
 
-    func cached(_ key: String) -> NSImage? { images[key] }
+    func cached(_ key: String) -> NSImage? { images.object(forKey: key as NSString) }
 
     func request(key: String, sampleURL: URL?) {
-        guard images[key] == nil, !misses.contains(key), !inflight.contains(key),
-              let url = sampleURL else { return }
+        guard images.object(forKey: key as NSString) == nil, !misses.contains(key),
+              !inflight.contains(key), let url = sampleURL else { return }
         inflight.insert(key)
         Task {
             let img = await Self.load(url: url)
             self.inflight.remove(key)
-            if let img { self.images[key] = img } else { self.misses.insert(key) }
+            if let img { self.images.setObject(img, forKey: key as NSString) } else { self.misses.insert(key) }
             self.objectWillChange.send()
         }
     }

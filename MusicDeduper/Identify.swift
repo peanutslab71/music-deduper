@@ -81,8 +81,11 @@ struct Identifier {
                   curArtist: String, curTitle: String, curAlbum: String) async throws -> TrackProposal? {
         guard !apiKey.isEmpty else { throw IdentifyError.noKey }
 
+        // Decode + fingerprint inside an autorelease pool so the (tens-of-MB) PCM
+        // buffers are freed the instant we're done with this file, instead of
+        // accumulating across the whole library and ballooning memory.
         let fp: AudioFingerprint
-        do { fp = try AudioFingerprint(from: url) }
+        do { fp = try autoreleasepool { try AudioFingerprint(from: url) } }
         catch { throw IdentifyError.fingerprint(error) }
 
         let (score, rec) = try await lookup(fingerprint: fp.base64, duration: Int(fp.duration.rounded()))
