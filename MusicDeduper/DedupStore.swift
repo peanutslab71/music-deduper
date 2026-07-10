@@ -831,6 +831,7 @@ final class DedupStore: ObservableObject {
         Task.detached(priority: .userInitiated) {
             await self.opLogLine("ℹ instant move within \(dst.label)")
             var ok = 0, fail = 0
+            var needCopy: [(name: String, isDir: Bool)] = []   // items on a different device
             for (n, item) in items.enumerated() {
                 if box.cancelled { break }
                 do {
@@ -838,10 +839,25 @@ final class DedupStore: ObservableObject {
                     ok += 1
                     await self.opStep(done: n + 1, ok: ok, skip: 0, fail: fail, line: "✓ moved \(item.name)")
                 } catch {
-                    fail += 1
-                    await self.opStep(done: n + 1, ok: ok, skip: 0, fail: fail,
-                                      line: "✗ \(item.name) — \(error.localizedDescription)")
+                    if Self.isCrossDevice(error) {
+                        // source and destination are on different physical devices
+                        // on the server (e.g. ROCK's InternalStorage vs the root) —
+                        // a rename can't cross that, so fall back to copy-then-delete
+                        await self.opLogLine("… \(item.name): different device on the server — copying instead of renaming")
+                        needCopy.append(item)
+                    } else {
+                        fail += 1
+                        await self.opStep(done: n + 1, ok: ok, skip: 0, fail: fail,
+                                          line: "✗ \(item.name) — \(error.localizedDescription)")
+                    }
                 }
+            }
+            if !needCopy.isEmpty && !box.cancelled {
+                // hand the cross-device items to the full copy+delete engine
+                await MainActor.run {
+                    self.runTransfer(needCopy, from: src, to: dst, move: true, onFinish: onFinish)
+                }
+                return
             }
             let summary = box.cancelled
                 ? "■ Cancelled — \(ok) moved."
@@ -849,6 +865,12 @@ final class DedupStore: ObservableObject {
             await self.opFinishLine(summary)
             await MainActor.run { onFinish() }
         }
+    }
+
+    nonisolated private static func isCrossDevice(_ e: Error) -> Bool {
+        let ns = e as NSError
+        if ns.domain == NSPOSIXErrorDomain && ns.code == Int(EXDEV) { return true }
+        return ns.localizedDescription.lowercased().contains("cross-device")
     }
 
     private static func instantMoveOne(_ item: (name: String, isDir: Bool),
