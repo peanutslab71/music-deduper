@@ -168,17 +168,6 @@ struct PerfectView: View {
         .padding(24)
     }
 
-    private var diagnosing: some View {
-        VStack(spacing: 12) {
-            Spacer()
-            ProgressView()
-            Text(store.progress.isEmpty ? "Exploring…" : store.progress)
-                .foregroundStyle(.secondary)
-            Button("Cancel") { store.cancel() }
-            Spacer()
-        }
-    }
-
     // MARK: - The three fixed zones
 
     // ── TOP: step bar + current action ──
@@ -500,66 +489,6 @@ struct PerfectView: View {
         }
     }
 
-    // Bulk category toggles — the mockup's on/off buttons. Coarse control; the
-    // detail stays in each section below.
-    @ViewBuilder private var categoryBar: some View {
-        let namesN = store.proposals.filter { $0.hasChange }.count
-        let artN = store.proposals.filter { $0.canAddArt }.count
-        let credN = store.proposals.filter { !($0.enrichment?.isEmpty ?? true) }.count
-        let mergeN = store.artists.filter { store.artistHasApplicableWork($0) }.count
-        let renameN = store.renames.count
-        let junkN = store.findings.filter { $0.kind == .junk }.count
-        let emptyN = store.findings.filter { $0.kind == .emptyFolder }.count
-        if namesN + artN + credN + mergeN + renameN + junkN + emptyN > 0 {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 9) {
-                    if namesN > 0 { categoryPill("Identify names", namesN, .blue, on: store.applyNames) { store.applyNames.toggle() } }
-                    if artN > 0 { categoryPill("Add artwork", artN, .pink, on: store.applyArtwork) { store.applyArtwork.toggle() } }
-                    if credN > 0 { categoryPill("Fill credits", credN, Color(red: 0.13, green: 0.6, blue: 0.3), on: store.applyCredits) { store.applyCredits.toggle() } }
-                    if mergeN > 0 {
-                        let on = store.artists.allSatisfy { $0.accepted }
-                        categoryPill("Merge artists", mergeN, .purple, on: on) {
-                            for i in store.artists.indices { store.artists[i].accepted = !on }
-                        }
-                    }
-                    if renameN > 0 {
-                        let on = store.renames.allSatisfy { $0.accepted }
-                        categoryPill("Tidy folders", renameN, .orange, on: on) {
-                            for i in store.renames.indices { store.renames[i].accepted = !on }
-                        }
-                    }
-                    if junkN > 0 { findingsPill("Remove junk", junkN, .gray, kind: .junk) }
-                    if emptyN > 0 { findingsPill("Empty folders", emptyN, .gray, kind: .emptyFolder) }
-                }
-                .padding(.horizontal, 2).padding(.bottom, 2)
-            }
-        }
-    }
-
-    private func findingsPill(_ label: String, _ count: Int, _ color: Color, kind: FixKind) -> some View {
-        let on = store.findings.filter { $0.kind == kind }.allSatisfy { $0.accepted }
-        return categoryPill(label, count, color, on: on) {
-            for i in store.findings.indices where store.findings[i].kind == kind { store.findings[i].accepted = !on }
-        }
-    }
-
-    private func categoryPill(_ label: String, _ count: Int, _ color: Color, on: Bool, toggle: @escaping () -> Void) -> some View {
-        Button(action: toggle) {
-            HStack(spacing: 7) {
-                Image(systemName: on ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 13)).foregroundStyle(on ? color : Color.secondary)
-                Circle().fill(color).frame(width: 7, height: 7)
-                Text(label).font(.system(size: 12, weight: .medium))
-                Text("\(count)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 11).padding(.vertical, 7)
-            .background(RoundedRectangle(cornerRadius: 9).fill(Color.secondary.opacity(0.08)))
-            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.secondary.opacity(0.15)))
-            .opacity(on ? 1 : 0.55)
-        }
-        .buttonStyle(.plain)
-    }
-
     // The single album interface — a grid of cover cards; click one to see its
     // tracks below. Replaces the old carousel + identify tree (no more duplication).
     @ViewBuilder private var albumGrid: some View {
@@ -709,67 +638,6 @@ struct PerfectView: View {
         }
         .padding(.vertical, 1)
         .opacity(applicable ? 1 : 0.6)
-    }
-
-    // Identify controls — the staged flow: Identify (fingerprint) → Fill credits
-    // (MusicBrainz/Discogs). Fill credits only lights up once Identify has run.
-    @ViewBuilder private var identifyControls: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "waveform.and.magnifyingglass").foregroundStyle(.teal)
-                Text("Identify tracks").fontWeight(.semibold)
-                if store.identifying {
-                    Text("listening…").font(.caption).foregroundStyle(.secondary)
-                } else if store.enriching {
-                    Text("looking up credits…").font(.caption).foregroundStyle(.secondary)
-                } else if !store.proposals.isEmpty {
-                    Text("\(store.proposals.count) with suggested names").font(.caption).foregroundStyle(.secondary)
-                } else {
-                    Text("match the audio, correct the names").font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                if store.identifying {
-                    HStack(spacing: 6) { ProgressView().controlSize(.small); Text(store.identifyProgress).font(.caption).foregroundStyle(.secondary) }
-                    Button("Cancel") { store.cancel() }.controlSize(.small)
-                } else if !store.hasAcoustIDKey {
-                    Text("needs an AcoustID key").font(.caption2).foregroundStyle(.orange)
-                } else if store.enriching {
-                    HStack(spacing: 6) { ProgressView().controlSize(.small); Text(store.enrichProgress).font(.caption).foregroundStyle(.secondary) }
-                    Button("Cancel") { store.cancel() }.controlSize(.small)
-                } else {
-                    Button(store.proposals.isEmpty ? "Identify" : "Re-identify") { store.identify() }
-                        .controlSize(.small)
-                    if !store.proposals.isEmpty {
-                        Button("Fill credits") { store.enrich() }.controlSize(.small)
-                            .help("Step 2 — look up composer, label and performers (MusicBrainz + Discogs)")
-                    }
-                }
-            }
-            .padding(.vertical, 6).padding(.horizontal, 10)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.teal.opacity(0.07)))
-
-            if store.identifying { workingFeed }
-        }
-    }
-
-    // Live feed while identify runs — watch it match tracks by sound.
-    @ViewBuilder private var workingFeed: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 7) {
-                Text("\(store.identifyMatched)")
-                    .font(.system(size: 24, weight: .bold, design: .rounded))
-                    .foregroundStyle(.teal).contentTransition(.numericText())
-                Text("matched by sound").font(.caption).foregroundStyle(.secondary)
-            }
-            ForEach(store.recentFinds, id: \.self) { f in
-                Text(f).font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(f.hasPrefix("✎") ? .primary : .secondary)
-                    .lineLimit(1).truncationMode(.middle)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 10).padding(.horizontal, 8)
-        .animation(.easeOut(duration: 0.25), value: store.recentFinds)
     }
 
     private func fmtTime(_ s: Double) -> String {
@@ -1058,36 +926,6 @@ struct PerfectView: View {
             .padding(16)
         }
         .frame(width: 480, height: 400)
-    }
-
-    private var footer: some View {
-        let acc = store.artists.filter { $0.accepted }
-        let mergeCount = acc.reduce(0) { $0 + $1.folderMerges }
-        let tagCount = store.tagWritingEnabled ? acc.reduce(0) { $0 + $1.tagRewrites } : 0
-        let idCount = store.tagWritingEnabled ? store.proposals.filter { $0.accepted && $0.hasChange }.count : 0
-        var bits = ["\(store.acceptedCount) cleanup(s)"]
-        if mergeCount > 0 { bits.append("\(mergeCount) folder merge(s)") }
-        if tagCount > 0 { bits.append("\(tagCount) tag fix(es)") }
-        if idCount > 0 { bits.append("\(idCount) identified") }
-        let summary = bits.joined(separator: ", ") + " selected"
-        return HStack {
-            if store.hasWork {
-                Text(summary)
-                    .font(.caption).foregroundStyle(.secondary)
-            } else {
-                Text("Protected tracks are listed for information and are never removed.")
-                    .font(.caption).foregroundStyle(.tertiary)
-            }
-            Spacer()
-            Button {
-                showApplyConfirm = true
-            } label: {
-                Label("Apply changes", systemImage: "checkmark.circle")
-            }
-            .buttonStyle(.borderedProminent).tint(.purple)
-            .disabled(!store.hasWork || store.busy)
-        }
-        .padding(.horizontal, 12).padding(.vertical, 8)
     }
 
     private func committedBanner(_ summary: String) -> some View {
