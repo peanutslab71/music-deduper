@@ -14,6 +14,7 @@ struct PerfectView: View {
     @State private var showSettings = false
     @State private var queueIndex = 0                // position in the step-through review queue
     @State private var showApplyConfirm = false      // the final "confirm before commit" dialog
+    @State private var selectedAlbum: String? = nil  // album card whose tracks are shown
 
     var body: some View {
         VStack(spacing: 0) {
@@ -137,10 +138,13 @@ struct PerfectView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    if store.groups.isEmpty && store.artists.isEmpty && store.renames.isEmpty && !store.checkingTags {
+                    if store.groups.isEmpty && store.artists.isEmpty && store.renames.isEmpty
+                        && store.proposals.isEmpty && !store.checkingTags && !store.identifying {
                         allClean
                     }
-                    albumCarousel
+                    identifyControls
+                    albumGrid
+                    if let sel = selectedAlbum { albumDetail(sel) }
                     categoryBar
                     reviewQueueSection
                     artistsSection
@@ -148,7 +152,6 @@ struct PerfectView: View {
                     ForEach(store.groups, id: \.kind.rawValue) { group in
                         section(group.kind, group.items)
                     }
-                    identifySection
                 }
                 .padding(16)
             }
@@ -288,51 +291,81 @@ struct PerfectView: View {
         .buttonStyle(.plain)
     }
 
-    // Album cover carousel — the media-first overview of what's being tidied.
-    @ViewBuilder private var albumCarousel: some View {
+    // The single album interface — a grid of cover cards; click one to see its
+    // tracks below. Replaces the old carousel + identify tree (no more duplication).
+    @ViewBuilder private var albumGrid: some View {
         let albums = store.albumChanges
         if !albums.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
-                    Image(systemName: "square.stack").foregroundStyle(.purple)
+                    Image(systemName: "square.grid.2x2").foregroundStyle(.purple)
                     Text("\(albums.count) album(s)").fontWeight(.semibold)
-                    Text("identified from the audio").font(.caption).foregroundStyle(.secondary)
+                    Text("identified from the audio · click to see tracks").font(.caption).foregroundStyle(.secondary)
                 }
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(alignment: .top, spacing: 16) {
-                        ForEach(albums) { a in albumCard(a) }
-                    }
-                    .padding(.horizontal, 2).padding(.bottom, 6)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 176, maximum: 210), spacing: 18)],
+                          alignment: .leading, spacing: 18) {
+                    ForEach(albums) { a in albumCard(a) }
                 }
             }
         }
     }
 
     private func albumCard(_ a: PerfectStore.AlbumChange) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            ZStack(alignment: .bottomLeading) {
-                ArtworkView(key: a.id, sampleURL: a.sampleURL, size: 150, corner: 10)
-                HStack(spacing: 4) {
-                    if a.names { cardTag("Names", .blue) }
-                    if a.artwork { cardTag("+ Art", .pink) }
-                    if a.credits { cardTag("+ Credits", Color(red: 0.13, green: 0.6, blue: 0.3)) }
+        let isSel = selectedAlbum == a.id
+        return Button {
+            selectedAlbum = isSel ? nil : a.id
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                ZStack(alignment: .bottomLeading) {
+                    ArtworkView(key: a.id, sampleURL: a.sampleURL, size: 176, corner: 12)
+                    HStack(spacing: 5) {
+                        if a.names { cardTag("Names", .blue) }
+                        if a.artwork { cardTag("+ Art", .pink) }
+                        if a.credits { cardTag("+ Credits", Color(red: 0.13, green: 0.6, blue: 0.3)) }
+                    }
+                    .padding(8)
                 }
-                .padding(7)
+                .overlay(RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(isSel ? Color.purple : .clear, lineWidth: 3))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(a.title).font(.subheadline).fontWeight(.medium).lineLimit(1)
+                    Text("\(a.subtitle) · \(a.trackCount) track(s)").font(.caption)
+                        .foregroundStyle(.secondary).lineLimit(1)
+                }
             }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(a.title).font(.caption).fontWeight(.medium).lineLimit(1)
-                Text("\(a.subtitle) · \(a.trackCount) track(s)").font(.caption2)
-                    .foregroundStyle(.secondary).lineLimit(1)
-            }
+            .frame(width: 176)
         }
-        .frame(width: 150)
+        .buttonStyle(.plain)
     }
 
     private func cardTag(_ text: String, _ color: Color) -> some View {
-        Text(text).font(.system(size: 9, weight: .semibold)).foregroundStyle(.white)
-            .padding(.horizontal, 6).padding(.vertical, 3)
+        Text(text).font(.system(size: 10, weight: .semibold)).foregroundStyle(.white)
+            .padding(.horizontal, 7).padding(.vertical, 3)
             .background(Capsule().fill(color))
-            .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
+            .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
+    }
+
+    // The selected album's tracks — the per-track detail that used to be its own tree.
+    @ViewBuilder private func albumDetail(_ id: String) -> some View {
+        let props = store.proposals.filter { $0.url.deletingLastPathComponent().path == id }
+        if !props.isEmpty, let a = store.albumChanges.first(where: { $0.id == id }) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "music.note.list").foregroundStyle(.purple)
+                    Text(a.title).fontWeight(.semibold)
+                    Text("\(props.count) track(s)").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button { selectedAlbum = nil } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                        .buttonStyle(.plain)
+                }
+                .padding(.vertical, 6).padding(.horizontal, 10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.purple.opacity(0.06)))
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(props) { p in proposalRow(p) }
+                }
+                .padding(.leading, 6)
+            }
+        }
     }
 
     // One artist-centric list — a folder split, a tag split, or both. One "keep"
@@ -435,23 +468,17 @@ struct PerfectView: View {
         .opacity(applicable ? 1 : 0.6)
     }
 
-    // Identify — fingerprint tracks and propose the correct names. Its own pass
-    // (slow + online), so it's triggered explicitly, not part of Explore.
-    @ViewBuilder private var identifySection: some View {
-        let isOpen = expanded.contains("identify")
+    // Identify controls — the staged flow: Identify (fingerprint) → Fill credits
+    // (MusicBrainz/Discogs). Fill credits only lights up once Identify has run.
+    @ViewBuilder private var identifyControls: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                if !store.proposals.isEmpty {
-                    Button {
-                        if isOpen { expanded.remove("identify") } else { expanded.insert("identify") }
-                    } label: {
-                        Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption).foregroundStyle(.secondary)
-                    }.buttonStyle(.plain)
-                }
                 Image(systemName: "waveform.and.magnifyingglass").foregroundStyle(.teal)
                 Text("Identify tracks").fontWeight(.semibold)
                 if store.identifying {
                     Text("listening…").font(.caption).foregroundStyle(.secondary)
+                } else if store.enriching {
+                    Text("looking up credits…").font(.caption).foregroundStyle(.secondary)
                 } else if !store.proposals.isEmpty {
                     Text("\(store.proposals.count) with suggested names").font(.caption).foregroundStyle(.secondary)
                 } else {
@@ -467,33 +494,18 @@ struct PerfectView: View {
                     HStack(spacing: 6) { ProgressView().controlSize(.small); Text(store.enrichProgress).font(.caption).foregroundStyle(.secondary) }
                     Button("Cancel") { store.cancel() }.controlSize(.small)
                 } else {
+                    Button(store.proposals.isEmpty ? "Identify" : "Re-identify") { store.identify() }
+                        .controlSize(.small)
                     if !store.proposals.isEmpty {
-                        let allOn = store.proposals.allSatisfy { $0.accepted }
-                        Button(allOn ? "Deselect all" : "Select all") {
-                            for i in store.proposals.indices { store.proposals[i].accepted = !allOn }
-                        }.controlSize(.small)
                         Button("Fill credits") { store.enrich() }.controlSize(.small)
-                            .help("Look up composer, label and performers on MusicBrainz (slower)")
+                            .help("Step 2 — look up composer, label and performers (MusicBrainz + Discogs)")
                     }
-                    Button(store.proposals.isEmpty ? "Identify" : "Re-identify") {
-                        expanded.insert("identify"); store.identify()
-                    }.controlSize(.small)
                 }
             }
             .padding(.vertical, 6).padding(.horizontal, 10)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.teal.opacity(0.07)))
 
             if store.identifying { workingFeed }
-
-            if !store.proposals.isEmpty && isOpen {
-                Text("Each track was identified from its audio. Artist and title are reliable; album is only a suggestion — it defaults to your existing album, with alternatives to pick from. Applied changes are reversible.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 8).padding(.horizontal, 6)
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(store.proposals) { p in proposalRow(p) }
-                }
-                .padding(.top, 6).padding(.leading, 6)
-            }
         }
     }
 
