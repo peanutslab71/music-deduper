@@ -128,6 +128,7 @@ struct PerfectView: View {
                         ForEach(store.groups, id: \.kind.rawValue) { group in
                             section(group.kind, group.items)
                         }
+                        tagPreview
                     }
                     .padding(16)
                 }
@@ -191,6 +192,41 @@ struct PerfectView: View {
             Spacer()
         }
         .padding(.vertical, 1)
+    }
+
+    // Tag-level artist splits (Phase 2 preview) — read-only for now
+    @ViewBuilder private var tagPreview: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "tag").foregroundStyle(.brown)
+                Text("Artist names in tags").fontWeight(.semibold)
+                Text("what your server actually reads").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if store.checkingTags {
+                    HStack(spacing: 6) { ProgressView().controlSize(.small); Text(store.tagProgress).font(.caption).foregroundStyle(.secondary) }
+                    Button("Cancel") { store.cancel() }.controlSize(.small)
+                } else {
+                    Button("Check artist tags") { store.checkTags() }.controlSize(.small)
+                }
+            }
+            .padding(.vertical, 6).padding(.horizontal, 10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.brown.opacity(0.07)))
+
+            if !store.tagGroups.isEmpty {
+                Text("These artists are tagged under more than one spelling — a server reads each as a different artist. Fixing these (rewriting the tags to one spelling) arrives with the identify-and-tag step.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(store.tagGroups) { g in
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle").font(.caption2).foregroundStyle(.orange)
+                            Text(g.variants.map { "\($0.name) (\($0.count))" }.joined(separator: "   vs   "))
+                                .font(.system(size: 11, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                        }
+                    }
+                }
+                .padding(.leading, 6)
+            }
+        }
     }
 
     // Untidy folder names — editable proposed name

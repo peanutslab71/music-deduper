@@ -71,6 +71,15 @@ struct MergeProposal: Identifiable {
     var accepted: Bool
 }
 
+/// One artist that appears in the embedded tags under several spellings
+/// (e.g. "Buzzcocks" and "The Buzzcocks") — a tag-level split that servers
+/// like Roon read as two different artists.
+struct TagArtistGroup: Identifiable {
+    let id = UUID()
+    let key: String
+    let variants: [(name: String, count: Int)]   // spelling → track count
+}
+
 /// A proposed rename of a folder with an obviously untidy name (trailing
 /// underscore from a stripped illegal character, stray/double spaces, etc.).
 /// The true name including any real illegal character comes later, from the
@@ -121,6 +130,11 @@ final class PerfectStore: ObservableObject {
 
     // persistent run history (each run's quarantine folder holds a run.json)
     @Published var runs: [RunRecord] = []
+
+    // tag-level artist inconsistencies (Phase 2 preview — read-only for now)
+    @Published var tagGroups: [TagArtistGroup] = []
+    @Published var checkingTags = false
+    @Published var tagProgress = ""
 
     private let cancelFlag = CancelBox()
 
@@ -326,6 +340,58 @@ final class PerfectStore: ObservableObject {
     }
 
     func cancel() { cancelFlag.cancelled = true }
+
+    // MARK: Tag check (Phase 2 preview) — read artist tags, find split spellings
+
+    func checkTags() {
+        guard let root, !checkingTags else { return }
+        checkingTags = true; tagGroups = []; tagProgress = "Reading tags…"
+        let box = cancelFlag
+        Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            var counts: [String: Int] = [:]   // exact artist string → track count
+            var seen = 0
+            if let en = fm.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                for case let u as URL in en {
+                    if box.cancelled { break }
+                    guard Self.isAudio(u) else { continue }
+                    seen += 1
+                    if let artist = Self.readArtist(u), !artist.isEmpty {
+                        counts[artist, default: 0] += 1
+                    }
+                    if seen % 25 == 0 { await self.setTagProgress("Read \(seen) tracks…") }
+                }
+            }
+            // group exact spellings by normalised key; keep only real splits
+            var byKey: [String: [(String, Int)]] = [:]
+            for (name, c) in counts { byKey[Self.artistKey(name), default: []].append((name, c)) }
+            let groups = byKey.compactMap { (k, v) -> TagArtistGroup? in
+                v.count > 1 ? TagArtistGroup(key: k, variants: v.sorted { $0.1 > $1.1 }) : nil
+            }.sorted { $0.variants[0].name.lowercased() < $1.variants[0].name.lowercased() }
+            await self.finishTagCheck(groups: groups, tracks: seen, cancelled: box.cancelled)
+        }
+    }
+
+    private func setTagProgress(_ s: String) { tagProgress = s }
+
+    private func finishTagCheck(groups: [TagArtistGroup], tracks: Int, cancelled: Bool) {
+        checkingTags = false; tagProgress = ""
+        tagGroups = groups
+        if !cancelled {
+            status = groups.isEmpty
+                ? "Read \(tracks) tags — no split artist spellings found."
+                : "Read \(tracks) tags — \(groups.count) artist(s) split across different spellings."
+        }
+    }
+
+    /// Read the artist tag from a file's embedded metadata (read-only).
+    nonisolated static func readArtist(_ url: URL) -> String? {
+        let asset = AVURLAsset(url: url)
+        for item in asset.commonMetadata where item.commonKey == .commonKeyArtist {
+            if let s = item.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty { return s }
+        }
+        return nil
+    }
 
     // MARK: Commit — apply accepted removals + merges as a log of reversible moves
 
