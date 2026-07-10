@@ -342,12 +342,35 @@ struct PerfectView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if let summary = store.lastRunSummary { committedBanner(summary) }
-                if store.proposals.isEmpty && store.artists.isEmpty && store.renames.isEmpty
-                    && store.groups.isEmpty && !store.checkingTags { allClean }
-                reviewQueueSection      // pinned at the top of the content
+                if visibleAlbums.isEmpty && store.proposals.isEmpty && !store.checkingTags && !store.identifying {
+                    emptyStageNote
+                }
+                if step == 4 { reviewQueueSection }   // the decision queue only on Review
                 albumGrid
             }
             .padding(16)
+        }
+    }
+
+    // Albums shown depend on which step you're viewing, so stepping back to
+    // Identify or Credits shows what THAT step did, not the whole thing.
+    private var visibleAlbums: [PerfectStore.AlbumChange] {
+        let all = store.albumChanges
+        switch step {
+        case 2: return all.filter { $0.names }                       // name/album fixes
+        case 3: return all.filter { $0.credits || $0.artwork }       // credits & art added
+        default: return all
+        }
+    }
+
+    private var emptyStageNote: some View {
+        Text(emptyStageMsg).foregroundStyle(.secondary).padding(.top, 8)
+    }
+    private var emptyStageMsg: String {
+        switch step {
+        case 2: return "No name or album corrections — your tags already matched the audio."
+        case 3: return "No credits or artwork to add — run Fill credits, or these tracks are already complete."
+        default: return "Nothing to change — this library is already tidy."
         }
     }
 
@@ -485,19 +508,26 @@ struct PerfectView: View {
     // The single album interface — a grid of cover cards; click one to see its
     // tracks below. Replaces the old carousel + identify tree (no more duplication).
     @ViewBuilder private var albumGrid: some View {
-        let albums = store.albumChanges
+        let albums = visibleAlbums
         if !albums.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "square.grid.2x2").foregroundStyle(.purple)
                     Text("\(albums.count) album(s)").fontWeight(.semibold)
-                    Text("identified from the audio · click to see tracks").font(.caption).foregroundStyle(.secondary)
+                    Text(albumGridSubtitle).font(.caption).foregroundStyle(.secondary)
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 176, maximum: 210), spacing: 18)],
                           alignment: .leading, spacing: 18) {
                     ForEach(albums) { a in albumCard(a) }
                 }
             }
+        }
+    }
+    private var albumGridSubtitle: String {
+        switch step {
+        case 2: return "names & albums corrected from the audio · click to see tracks"
+        case 3: return "credits & artwork added · click to see tracks"
+        default: return "everything to change · click an album to see and hear its tracks"
         }
     }
 
