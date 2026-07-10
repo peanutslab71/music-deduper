@@ -299,7 +299,7 @@ struct PerfectView: View {
                     Text("identified from the audio").font(.caption).foregroundStyle(.secondary)
                 }
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(alignment: .top, spacing: 16) {
+                    LazyHStack(alignment: .top, spacing: 16) {
                         ForEach(albums) { a in albumCard(a) }
                     }
                     .padding(.horizontal, 2).padding(.bottom, 6)
@@ -489,7 +489,7 @@ struct PerfectView: View {
                 Text("Each track was identified from its audio. Artist and title are reliable; album is only a suggestion — it defaults to your existing album, with alternatives to pick from. Applied changes are reversible.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 8).padding(.horizontal, 6)
-                VStack(alignment: .leading, spacing: 8) {
+                LazyVStack(alignment: .leading, spacing: 8) {
                     ForEach(store.proposals) { p in proposalRow(p) }
                 }
                 .padding(.top, 6).padding(.leading, 6)
