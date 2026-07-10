@@ -42,6 +42,8 @@ struct ContentView: View {
             }
         case .browse:
             ServerFilesView(store: store)
+        case .perfect:
+            PerfectView()
         }
     }
 

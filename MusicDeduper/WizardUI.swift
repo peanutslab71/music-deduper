@@ -13,7 +13,7 @@ import UniformTypeIdentifiers
 // MARK: - Wizard steps
 
 enum WizardStep: Int, CaseIterable, Identifiable {
-    case source, review, cleanup, copy, browse
+    case source, review, cleanup, copy, browse, perfect
     var id: Int { rawValue }
     var title: String {
         switch self {
@@ -22,6 +22,7 @@ enum WizardStep: Int, CaseIterable, Identifiable {
         case .cleanup: return "Clean up"
         case .copy:    return "Copy"
         case .browse:  return "Browse"
+        case .perfect: return "Perfect"
         }
     }
     var icon: String {
@@ -31,6 +32,7 @@ enum WizardStep: Int, CaseIterable, Identifiable {
         case .cleanup: return "trash"
         case .copy:    return "externaldrive.badge.icloud"
         case .browse:  return "externaldrive.connected.to.line.below"
+        case .perfect: return "wand.and.stars"
         }
     }
 }
@@ -41,7 +43,8 @@ struct StepBar: View {
     let hasScan: Bool
 
     private func reachable(_ s: WizardStep) -> Bool {
-        s == .source || s == .browse || hasScan   // Browse is a tool, not a step — always open
+        // Browse and Perfect are tools, not wizard steps — always open
+        s == .source || s == .browse || s == .perfect || hasScan
     }
 
     var body: some View {
@@ -67,12 +70,17 @@ struct StepBar: View {
                 .buttonStyle(.plain)
                 .disabled(!reachable(s))
                 if s == .copy {
-                    // Browse (File Commander) is a separate tool — pipe, not chevron
+                    // separate the wizard from the tools (Browse, Perfect) with a pipe
                     Text("|")
                         .font(.system(size: 13))
                         .foregroundStyle(.quaternary)
                         .padding(.horizontal, 8)
-                } else if s != .browse {
+                } else if s == .browse {
+                    Text("·")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.quaternary)
+                        .padding(.horizontal, 4)
+                } else if s != .perfect {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.quaternary)
