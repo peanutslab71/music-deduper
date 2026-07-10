@@ -64,6 +64,19 @@ struct TrackProposal: Identifiable {
     /// artwork will be offered when the file has none and we found a release to fetch from
     var canAddArt: Bool { !curHasArt && (enrichment?.releaseMBID != nil) }
 
+    /// Needs a deliberate look: a low-confidence match, or a genuine artist
+    /// re-attribution (a different artist — not just a spelling/case fix, which
+    /// is safe). These go to the step-through review queue, not the bulk list.
+    var needsReview: Bool {
+        if score < 0.9 { return true }
+        guard artistChanged else { return false }
+        func norm(_ s: String) -> String {
+            s.lowercased().replacingOccurrences(of: " & ", with: " and ")
+                .components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
+        }
+        return norm(curArtist) != norm(newArtist)
+    }
+
     var artistChanged: Bool { !newArtist.isEmpty && newArtist != curArtist }
     var titleChanged: Bool  { !newTitle.isEmpty && newTitle != curTitle }
     var albumChanged: Bool  { !chosenAlbum.isEmpty && chosenAlbum != curAlbum }

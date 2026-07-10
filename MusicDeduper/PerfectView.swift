@@ -12,6 +12,7 @@ struct PerfectView: View {
     @ObservedObject var store: PerfectStore
     @State private var expanded: Set<String> = []   // all sections collapsed initially — reads as a summary
     @State private var showSettings = false
+    @State private var queueIndex = 0                // position in the step-through review queue
 
     var body: some View {
         VStack(spacing: 0) {
@@ -139,6 +140,7 @@ struct PerfectView: View {
                     }
                     albumCarousel
                     categoryBar
+                    reviewQueueSection
                     artistsSection
                     if !store.renames.isEmpty { renamesSection }
                     ForEach(store.groups, id: \.kind.rawValue) { group in
@@ -151,6 +153,76 @@ struct PerfectView: View {
             history
             Divider()
             footer
+        }
+    }
+
+    // Step-through review queue — the handful that need a decision (genuine artist
+    // changes, low-confidence matches), one at a time with left/right nav.
+    @ViewBuilder private var reviewQueueSection: some View {
+        let queue = store.proposals.filter { $0.needsReview }
+        if !queue.isEmpty {
+            let idx = max(0, min(queueIndex, queue.count - 1))
+            let p = queue[idx]
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
+                    Image(systemName: "person.crop.circle.badge.questionmark").foregroundStyle(.orange)
+                    Text("Review queue").fontWeight(.semibold)
+                    Text("the ones that need you").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(idx + 1) of \(queue.count)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 6).padding(.horizontal, 10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.08)))
+
+                HStack(alignment: .top, spacing: 14) {
+                    Button { queueIndex = (idx - 1 + queue.count) % queue.count } label: {
+                        Image(systemName: "chevron.left").frame(width: 28, height: 28)
+                    }.buttonStyle(.bordered).disabled(queue.count < 2)
+
+                    ArtworkView(key: p.url.deletingLastPathComponent().path, sampleURL: p.url, size: 96, corner: 8)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Text(p.newTitle.isEmpty ? p.curTitle : p.newTitle).font(.headline)
+                            Text(String(format: "%.0f%% by sound", p.score * 100))
+                                .font(.caption2).foregroundStyle(p.score >= 0.9 ? .green : .orange)
+                        }
+                        if p.artistChanged {
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("YOUR TAG").font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
+                                    Text(p.curArtist).font(.callout).foregroundStyle(.secondary)
+                                }
+                                Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.tertiary)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("PROPOSED").font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
+                                    Text(p.newArtist).font(.callout).fontWeight(.medium)
+                                }
+                            }
+                            Text("A genuine artist change — check it's the same act, not a different one, before accepting.")
+                                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            Text("Low-confidence match (\(String(format: "%.0f%%", p.score * 100))) — worth a glance before applying.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        HStack(spacing: 10) {
+                            Toggle("Apply this", isOn: Binding(
+                                get: { p.accepted },
+                                set: { v in if let i = store.proposals.firstIndex(where: { $0.id == p.id }) { store.proposals[i].accepted = v } }
+                            )).toggleStyle(.checkbox)
+                            Spacer()
+                            Button("Skip") { queueIndex = (idx + 1) % queue.count }.controlSize(.small)
+                            Button("Keep & next →") { queueIndex = (idx + 1) % queue.count }
+                                .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+                        }
+                    }
+
+                    Button { queueIndex = (idx + 1) % queue.count } label: {
+                        Image(systemName: "chevron.right").frame(width: 28, height: 28)
+                    }.buttonStyle(.bordered).disabled(queue.count < 2)
+                }
+                .padding(.top, 10).padding(.horizontal, 4)
+            }
         }
     }
 
