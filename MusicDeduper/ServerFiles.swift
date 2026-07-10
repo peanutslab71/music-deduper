@@ -475,19 +475,19 @@ struct PaneView: View {
                 TableColumn("Name") { item in
                     Label(item.name, systemImage: item.isDir ? "folder.fill" : "music.note")
                         .labelStyle(.titleAndIcon)
-                        .contentShape(Rectangle())
+                        // draggable source; double-click to open is preserved by
+                        // re-issuing it as a simultaneous gesture (onDrag alone
+                        // swallows the Table's primaryAction double-click)
                         .onDrag {
-                            // drag the whole selection if this row is part of it,
-                            // otherwise just this row
                             let names = model.selection.contains(item.name)
                                 ? model.selectedItems
                                 : [(item.name, item.isDir)]
                             drag.begin(model, items: names)
                             return NSItemProvider(object: item.name as NSString)
                         }
-                        .onDrop(of: [.text], isTargeted: nil) { _ in
-                            item.isDir ? handleDrop(intoSubfolder: item.name) : false
-                        }
+                        .simultaneousGesture(TapGesture(count: 2).onEnded {
+                            if item.isDir { model.open(item.name) }
+                        })
                 }
                 .width(min: 200, ideal: 320)
                 TableColumn("Size") { item in
