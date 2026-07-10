@@ -20,10 +20,12 @@
 		DE0000000000000000000040 /* AMSMB2 in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000042 /* AMSMB2 */; };
 		DE0000000000000000000043 /* AMSMB2 in Embed Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000042 /* AMSMB2 */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		DE0000000000000000000070 /* MDTagShim in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000071 /* MDTagShim */; };
+		DE0000000000000000000090 /* ChromaSwift in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000091 /* ChromaSwift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		DE0000000000000000000006 /* MusicDeduper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MusicDeduper.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DE0000000000000000000080 /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = "<group>"; };
 		DE0000000000000000000014 /* MusicDeduperApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicDeduperApp.swift; sourceTree = "<group>"; };
 		DE0000000000000000000015 /* Engine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Engine.swift; sourceTree = "<group>"; };
 		DE0000000000000000000016 /* DedupStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DedupStore.swift; sourceTree = "<group>"; };
@@ -43,6 +45,7 @@
 			files = (
 				DE0000000000000000000040 /* AMSMB2 in Frameworks */,
 				DE0000000000000000000070 /* MDTagShim in Frameworks */,
+				DE0000000000000000000090 /* ChromaSwift in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -116,6 +119,7 @@
 			packageProductDependencies = (
 				DE0000000000000000000042 /* AMSMB2 */,
 				DE0000000000000000000071 /* MDTagShim */,
+				DE0000000000000000000091 /* ChromaSwift */,
 			);
 			productName = MusicDeduper;
 			productReference = DE0000000000000000000006 /* MusicDeduper.app */;
@@ -148,6 +152,7 @@
 			packageReferences = (
 				DE0000000000000000000072 /* XCLocalSwiftPackageReference "MDTagShim" */,
 				DE0000000000000000000041 /* XCRemoteSwiftPackageReference "AMSMB2" */,
+				DE0000000000000000000092 /* XCRemoteSwiftPackageReference "ChromaSwift" */,
 			);
 			productRefGroup = DE0000000000000000000003 /* Products */;
 			projectDirPath = "";
@@ -280,6 +285,7 @@
 		};
 		DE000000000000000000000B /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = DE0000000000000000000080 /* Secrets.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
@@ -310,6 +316,7 @@
 		};
 		DE000000000000000000000C /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = DE0000000000000000000080 /* Secrets.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
@@ -377,6 +384,14 @@
 				branch = "guest-anonymous-session";
 			};
 		};
+		DE0000000000000000000092 /* XCRemoteSwiftPackageReference "ChromaSwift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/wallisch/ChromaSwift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -389,6 +404,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = DE0000000000000000000072 /* XCLocalSwiftPackageReference "MDTagShim" */;
 			productName = MDTagShim;
+		};
+		DE0000000000000000000091 /* ChromaSwift */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DE0000000000000000000092 /* XCRemoteSwiftPackageReference "ChromaSwift" */;
+			productName = ChromaSwift;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

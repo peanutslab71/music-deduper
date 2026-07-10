@@ -26,3 +26,6 @@ Packages/
 # Distribution artifacts (don't commit built apps / disk images)
 *.app
 *.dmg
+
+# Local secrets (AcoustID key) — never commit
+Secrets.xcconfig

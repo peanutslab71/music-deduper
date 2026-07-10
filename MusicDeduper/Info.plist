@@ -11,5 +11,8 @@
 	<!-- macOS local-network privacy prompt (Sequoia+) -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Music Deduper contacts your Roon ROCK server on the local network to check whether Roon Server is running before copying music to it, and to stop/start it around the copy.</string>
+	<!-- AcoustID key for Perfect's identify feature, injected from Secrets.xcconfig -->
+	<key>ACOUSTID_API_KEY</key>
+	<string>$(ACOUSTID_API_KEY)</string>
 </dict>
 </plist>

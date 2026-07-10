@@ -39,6 +39,22 @@ this complete source repository and its build configuration are public, so
 anyone can rebuild the app against a modified version of any bundled library.
 The app's own code remains MIT.
 
+## Acoustic fingerprinting (Perfect — identify)
+
+Perfect can identify a track from the audio itself and look up the correct
+names. This uses:
+
+- **[ChromaSwift](https://github.com/wallisch/ChromaSwift)** (© Philipp
+  Wallisch, **MIT**) — a Swift wrapper that decodes audio and generates
+  Chromaprint fingerprints, compiled from source (FFT via Apple's Accelerate).
+- **[Chromaprint](https://github.com/acoustid/chromaprint)** — the AcoustID
+  fingerprint algorithm, © Lukáš Lalinský, bundled via ChromaSwift.
+- The **[AcoustID](https://acoustid.org/)** web service maps a fingerprint to a
+  MusicBrainz recording, and **[MusicBrainz](https://musicbrainz.org/)** (data
+  under CC0) provides the canonical names. Both are contacted over the network
+  only when you run identify. The AcoustID application key is supplied at build
+  time via a local `Secrets.xcconfig` (not committed).
+
 ## SMB network engine
 
 The app uses a lightly patched fork of AMSMB2, published at

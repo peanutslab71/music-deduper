@@ -1,5 +1,5 @@
 {
-  "originHash" : "29a082c5cb89a6c904572a1896c555335552cab85e19525b8b756c563f8930b9",
+  "originHash" : "ec98a9f1d155e42c4e5d71679bfb25f83b38c5e36891feb6719fe84b61fba068",
   "pins" : [
     {
       "identity" : "amsmb2",
@@ -8,6 +8,15 @@
       "state" : {
         "branch" : "guest-anonymous-session",
         "revision" : "c2126523f841661bfd1d57598c5a8c44493f6344"
+      }
+    },
+    {
+      "identity" : "chromaswift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/wallisch/ChromaSwift",
+      "state" : {
+        "revision" : "4570630752e5c9a07244df7621888363d287c1c4",
+        "version" : "1.2.0"
       }
     },
     {
