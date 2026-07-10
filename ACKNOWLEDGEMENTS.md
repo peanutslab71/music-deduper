@@ -24,16 +24,18 @@ library. The app's *own* code remains MIT.
 
 ## Tag reading and writing (Perfect)
 
-The **Perfect** feature reads and writes the artist/album/title tags stored
-inside music files. This is done with:
+The **Perfect** feature reads and writes the artist tags stored inside music
+files. This is done directly with **[TagLib](https://taglib.org/)**, the
+open-source tag reader/writer, dual-licensed under **LGPL 2.1 / MPL 1.1**:
 
-- **[SFBAudioEngine](https://github.com/sbooth/SFBAudioEngine)** — audio
-  library for macOS, © Stephen F. Booth, **MIT** licensed. It is linked as a
-  static library.
-- SFBAudioEngine bundles **[TagLib](https://taglib.org/)** (the actual tag
-  reader/writer), which is dual-licensed under **LGPL 2.1 / MPL 1.1**, and a
-  set of audio codec libraries — some of which (e.g. LAME, mpg123) are
-  **LGPL 2.1**.
+- TagLib is bundled as source via
+  **[CXXTagLib](https://github.com/sbooth/CXXTagLib)** (© Stephen F. Booth).
+- A small in-repo shim, `MDTagShim`, wraps TagLib to change only the one tag
+  field (the artist) while preserving the tag version and every other frame —
+  a surgical, lossless edit.
+- **[SFBAudioEngine](https://github.com/sbooth/SFBAudioEngine)** (© Stephen F.
+  Booth, **MIT**) is also linked; it bundles TagLib and some audio codec
+  libraries, some of which (e.g. LAME, mpg123) are **LGPL 2.1**.
 
 As with the SMB engine above, the combined binary satisfies these licenses:
 this complete source repository and its build configuration are public, so

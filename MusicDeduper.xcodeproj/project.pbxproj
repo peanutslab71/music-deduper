@@ -20,6 +20,7 @@
 		DE0000000000000000000040 /* AMSMB2 in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000042 /* AMSMB2 */; };
 		DE0000000000000000000043 /* AMSMB2 in Embed Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000042 /* AMSMB2 */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		DE0000000000000000000060 /* SFBAudioEngine in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000062 /* SFBAudioEngine */; };
+		DE0000000000000000000070 /* MDTagShim in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000071 /* MDTagShim */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -43,6 +44,7 @@
 			files = (
 				DE0000000000000000000040 /* AMSMB2 in Frameworks */,
 				DE0000000000000000000060 /* SFBAudioEngine in Frameworks */,
+				DE0000000000000000000070 /* MDTagShim in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -116,6 +118,7 @@
 			packageProductDependencies = (
 				DE0000000000000000000042 /* AMSMB2 */,
 				DE0000000000000000000062 /* SFBAudioEngine */,
+				DE0000000000000000000071 /* MDTagShim */,
 			);
 			productName = MusicDeduper;
 			productReference = DE0000000000000000000006 /* MusicDeduper.app */;
@@ -146,6 +149,7 @@
 			);
 			mainGroup = DE0000000000000000000002;
 			packageReferences = (
+				DE0000000000000000000072 /* XCLocalSwiftPackageReference "MDTagShim" */,
 				DE0000000000000000000041 /* XCRemoteSwiftPackageReference "AMSMB2" */,
 				DE0000000000000000000063 /* XCRemoteSwiftPackageReference "SFBAudioEngine" */,
 			);
@@ -361,6 +365,13 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		DE0000000000000000000072 /* XCLocalSwiftPackageReference "MDTagShim" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = MDTagShim;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
 		DE0000000000000000000041 /* XCRemoteSwiftPackageReference "AMSMB2" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -390,6 +401,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = DE0000000000000000000063 /* XCRemoteSwiftPackageReference "SFBAudioEngine" */;
 			productName = SFBAudioEngine;
+		};
+		DE0000000000000000000071 /* MDTagShim */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DE0000000000000000000072 /* XCLocalSwiftPackageReference "MDTagShim" */;
+			productName = MDTagShim;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

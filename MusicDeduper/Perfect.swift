@@ -14,7 +14,7 @@
 
 import Foundation
 import AVFoundation
-import SFBAudioEngine
+import MDTagShim
 import SwiftUI
 
 // MARK: - Model
@@ -195,11 +195,10 @@ final class PerfectStore: ObservableObject {
     @Published var checkingTags = false
     @Published var tagProgress = ""
 
-    // Rewriting tags in place is PAUSED until a lossless writer lands: the current
-    // tag library rewrites the whole tag and drops fields it doesn't model (e.g.
-    // the release year), which would damage files. Detection and folder merges are
-    // safe and stay on; only the tag write-back is gated by this flag.
-    let tagWritingEnabled = false
+    // Tag writing uses a surgical TagLib shim (MDTagShim) that changes only the
+    // artist frame and preserves the ID3 version and every other frame — verified
+    // lossless at the frame level. Enabled.
+    let tagWritingEnabled = true
 
     /// work this artist would actually apply right now — folder merges always,
     /// tag rewrites only when tag-writing is enabled
@@ -529,20 +528,22 @@ final class PerfectStore: ObservableObject {
         }
     }
 
-    /// Read the artist tag from a file's embedded metadata. Uses the same
-    /// engine (SFBAudioEngine/TagLib) that writes it, so a recorded "old" value
-    /// exactly matches what a rewrite would overwrite — undo is then exact.
+    /// Read the artist tag. Uses the same TagLib shim that writes it, so a
+    /// recorded "old" value exactly matches what a rewrite would overwrite —
+    /// undo is then exact.
     nonisolated static func readArtist(_ url: URL) -> String? {
-        guard let f = try? AudioFile(readingPropertiesAndMetadataFrom: url) else { return nil }
-        let s = f.metadata.artist?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (s?.isEmpty == false) ? s : nil
+        guard let c = md_get_artist(url.path) else { return nil }
+        defer { free(c) }
+        let s = String(cString: c).trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? nil : s
     }
 
-    /// Write the artist tag, preserving all other metadata.
+    /// Write the artist tag surgically — only the artist frame changes; the ID3
+    /// version and every other frame (year, rating, cover art, …) are preserved.
     nonisolated static func writeArtist(_ url: URL, to value: String) throws {
-        let f = try AudioFile(readingPropertiesAndMetadataFrom: url)
-        f.metadata.artist = value
-        try f.writeMetadata()
+        let rc = md_set_artist(url.path, value)
+        if rc != 0 { throw NSError(domain: "MDTagShim", code: Int(rc),
+                                   userInfo: [NSLocalizedDescriptionKey: "tag write failed (\(rc))"]) }
     }
 
     // MARK: Commit — apply accepted removals + merges as a log of reversible moves
