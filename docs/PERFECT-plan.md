@@ -207,9 +207,31 @@ A dedicated Settings area holds configuration so the review flow stays
 uncluttered:
 - Reached via a **gear icon** in the top-right toolbar slot (freed when File
   Commander moved into the step bar) and a standard **Settings menu (⌘,)**.
-- Holds: provider chain (which sources, order, any keys), default thoroughness
-  preset, naming convention ("The" and `&`/`and` policy), default folder layout,
-  quarantine location, and delete-vs-quarantine behaviour.
+  Tabbed: Identification · Naming · Files · About.
+- **Identification providers** (drag to reorder): the **key-free providers work
+  out of the box** — ShazamKit (fingerprint), MusicBrainz (names), Cover Art
+  Archive (artwork) — no setup, no bundled secrets. **AcoustID and Discogs are
+  optional**: they need a personal API key, which the user pastes in Settings if
+  they want the extra coverage. Because the app is open-source, no shared keys
+  are bundled (they would be publicly visible and abusable); each of those two
+  shows **advice on how to get a free personal key**.
+- **Naming:** "The" policy, `&`/`and` policy.
+- **Files:** default folder layout, quarantine location, delete-vs-quarantine,
+  and history/backup retention.
+- **Defaults:** thoroughness preset.
+
+## 5b. DRM tracks — behaviour
+
+- DRM/`.m4p` tracks are **detected locally** (atom parsing, §7) and shown in a
+  **manifest** opened from the review's Protected/DRM line: a list of the tracks
+  with artist/album/title, a CSV export, and general guidance on legitimate
+  re-acquisition.
+- Perfect **leaves DRM tracks in place** — it does not move, quarantine, or
+  remove them (the user owns them and may re-acquire). They are flagged and
+  listed, never touched.
+- The per-track legitimate-route detection (re-download vs Apple Music match vs
+  re-rip vs orphan) needs the online step and arrives in **Phase 2** via the
+  Apple Music API; Phase 1 lists the tracks and explains the general options.
 
 ---
 
