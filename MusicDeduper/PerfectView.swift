@@ -142,6 +142,7 @@ struct PerfectView: View {
                     ForEach(store.groups, id: \.kind.rawValue) { group in
                         section(group.kind, group.items)
                     }
+                    identifySection
                 }
                 .padding(16)
             }
@@ -249,6 +250,105 @@ struct PerfectView: View {
         }
         .padding(.vertical, 1)
         .opacity(applicable ? 1 : 0.6)
+    }
+
+    // Identify — fingerprint tracks and propose the correct names. Its own pass
+    // (slow + online), so it's triggered explicitly, not part of Explore.
+    @ViewBuilder private var identifySection: some View {
+        let isOpen = expanded.contains("identify")
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                if !store.proposals.isEmpty {
+                    Button {
+                        if isOpen { expanded.remove("identify") } else { expanded.insert("identify") }
+                    } label: {
+                        Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption).foregroundStyle(.secondary)
+                    }.buttonStyle(.plain)
+                }
+                Image(systemName: "waveform.and.magnifyingglass").foregroundStyle(.teal)
+                Text("Identify tracks").fontWeight(.semibold)
+                if store.identifying {
+                    Text("listening…").font(.caption).foregroundStyle(.secondary)
+                } else if !store.proposals.isEmpty {
+                    Text("\(store.proposals.count) with suggested names").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("match the audio, correct the names").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if store.identifying {
+                    HStack(spacing: 6) { ProgressView().controlSize(.small); Text(store.identifyProgress).font(.caption).foregroundStyle(.secondary) }
+                    Button("Cancel") { store.cancel() }.controlSize(.small)
+                } else if !store.hasAcoustIDKey {
+                    Text("needs an AcoustID key").font(.caption2).foregroundStyle(.orange)
+                } else {
+                    if !store.proposals.isEmpty {
+                        let allOn = store.proposals.allSatisfy { $0.accepted }
+                        Button(allOn ? "Deselect all" : "Select all") {
+                            for i in store.proposals.indices { store.proposals[i].accepted = !allOn }
+                        }.controlSize(.small)
+                    }
+                    Button(store.proposals.isEmpty ? "Identify" : "Re-identify") {
+                        expanded.insert("identify"); store.identify()
+                    }.controlSize(.small)
+                }
+            }
+            .padding(.vertical, 6).padding(.horizontal, 10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.teal.opacity(0.07)))
+
+            if !store.proposals.isEmpty && isOpen {
+                Text("Each track was identified from its audio. Artist and title are reliable; album is only a suggestion — it defaults to your existing album, with alternatives to pick from. Applied changes are reversible.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 8).padding(.horizontal, 6)
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(store.proposals) { p in proposalRow(p) }
+                }
+                .padding(.top, 6).padding(.leading, 6)
+            }
+        }
+    }
+
+    private func proposalRow(_ p: TrackProposal) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { p.accepted },
+                set: { v in if let i = store.proposals.firstIndex(where: { $0.id == p.id }) { store.proposals[i].accepted = v } }
+            )).labelsHidden().toggleStyle(.checkbox)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(p.relPath).font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                    Text(String(format: "%.0f%%", p.score * 100)).font(.caption2)
+                        .foregroundStyle(p.score >= 0.9 ? .green : .orange)
+                }
+                fieldChange("Artist", p.curArtist, p.newArtist, p.artistChanged)
+                fieldChange("Title", p.curTitle, p.newTitle, p.titleChanged)
+                HStack(spacing: 6) {
+                    Text("Album").font(.caption2).foregroundStyle(.secondary).frame(width: 42, alignment: .leading)
+                    Picker("", selection: Binding(
+                        get: { p.chosenAlbum },
+                        set: { v in if let i = store.proposals.firstIndex(where: { $0.id == p.id }) { store.proposals[i].chosenAlbum = v } }
+                    )) {
+                        ForEach(p.albumCandidates, id: \.self) { Text($0).tag($0) }
+                    }.labelsHidden().frame(maxWidth: 300)
+                    if p.albumChanged { Text("change").font(.caption2).foregroundStyle(.blue) }
+                }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder private func fieldChange(_ label: String, _ old: String, _ new: String, _ changed: Bool) -> some View {
+        HStack(spacing: 6) {
+            Text(label).font(.caption2).foregroundStyle(.secondary).frame(width: 42, alignment: .leading)
+            if changed {
+                Text(old).font(.caption2).foregroundStyle(.secondary).strikethrough()
+                Image(systemName: "arrow.right").font(.system(size: 8)).foregroundStyle(.tertiary)
+                Text(new).font(.caption2).fontWeight(.medium).foregroundStyle(.primary)
+            } else {
+                Text(new.isEmpty ? old : new).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
     }
 
     // Untidy folder names — editable proposed name
@@ -370,11 +470,15 @@ struct PerfectView: View {
         let acc = store.artists.filter { $0.accepted }
         let mergeCount = acc.reduce(0) { $0 + $1.folderMerges }
         let tagCount = store.tagWritingEnabled ? acc.reduce(0) { $0 + $1.tagRewrites } : 0
+        let idCount = store.tagWritingEnabled ? store.proposals.filter { $0.accepted && $0.hasChange }.count : 0
+        var bits = ["\(store.acceptedCount) cleanup(s)"]
+        if mergeCount > 0 { bits.append("\(mergeCount) folder merge(s)") }
+        if tagCount > 0 { bits.append("\(tagCount) tag fix(es)") }
+        if idCount > 0 { bits.append("\(idCount) identified") }
+        let summary = bits.joined(separator: ", ") + " selected"
         return HStack {
             if store.hasWork {
-                Text("\(store.acceptedCount) cleanup(s)"
-                     + (mergeCount > 0 ? ", \(mergeCount) folder merge(s)" : "")
-                     + (tagCount > 0 ? ", \(tagCount) tag fix(es)" : "") + " selected")
+                Text(summary)
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text("Protected tracks are listed for information and are never removed.")

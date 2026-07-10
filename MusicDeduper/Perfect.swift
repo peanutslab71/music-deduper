@@ -148,7 +148,7 @@ struct RunRecord: Identifiable {
     let folder: URL         // the run's quarantine folder
     let date: Date
     let ops: [(from: String, to: String)]   // each move, root-relative
-    let tagEdits: [(rel: String, old: String)]  // each artist-tag rewrite, for exact undo
+    let tagEdits: [(rel: String, field: String, old: String)]  // each tag rewrite, for exact undo
     let summary: String
 }
 
@@ -195,6 +195,12 @@ final class PerfectStore: ObservableObject {
     @Published var checkingTags = false
     @Published var tagProgress = ""
 
+    // identify (acoustic fingerprint → AcoustID → proposed correct names)
+    @Published var proposals: [TrackProposal] = []
+    @Published var identifying = false
+    @Published var identifyProgress = ""
+    var hasAcoustIDKey: Bool { !Identifier.configuredKey.isEmpty }
+
     // Tag writing uses a surgical TagLib shim (MDTagShim) that changes only the
     // artist frame and preserves the ID3 version and every other frame — verified
     // lossless at the frame level. Enabled.
@@ -215,7 +221,7 @@ final class PerfectStore: ObservableObject {
 
     func setRoot(_ url: URL) {
         root = url
-        findings = []; renames = []; artists = []; folderGroups = []; tagGroups = []
+        findings = []; renames = []; artists = []; folderGroups = []; tagGroups = []; proposals = []
         diagnosed = false
         lastRunSummary = nil
         loadRuns()
@@ -531,17 +537,20 @@ final class PerfectStore: ObservableObject {
     /// Read the artist tag. Uses the same TagLib shim that writes it, so a
     /// recorded "old" value exactly matches what a rewrite would overwrite —
     /// undo is then exact.
-    nonisolated static func readArtist(_ url: URL) -> String? {
-        guard let c = md_get_artist(url.path) else { return nil }
+    nonisolated static func readArtist(_ url: URL) -> String? { readField(url, "artist") }
+
+    /// Read one tag field ("artist","album","albumartist","title","track").
+    nonisolated static func readField(_ url: URL, _ field: String) -> String? {
+        guard let c = md_get_field(url.path, field) else { return nil }
         defer { free(c) }
         let s = String(cString: c).trimmingCharacters(in: .whitespacesAndNewlines)
         return s.isEmpty ? nil : s
     }
 
-    /// Write the artist tag surgically — only the artist frame changes; the ID3
-    /// version and every other frame (year, rating, cover art, …) are preserved.
-    nonisolated static func writeArtist(_ url: URL, to value: String) throws {
-        let rc = md_set_artist(url.path, value)
+    /// Write one tag field surgically — only that frame changes; the ID3 version
+    /// and every other frame (year, rating, cover art, …) are preserved.
+    nonisolated static func writeField(_ url: URL, _ field: String, to value: String) throws {
+        let rc = md_set_field(url.path, field, value)
         if rc != 0 { throw NSError(domain: "MDTagShim", code: Int(rc),
                                    userInfo: [NSLocalizedDescriptionKey: "tag write failed (\(rc))"]) }
     }
@@ -552,6 +561,55 @@ final class PerfectStore: ObservableObject {
         findings.contains { $0.accepted && $0.kind.safe }
             || renames.contains { $0.accepted && $0.newName != $0.oldName }
             || artists.contains { $0.accepted && artistHasApplicableWork($0) }
+            || (tagWritingEnabled && proposals.contains { $0.accepted && $0.hasChange })
+    }
+
+    // MARK: Identify — fingerprint each track and propose the correct names
+
+    func identify() {
+        guard let root, hasAcoustIDKey, !identifying else { return }
+        identifying = true; proposals = []; identifyProgress = "Identifying…"
+        let box = cancelFlag; box.cancelled = false
+        let id = Identifier(apiKey: Identifier.configuredKey)
+        Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            // collect audio files
+            var files: [URL] = []
+            if let en = fm.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                while let u = en.nextObject() as? URL { if Self.isAudio(u) { files.append(u) } }
+            }
+            var found: [TrackProposal] = []
+            var done = 0
+            for u in files {
+                if box.cancelled { break }
+                let rel = Self.rel(u, root)
+                let curA = Self.readField(u, "artist") ?? ""
+                let curT = Self.readField(u, "title") ?? ""
+                let curAl = Self.readField(u, "album") ?? ""
+                if let p = try? await id.identify(url: u, relPath: rel,
+                                                  curArtist: curA, curTitle: curT, curAlbum: curAl),
+                   p.hasChange {
+                    found.append(p)
+                }
+                done += 1
+                if done % 3 == 0 { await self.setIdentifyProgress("Identified \(done)/\(files.count)…") }
+                // AcoustID asks for max 3 requests/second per key
+                try? await Task.sleep(nanoseconds: 350_000_000)
+            }
+            await self.finishIdentify(proposals: found, total: files.count, cancelled: box.cancelled)
+        }
+    }
+
+    private func setIdentifyProgress(_ s: String) { identifyProgress = s }
+
+    private func finishIdentify(proposals p: [TrackProposal], total: Int, cancelled: Bool) {
+        identifying = false; identifyProgress = ""
+        proposals = p.sorted { $0.relPath.lowercased() < $1.relPath.lowercased() }
+        if !cancelled {
+            status = p.isEmpty
+                ? "Identified \(total) tracks — nothing to correct."
+                : "Identified \(total) tracks — \(p.count) with suggested corrections."
+        }
     }
 
     func commit() {
@@ -563,13 +621,18 @@ final class PerfectStore: ObservableObject {
             .map { ($0.canonical, $0.folderSources) }
         let accRenames = renames.filter { $0.accepted && $0.newName != $0.oldName }
             .map { ($0.relPath, $0.newName) }
-        // tag rewrites from accepted artists: (file, relPath, oldArtist, newArtist)
-        // for every member whose current spelling differs from the kept name.
-        // Gated off until the tag writer is proven lossless — folder merges still run.
-        let accTagEdits: [(URL, String, String, String)] = tagWritingEnabled ? artists
+        // tag rewrites: (file, relPath, field, oldValue, newValue). Two sources —
+        // the artist-split fixer (field "artist") and identify (artist/title/album).
+        var accTagEdits: [(URL, String, String, String, String)] = tagWritingEnabled ? artists
             .filter { $0.accepted && $0.tagRewrites > 0 }
             .flatMap { a in a.tagMembers.filter { $0.oldName != a.canonical }
-                .map { ($0.url, $0.relPath, $0.oldName, a.canonical) } } : []
+                .map { ($0.url, $0.relPath, "artist", $0.oldName, a.canonical) } } : []
+        // identify proposals — each changed field becomes its own reversible edit
+        for p in proposals where p.accepted && p.hasChange {
+            if p.artistChanged { accTagEdits.append((p.url, p.relPath, "artist", p.curArtist, p.newArtist)) }
+            if p.titleChanged  { accTagEdits.append((p.url, p.relPath, "title",  p.curTitle,  p.newTitle)) }
+            if p.albumChanged  { accTagEdits.append((p.url, p.relPath, "album",  p.curAlbum,  p.chosenAlbum)) }
+        }
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
@@ -577,7 +640,7 @@ final class PerfectStore: ObservableObject {
             let quarantine = root.appendingPathComponent(qRel, isDirectory: true)
             try? fm.createDirectory(at: quarantine, withIntermediateDirectories: true)
             var ops: [(from: String, to: String)] = []   // recorded moves (root-relative)
-            var tagEdits: [(rel: String, old: String)] = []  // recorded artist rewrites
+            var tagEdits: [(rel: String, field: String, old: String)] = []  // recorded tag rewrites
             var log = "Music Librarian — change log \(Date())\nLibrary: \(root.path)\n\n"
 
             func move(_ fromRel: String, _ toRel: String) -> Bool {
@@ -591,15 +654,15 @@ final class PerfectStore: ObservableObject {
                 } catch { log += "FAILED \(fromRel): \(error.localizedDescription)\n"; return false }
             }
 
-            // 0) artist-tag rewrites — done first, while the files are still at
-            //    their original locations (before any merge/rename moves them).
-            //    Record the original path + old spelling so undo is exact.
-            for (url, rel, old, new) in accTagEdits {
+            // 0) tag rewrites — done first, while the files are still at their
+            //    original locations (before any merge/rename moves them). Record
+            //    the original path + field + old value so undo is exact.
+            for (url, rel, field, old, new) in accTagEdits {
                 do {
-                    try Self.writeArtist(url, to: new)
-                    tagEdits.append((rel, old))
-                    log += "TAG: \(rel)  artist '\(old)' → '\(new)'\n"
-                } catch { log += "FAILED tag \(rel): \(error.localizedDescription)\n" }
+                    try Self.writeField(url, field, to: new)
+                    tagEdits.append((rel, field, old))
+                    log += "TAG: \(rel)  \(field) '\(old)' → '\(new)'\n"
+                } catch { log += "FAILED tag \(rel) \(field): \(error.localizedDescription)\n" }
             }
 
             // 1) merges — move each non-canonical source's contents into the canonical
@@ -652,7 +715,7 @@ final class PerfectStore: ObservableObject {
                 "root": root.path,
                 "summary": "\(total) change(s) applied",
                 "ops": ops.map { ["from": $0.from, "to": $0.to] },
-                "tagEdits": tagEdits.map { ["rel": $0.rel, "old": $0.old] },
+                "tagEdits": tagEdits.map { ["rel": $0.rel, "field": $0.field, "old": $0.old] },
             ]
             if let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) {
                 try? data.write(to: quarantine.appendingPathComponent("run.json"))
@@ -668,6 +731,7 @@ final class PerfectStore: ObservableObject {
         findings.removeAll { $0.accepted && $0.kind.safe }
         renames.removeAll { $0.accepted && $0.newName != $0.oldName }
         artists.removeAll { $0.accepted && artistHasApplicableWork($0) }
+        proposals.removeAll { $0.accepted && $0.hasChange }
         status = lastRunSummary ?? status
         loadRuns()
     }
@@ -687,8 +751,9 @@ final class PerfectStore: ObservableObject {
                 let ops = (obj["ops"] as? [[String: String]] ?? []).compactMap { d -> (String, String)? in
                     guard let f = d["from"], let t = d["to"] else { return nil }; return (f, t)
                 }
-                let tagEdits = (obj["tagEdits"] as? [[String: String]] ?? []).compactMap { d -> (String, String)? in
-                    guard let r = d["rel"], let o = d["old"] else { return nil }; return (r, o)
+                let tagEdits = (obj["tagEdits"] as? [[String: String]] ?? []).compactMap { d -> (String, String, String)? in
+                    guard let r = d["rel"], let o = d["old"] else { return nil }
+                    return (r, d["field"] ?? "artist", o)   // default field for older runs
                 }
                 let n = ops.count + tagEdits.count
                 found.append(RunRecord(id: sub.lastPathComponent, folder: sub, date: date,
@@ -743,7 +808,7 @@ final class PerfectStore: ObservableObject {
             for edit in tagEdits {
                 let url = root.appendingPathComponent(edit.rel)
                 guard fm.fileExists(atPath: url.path) else { failed += 1; continue }
-                do { try Self.writeArtist(url, to: edit.old); restored += 1 } catch { failed += 1 }
+                do { try Self.writeField(url, edit.field, to: edit.old); restored += 1 } catch { failed += 1 }
             }
 
             try? fm.removeItem(at: folder)
