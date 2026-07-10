@@ -28,23 +28,29 @@ struct ContentView: View {
     @State private var rockRestartHost: String? = nil          // offer to start again after the copy
     @State private var restartHostAfterCopy: String? = nil     // we stopped it for this copy
 
-    var body: some View {
+    @ViewBuilder private var stepContent: some View {
+        switch step {
+        case .source:
+            SourceStepView(store: store)
+        case .review:
+            ReviewStepView(store: store, reviewTab: $reviewTab)
+        case .cleanup:
+            CleanupStepView(store: store) { deletePhase = .choose }
+        case .copy:
+            CopyStepView(store: store, destFolder: $destFolder) { dest in
+                Task { @MainActor in await guardedCopy(to: dest) }
+            }
+        case .browse:
+            ServerFilesView(store: store)
+        }
+    }
+
+    private var chrome: some View {
         VStack(spacing: 0) {
             StepBar(step: $step, hasScan: !store.tracks.isEmpty)
             Divider()
 
-            switch step {
-            case .source:
-                SourceStepView(store: store)
-            case .review:
-                ReviewStepView(store: store, reviewTab: $reviewTab)
-            case .cleanup:
-                CleanupStepView(store: store) { deletePhase = .choose }
-            case .copy:
-                CopyStepView(store: store, destFolder: $destFolder) { dest in
-                    Task { @MainActor in await guardedCopy(to: dest) }
-                }
-            }
+            stepContent
 
             Divider()
             footer
@@ -58,6 +64,10 @@ struct ContentView: View {
                 step = .review
             }
         }
+    }
+
+    private var withDeleteFlow: some View {
+        chrome
         // 1) choose Trash vs Permanent
         .confirmationDialog("Delete duplicates",
                             isPresented: bind(.choose), titleVisibility: .visible) {
@@ -88,6 +98,10 @@ struct ContentView: View {
         .sheet(isPresented: $store.opActive) {
             OperationSheet(store: store)
         }
+    }
+
+    var body: some View {
+        withDeleteFlow
         // ROCK gate: Roon Server MUST be stopped before copying into a ROCK share
         .alert("Roon Server is running",
                isPresented: Binding(get: { rockPrompt != nil },
@@ -328,13 +342,13 @@ struct OperationSheet: View {
                 Text("✓ \(store.opOK)    • \(store.opSkip)    ✗ \(store.opFail)").foregroundStyle(.secondary)
             }
             .font(.caption).monospaced()
-            if !store.opNote.isEmpty {
-                Text(store.opNote)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            // fixed-height row so showing/clearing the note never resizes the
+            // dialog (that resize was the flicker on runs of small files)
+            Text(store.opNote.isEmpty ? " " : store.opNote)
+                .font(.caption).monospacedDigit()
+                .foregroundStyle(.orange)
+                .frame(maxWidth: .infinity, minHeight: 15, alignment: .leading)
+                .lineLimit(1).truncationMode(.middle)
             // several files in a row failed — server is gone, run paused itself
             if store.opPaused {
                 HStack(spacing: 10) {

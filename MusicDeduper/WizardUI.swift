@@ -13,7 +13,7 @@ import UniformTypeIdentifiers
 // MARK: - Wizard steps
 
 enum WizardStep: Int, CaseIterable, Identifiable {
-    case source, review, cleanup, copy
+    case source, review, cleanup, copy, browse
     var id: Int { rawValue }
     var title: String {
         switch self {
@@ -21,6 +21,7 @@ enum WizardStep: Int, CaseIterable, Identifiable {
         case .review:  return "Review"
         case .cleanup: return "Clean up"
         case .copy:    return "Copy"
+        case .browse:  return "Browse"
         }
     }
     var icon: String {
@@ -29,6 +30,7 @@ enum WizardStep: Int, CaseIterable, Identifiable {
         case .review:  return "rectangle.grid.2x2"
         case .cleanup: return "trash"
         case .copy:    return "externaldrive.badge.icloud"
+        case .browse:  return "externaldrive.connected.to.line.below"
         }
     }
 }
@@ -39,7 +41,7 @@ struct StepBar: View {
     let hasScan: Bool
 
     private func reachable(_ s: WizardStep) -> Bool {
-        s == .source || hasScan
+        s == .source || s == .browse || hasScan   // Browse is a tool, not a step — always open
     }
 
     var body: some View {
@@ -64,7 +66,13 @@ struct StepBar: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!reachable(s))
-                if s != .copy {
+                if s == .copy {
+                    // Browse (File Commander) is a separate tool — pipe, not chevron
+                    Text("|")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.quaternary)
+                        .padding(.horizontal, 8)
+                } else if s != .browse {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.quaternary)
@@ -602,7 +610,11 @@ struct CopyStepView: View {
         }
         .frame(maxWidth: 620)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .sheet(isPresented: $showServerPicker) { ServerPickerSheet(store: store) }
+        .sheet(isPresented: $showServerPicker) {
+            ServerPickerSheet { host, share in
+                store.setShareAddress("smb://\(host)/\(share)")
+            }
+        }
         .sheet(isPresented: $showFolderBrowser) { FolderBrowserSheet(store: store) }
     }
 
@@ -672,7 +684,7 @@ struct CopyStepView: View {
 // MARK: - Server picker (our protocol — Bonjour discovery + share listing, no mount)
 
 struct ServerPickerSheet: View {
-    @ObservedObject var store: DedupStore
+    let onPick: (String, String) -> Void      // (host, share)
     @Environment(\.dismiss) private var dismiss
     @StateObject private var browser = SMBServerBrowser()
     @State private var manualHost = ""
@@ -688,7 +700,7 @@ struct ServerPickerSheet: View {
             if let shares {
                 List(shares, id: \.self) { s in
                     Button {
-                        store.setShareAddress("smb://\(pickedHost)/\(s)")
+                        onPick(pickedHost, s)
                         dismiss()
                     } label: {
                         Label(s, systemImage: "externaldrive.connected.to.line.below")
@@ -743,7 +755,12 @@ struct ServerPickerSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack {
-                if shares != nil { Button("Back") { shares = nil; errorMsg = nil } }
+                if shares != nil {
+                    Button("Back") { shares = nil; errorMsg = nil }
+                } else {
+                    Button { browser.rescan() } label: { Label("Rescan", systemImage: "arrow.clockwise") }
+                        .disabled(browser.scanning)
+                }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
             }
@@ -771,7 +788,7 @@ struct ServerPickerSheet: View {
             } catch {
                 await MainActor.run {
                     connecting = false
-                    errorMsg = "Couldn't connect to \(h): \(error.localizedDescription)"
+                    errorMsg = DirectSMBClient.friendly(error, host: h)
                 }
             }
         }

@@ -49,6 +49,13 @@ A four-step wizard: **Source → Review → Clean up → Copy.**
   importing thousands of fresh tracks can drop off the network entirely and
   look like a hardware fault ([HELP.md](HELP.md) has the full story).
 
+There's also a **File Commander** (the Browse tab): a two-pane file manager
+that talks to your server directly through the built-in engine — browse,
+rename, make folders, move and copy between your Mac and the server (or
+around the server itself), delete, and export a folder as a zip. It's
+faster and steadier than Finder against an old Roon ROCK, and mounts
+nothing.
+
 There's a full walkthrough in [USAGE.md](USAGE.md), and [HELP.md](HELP.md)
 covers performance tuning (including a fix for macOS's slow SMB defaults),
 troubleshooting, and uninstalling.

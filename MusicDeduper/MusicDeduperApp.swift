@@ -41,6 +41,7 @@ struct MusicDeduperApp: App {
             AboutView()
         }
         .windowResizability(.contentSize)
+
     }
 }
 

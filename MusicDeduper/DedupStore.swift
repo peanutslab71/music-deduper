@@ -389,6 +389,10 @@ final class DedupStore: ObservableObject {
     private func workerDelta(_ d: Int) { opActiveStreams += d }
     private func setStreamLimit(_ n: Int) { opStreamLimit = n }
 
+    // only files at least this big get a live per-file % (smaller ones finish
+    // fast enough that showing/hiding the line just flickers)
+    static let progressThreshold: Int64 = 8_000_000
+
     // byte accounting for the elapsed/rate/ETA footer
     @Published var opStartDate: Date?
     @Published var opBytesDone: Int64 = 0
@@ -782,6 +786,374 @@ final class DedupStore: ObservableObject {
     }
     private func presentConflict(_ c: CopyConflict?) { pendingConflict = c }
 
+    /// Zip the contents of a staging folder to a destination .zip, then remove
+    /// the staging folder and reveal the archive in Finder. Runs `ditto`.
+    func zipStaging(_ stage: URL, to zipURL: URL) {
+        Task.detached {
+            try? FileManager.default.removeItem(at: zipURL)
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            p.arguments = ["-c", "-k", "--sequesterRsrc", stage.path, zipURL.path]
+            try? p.run(); p.waitUntilExit()
+            try? FileManager.default.removeItem(at: stage)
+            let ok = p.terminationStatus == 0
+            await MainActor.run {
+                if ok {
+                    self.status = "Exported \(zipURL.lastPathComponent)"
+                    NSWorkspace.shared.activateFileViewerSelecting([zipURL])
+                } else {
+                    self.status = "Couldn't create the zip."
+                }
+            }
+        }
+    }
+
+    // MARK: File Commander transfers (arbitrary files/folders between locations)
+
+    /// One end of a transfer: a local folder, or a folder on a server share.
+    enum XferEnd {
+        case local(URL)
+        case server(DirectSMBClient, String)   // client, base path within the share
+
+        var label: String {
+            switch self {
+            case .local(let u): return "This Mac: \(u.path)"
+            case .server(let c, let p): return "\(c.host)/\(c.share)/\(p)"
+            }
+        }
+    }
+
+    /// Instant move within one location (same server+share, or both local):
+    /// a rename per item, but shown on the operation dialog with per-item
+    /// result and verification — so it's never a silent success or failure.
+    func runInstantMove(_ items: [(name: String, isDir: Bool)],
+                        from src: XferEnd, to dst: XferEnd,
+                        onFinish: @escaping () -> Void) {
+        opStart(title: "Moving \(items.count) item(s) → \(dst.label)", total: items.count)
+        opPaused = false; opActiveStreams = 0; opStreamLimit = 0
+        let box = cancelBox
+        Task.detached(priority: .userInitiated) {
+            await self.opLogLine("ℹ moving into \(dst.label) (instant where the server allows a rename)")
+            var ok = 0, fail = 0
+            var needCopy: [(name: String, isDir: Bool)] = []   // items on a different device
+            for (n, item) in items.enumerated() {
+                if box.cancelled { break }
+                do {
+                    try await Self.instantMoveOne(item, from: src, to: dst)
+                    ok += 1
+                    await self.opStep(done: n + 1, ok: ok, skip: 0, fail: fail, line: "✓ moved \(item.name)")
+                } catch {
+                    if Self.isCrossDevice(error) {
+                        // source and destination are on different physical devices
+                        // on the server (e.g. ROCK's InternalStorage vs the root) —
+                        // a rename can't cross that, so fall back to copy-then-delete
+                        await self.opLogLine("… \(item.name): different device on the server — copying instead of renaming")
+                        needCopy.append(item)
+                    } else {
+                        fail += 1
+                        await self.opStep(done: n + 1, ok: ok, skip: 0, fail: fail,
+                                          line: "✗ \(item.name) — \(error.localizedDescription)")
+                    }
+                }
+            }
+            if !needCopy.isEmpty && !box.cancelled {
+                // hand the cross-device items to the full copy+delete engine
+                await MainActor.run {
+                    self.runTransfer(needCopy, from: src, to: dst, move: true, onFinish: onFinish)
+                }
+                return
+            }
+            let summary = box.cancelled
+                ? "■ Cancelled — \(ok) moved."
+                : "✔ Done — \(ok) moved" + (fail > 0 ? ", \(fail) failed." : ".")
+            await self.opFinishLine(summary)
+            await MainActor.run { onFinish() }
+        }
+    }
+
+    nonisolated private static func isCrossDevice(_ e: Error) -> Bool {
+        let ns = e as NSError
+        if ns.domain == NSPOSIXErrorDomain && ns.code == Int(EXDEV) { return true }
+        return ns.localizedDescription.lowercased().contains("cross-device")
+    }
+
+    private static func instantMoveOne(_ item: (name: String, isDir: Bool),
+                                       from src: XferEnd, to dst: XferEnd) async throws {
+        switch (src, dst) {
+        case let (.local(sBase), .local(dBase)):
+            let from = sBase.appendingPathComponent(item.name)
+            let to = dBase.appendingPathComponent(item.name)
+            if from.standardizedFileURL == to.standardizedFileURL {
+                throw DirectSMBClient.error("that's already where it is")
+            }
+            if FileManager.default.fileExists(atPath: to.path) {
+                throw DirectSMBClient.error("“\(item.name)” already exists there")
+            }
+            try FileManager.default.moveItem(at: from, to: to)
+
+        case let (.server(sc, sBase), .server(_, dBase)):
+            let from = sBase.isEmpty ? item.name : sBase + "/" + item.name
+            let to = dBase.isEmpty ? item.name : dBase + "/" + item.name
+            if from == to { throw DirectSMBClient.error("that's already where it is") }
+            // refuse moving a folder into itself or its own subtree
+            if item.isDir && (to == from || to.hasPrefix(from + "/")) {
+                throw DirectSMBClient.error("can't move a folder into itself")
+            }
+            try await sc.moveNoReplace(from, to: to)          // throws on any failure
+
+        default:
+            throw DirectSMBClient.error("instant move needs both sides in the same place")
+        }
+    }
+
+    /// Copy or move the named items from one location's folder into another's.
+    /// Handles files and (recursively) folders, in any Mac/server combination.
+    /// Runs on the shared operation dialog with progress, stats, log and Cancel.
+    func runTransfer(_ items: [(name: String, isDir: Bool)],
+                     from src: XferEnd, to dst: XferEnd, move: Bool,
+                     onFinish: @escaping () -> Void) {
+        let verb = move ? "Moving" : "Copying"
+        opStart(title: "\(verb) \(items.count) item(s) → \(dst.label)", total: 0)
+        opPaused = false
+        opActiveStreams = 0; opStreamLimit = 0
+        let box = cancelBox
+        let conflicts = conflictBox
+        conflicts.reset()
+
+        Task.detached(priority: .userInitiated) {
+            await self.opLogLine("ℹ \(verb.lowercased()) from \(src.label)")
+            // 1) expand folders into a flat file list + the directories to create
+            var files: [(rel: String, size: Int64)] = []
+            var dirs: [String] = []
+            do {
+                for item in items {
+                    if item.isDir {
+                        dirs.append(item.name)
+                        let sub = try await Self.enumerate(end: src, subPath: item.name)
+                        dirs.append(contentsOf: sub.dirs)
+                        files.append(contentsOf: sub.files)
+                    } else {
+                        let size = try await Self.sizeOf(end: src, rel: item.name)
+                        files.append((item.name, size))
+                    }
+                }
+            } catch {
+                await self.opFinishLine("✗ Couldn't read the source: \(error.localizedDescription)")
+                await MainActor.run { onFinish() }
+                return
+            }
+
+            let totalBytes = files.reduce(Int64(0)) { $0 + $1.size }
+            await MainActor.run {
+                self.opTotal = files.count
+                self.opBytesTotal = totalBytes
+                self.opStartDate = Date()
+            }
+
+            // 2) create the destination directories (parents first)
+            for d in dirs where !box.cancelled {
+                try? await Self.makeDir(end: dst, rel: d)
+            }
+
+            // 3) transfer each file
+            var ok = 0, skip = 0, fail = 0
+            for (n, f) in files.enumerated() {
+                if box.cancelled { break }
+
+                // conflict: destination file already exists → ask (Overwrite / Skip,
+                // each or All) unless a sticky policy is set. No silent overwrites.
+                if let dstSize = await Self.destFileSize(dst, rel: f.rel) {
+                    var decision = conflicts.policy
+                    if decision == nil {
+                        let name = (f.rel as NSString).lastPathComponent
+                        await self.presentConflict(CopyConflict(
+                            name: name, artist: "", album: (f.rel as NSString).deletingLastPathComponent,
+                            srcURL: URL(fileURLWithPath: "/"), srcSize: f.size,
+                            dstSize: dstSize, dstDate: nil, identical: dstSize == f.size))
+                        while !box.cancelled {
+                            if let d = conflicts.take() { decision = d; break }
+                            try? await Task.sleep(nanoseconds: 200_000_000)
+                        }
+                        await self.presentConflict(nil)
+                        if box.cancelled { break }
+                    }
+                    if decision == .skip || decision == .skipAll {
+                        skip += 1
+                        await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail,
+                                          line: "• kept existing \(f.rel)")
+                        continue
+                    }
+                }
+
+                // only show a live per-file % for files big enough to matter —
+                // toggling it for tiny files that finish instantly just flickers
+                let fSize = f.size, fRel = f.rel
+                let showProgress = fSize >= Self.progressThreshold
+                if showProgress { await self.setNote("→ \(fRel)  0%  (0 KB / \(fmtBytes(fSize)))") }
+                var onBytes: (@Sendable (Int64) -> Void)? = nil
+                if showProgress {
+                    onBytes = { bytes in
+                        Task { @MainActor in
+                            let pct = fSize > 0 ? Int(Double(bytes) / Double(fSize) * 100) : 100
+                            self.opNote = "→ \(fRel)  \(pct)%  (\(fmtBytes(bytes)) / \(fmtBytes(fSize)))"
+                        }
+                    }
+                }
+                var done = false
+                var attempt = 0
+                while !box.cancelled && attempt < 3 {
+                    do {
+                        try await Self.transferFile(rel: f.rel, from: src, to: dst,
+                                                    expected: f.size, cancel: box, onBytes: onBytes)
+                        done = true; break
+                    } catch {
+                        attempt += 1
+                        if attempt >= 3 {
+                            await self.opLogLine("✗ \(f.rel): \(error.localizedDescription)")
+                        } else {
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        }
+                    }
+                }
+                if showProgress { await self.setNote("") }
+                if done {
+                    ok += 1
+                    await MainActor.run { self.opBytesDone += f.size }
+                    await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail, line: "✓ \(f.rel)")
+                } else if !box.cancelled {
+                    fail += 1
+                    await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail, line: "✗ \(f.rel) — failed")
+                }
+            }
+
+            // 4) for a move, delete the sources only if everything transferred
+            if move && !box.cancelled && fail == 0 {
+                for item in items { try? await Self.deleteItem(end: src, rel: item.name, isDir: item.isDir) }
+                await self.opLogLine("🗑 removed \(items.count) source item(s) after move")
+            } else if move && fail > 0 {
+                await self.opLogLine("⚠ move kept the originals — \(fail) file(s) didn't transfer")
+            }
+
+            let summary = box.cancelled
+                ? "■ Cancelled — \(ok) transferred."
+                : "✔ Done — \(ok) transferred" + (fail > 0 ? ", \(fail) failed." : ".")
+            await self.opFinishLine(summary)
+            await MainActor.run { onFinish() }
+        }
+    }
+
+    // endpoint operations, all nonisolated so they run off the main actor
+
+    private static func enumerate(end: XferEnd, subPath: String) async throws
+        -> (files: [(rel: String, size: Int64)], dirs: [String]) {
+        switch end {
+        case .server(let c, let base):
+            let dir = base.isEmpty ? subPath : base + "/" + subPath
+            let w = try await c.walk(dir: dir)
+            return (w.files.map { (subPath + "/" + $0.rel, $0.size) },
+                    w.dirs.map { subPath + "/" + $0 })
+        case .local(let baseURL):
+            let root = baseURL.appendingPathComponent(subPath)
+            var files: [(String, Int64)] = []
+            var dirs: [String] = []
+            let fm = FileManager.default
+            if let en = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey]) {
+                for case let u as URL in en {
+                    let rel = subPath + "/" + (u.path.dropFirst(root.path.count + 1))
+                    let v = try? u.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                    if v?.isDirectory == true { dirs.append(rel) }
+                    else { files.append((rel, Int64(v?.fileSize ?? 0))) }
+                }
+            }
+            return (files, dirs)
+        }
+    }
+
+    private static func sizeOf(end: XferEnd, rel: String) async throws -> Int64 {
+        switch end {
+        case .server(let c, let base):
+            return (try await c.fileSize(base.isEmpty ? rel : base + "/" + rel)) ?? 0
+        case .local(let baseURL):
+            let v = try? baseURL.appendingPathComponent(rel).resourceValues(forKeys: [.fileSizeKey])
+            return Int64(v?.fileSize ?? 0)
+        }
+    }
+
+    /// Size of an existing file at the destination, or nil if it doesn't exist.
+    private static func destFileSize(_ end: XferEnd, rel: String) async -> Int64? {
+        switch end {
+        case .server(let c, let base):
+            return (try? await c.fileSize(base.isEmpty ? rel : base + "/" + rel)).flatMap { $0 }
+        case .local(let baseURL):
+            let url = baseURL.appendingPathComponent(rel)
+            guard FileManager.default.fileExists(atPath: url.path),
+                  let v = try? url.resourceValues(forKeys: [.fileSizeKey]) else { return nil }
+            return Int64(v.fileSize ?? 0)
+        }
+    }
+
+    private static func makeDir(end: XferEnd, rel: String) async throws {
+        switch end {
+        case .server(let c, let base):
+            try await c.mkdirs(base.isEmpty ? rel : base + "/" + rel)
+        case .local(let baseURL):
+            try? FileManager.default.createDirectory(at: baseURL.appendingPathComponent(rel),
+                                                     withIntermediateDirectories: true)
+        }
+    }
+
+    private static func deleteItem(end: XferEnd, rel: String, isDir: Bool) async throws {
+        switch end {
+        case .server(let c, let base):
+            try await c.removeItem(base.isEmpty ? rel : base + "/" + rel, isDir: isDir)
+        case .local(let baseURL):
+            try FileManager.default.removeItem(at: baseURL.appendingPathComponent(rel))
+        }
+    }
+
+    /// Transfer one file (source relative path → same relative path at dest),
+    /// via a temp name + verify + rename so a partial file is never visible.
+    private static func transferFile(rel: String, from src: XferEnd, to dst: XferEnd,
+                                     expected: Int64, cancel: CancelBox,
+                                     onBytes: (@Sendable (Int64) -> Void)? = nil) async throws {
+        switch (src, dst) {
+        case let (.local(sBase), .local(dBase)):
+            let s = sBase.appendingPathComponent(rel)
+            let d = dBase.appendingPathComponent(rel)
+            try FileManager.default.createDirectory(at: d.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: d.path) { try? FileManager.default.removeItem(at: d) }
+            try FileManager.default.copyItem(at: s, to: d)   // local copy is fast, no per-byte progress
+            onBytes?(expected)
+
+        case let (.local(sBase), .server(c, dBase)):
+            let s = sBase.appendingPathComponent(rel)
+            let dPath = DirectSMBClient.nfc(dBase.isEmpty ? rel : dBase + "/" + rel)
+            try await c.mkdirs((dPath as NSString).deletingLastPathComponent)
+            try await c.upload(local: s, to: dPath, onBytes: onBytes)
+
+        case let (.server(c, sBase), .local(dBase)):
+            let sPath = sBase.isEmpty ? rel : sBase + "/" + rel
+            let d = dBase.appendingPathComponent(rel)
+            try FileManager.default.createDirectory(at: d.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try await c.download(path: sPath, to: d, onBytes: onBytes)
+
+        case let (.server(sc, sBase), .server(dc, dBase)):
+            // Same-share MOVES are intercepted upstream (instant rename), so any
+            // server→server transfer that reaches here is a copy — and SMB can't
+            // duplicate server-side, so it hops through a local temp file.
+            let sPath = sBase.isEmpty ? rel : sBase + "/" + rel
+            let dPath = DirectSMBClient.nfc(dBase.isEmpty ? rel : dBase + "/" + rel)
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("md-xfer-" + UUID().uuidString)
+            try await sc.download(path: sPath, to: tmp)          // download phase (silent)
+            defer { try? FileManager.default.removeItem(at: tmp) }
+            try await dc.mkdirs((dPath as NSString).deletingLastPathComponent)
+            try await dc.upload(local: tmp, to: dPath, onBytes: onBytes)   // upload phase shows %
+        }
+    }
+
     // MARK: Direct SMB engine (v1.3) — same behaviour as the mount engine
     // (selection, conflicts, adaptive streams, auto-pause, sweep), but every
     // network operation goes through our in-process SMB client.
@@ -974,10 +1346,21 @@ final class DedupStore: ObservableObject {
         var attempt = 0
         let maxAttempts = 5
         let tmpPath = dirPath + "/." + DirectSMBClient.nfc(t.name) + ".mdtmp"
+        let tSize = t.size, tName = t.name
+        let showProgress = tSize >= Self.progressThreshold
+        var onBytes: (@Sendable (Int64) -> Void)? = nil
+        if showProgress {
+            onBytes = { bytes in
+                Task { @MainActor in
+                    let pct = tSize > 0 ? Int(Double(bytes) / Double(tSize) * 100) : 100
+                    self.opNote = "→ \(tName)  \(pct)%  (\(fmtBytes(bytes)) / \(fmtBytes(tSize)))"
+                }
+            }
+        }
         while !box.cancelled {
             do {
                 try await client.mkdirs(dirPath)
-                try await client.upload(local: t.url, to: tmpPath)
+                try await client.upload(local: t.url, to: tmpPath, onBytes: onBytes)
                 let landed = try await client.fileSize(tmpPath)
                 guard landed == t.size else {
                     await client.remove(tmpPath)

@@ -22,6 +22,10 @@ repository (including the build configuration that produces the app) is
 public, so anyone can rebuild the app with a modified version of the
 library. The app's *own* code remains MIT.
 
-No changes have been made to either library; the app uses AMSMB2 as
-published, fetched by version via Swift Package Manager
-(see `MusicDeduper.xcodeproj` package references for the exact version).
+The app uses a lightly patched fork of AMSMB2, published at
+<https://github.com/peanutslab71/AMSMB2> (branch `guest-anonymous-session`).
+The single change: an empty password now produces an anonymous/guest SMB
+session instead of an NTLM exchange with an empty-password hash, matching
+the macOS client's guest behaviour — some embedded NAS/streamer firmware
+rejects the latter. The change has been offered upstream. libsmb2 is
+unmodified.
