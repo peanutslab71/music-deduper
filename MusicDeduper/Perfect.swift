@@ -200,7 +200,7 @@ final class PerfectStore: ObservableObject {
                     a.1 != b.1 ? a.1 < b.1 : (!a.0.lowercased().hasPrefix("the ") && b.0.lowercased().hasPrefix("the "))
                 }?.0 ?? names[0]
                 proposals.append(MergeProposal(key: key, canonical: best, sources: names,
-                                               fileCounts: counts, accepted: false))
+                                               fileCounts: counts, accepted: true))
             }
 
             let (ff, fo, fb) = (files, folders, bytes)
