@@ -404,8 +404,11 @@ final class PerfectStore: ObservableObject {
     private func finishUndo(restored: Int, failed: Int) {
         busy = false
         lastRunSummary = nil
-        status = "Restored \(restored) change(s)" + (failed > 0 ? ", \(failed) failed." : ".") + " Re-diagnose to see them again."
+        status = "Restored \(restored) change(s)" + (failed > 0 ? ", \(failed) failed." : ".") + " Re-diagnosing…"
         loadRuns()
+        // the library changed back — re-scan so the review reflects the restored
+        // state accurately (works for undoing any run, recent or from history)
+        if diagnosed { diagnose() }
     }
 
     // MARK: Detection helpers
