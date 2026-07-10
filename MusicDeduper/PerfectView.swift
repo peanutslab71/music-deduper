@@ -122,18 +122,6 @@ struct PerfectView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Divider()
-            VStack(alignment: .leading, spacing: 6) {
-                Text("When to analyse").font(.subheadline).fontWeight(.medium)
-                Picker("", selection: $store.autoRun) {
-                    Text("Automatically").tag(true)
-                    Text("Manually").tag(false)
-                }.pickerStyle(.segmented).labelsHidden()
-                Text(store.autoRun
-                     ? "All checks run as soon as you choose a library."
-                     : "Nothing runs until you press Run — then every check runs together.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            Divider()
             VStack(alignment: .leading, spacing: 2) {
                 Text("Removed items go to").font(.caption).foregroundStyle(.secondary)
                 Text("“Music Librarian Quarantine” beside the library — recoverable via Undo.")
