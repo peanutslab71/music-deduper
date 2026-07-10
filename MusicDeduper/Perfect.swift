@@ -282,6 +282,7 @@ final class PerfectStore: ObservableObject {
     @Published var identifyMatched = 0           // running count of tracks matched
     @Published var enriching = false
     @Published var enrichProgress = ""
+    @Published var didIdentify = false       // identify pass has completed at least once
     @Published var enriched = false          // credits pass has run (or was skipped)
     // category-level toggles (the mockup's bulk on/off buttons)
     @Published var applyNames = true       // identify: artist/title/album corrections
@@ -309,7 +310,7 @@ final class PerfectStore: ObservableObject {
 
     func setRoot(_ url: URL) {
         root = url
-        findings = []; renames = []; artists = []; folderGroups = []; tagGroups = []; proposals = []; enriched = false
+        findings = []; renames = []; artists = []; folderGroups = []; tagGroups = []; proposals = []; didIdentify = false; enriched = false
         diagnosed = false
         lastRunSummary = nil
         loadRuns()
@@ -705,7 +706,7 @@ final class PerfectStore: ObservableObject {
     func identify() {
         guard let root, hasAcoustIDKey, !identifying else { return }
         identifying = true; proposals = []; identifyProgress = "Identifying…"
-        recentFinds = []; identifyMatched = 0; enriched = false
+        recentFinds = []; identifyMatched = 0; didIdentify = false; enriched = false
         let box = cancelFlag; box.cancelled = false
         let id = Identifier(apiKey: Identifier.configuredKey)
         Task.detached(priority: .userInitiated) {
@@ -756,6 +757,7 @@ final class PerfectStore: ObservableObject {
         identifying = false; identifyProgress = ""
         proposals = p.sorted { $0.relPath.lowercased() < $1.relPath.lowercased() }
         if !cancelled {
+            didIdentify = true                       // Identify step complete → Next unlocks
             let act = p.filter { $0.isActionable }.count
             status = p.isEmpty
                 ? "Identified \(total) tracks — nothing matched."

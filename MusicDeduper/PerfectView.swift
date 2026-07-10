@@ -53,21 +53,24 @@ struct PerfectView: View {
 
     struct AlbumRef: Identifiable { let id: String }
 
-    @State private var viewStep: Int? = nil          // a past step the user clicked back to
+    // The step the user is on. It NEVER advances on its own — running a pass
+    // (Scan/Identify/Credits) stays on its step and shows the results; the user
+    // presses Next to move on. Back is the step chips.
+    @State private var currentStep = 1
+    private var step: Int { currentStep }
 
-    // The step the work is actually on — it LANDS on Identify/Credits waiting for
-    // you to run them, rather than skipping straight to Review.
-    private var liveStep: Int {
-        if !store.diagnosed { return 1 }                  // Scan (waiting or running)
-        if store.identifying { return 2 }                 // Identify (running)
-        if store.enriching { return 3 }                   // Credits (running)
-        if store.proposals.isEmpty { return 2 }           // scanned, waiting to identify
-        if !store.enriched { return 3 }                   // identified, waiting for credits
-        return 4                                          // Review
+    // A step is reachable once every earlier step's pass has completed.
+    private func canReach(_ n: Int) -> Bool {
+        switch n {
+        case 1:  return true
+        case 2:  return store.diagnosed          // Scan done
+        case 3:  return store.didIdentify        // Identify done
+        case 4:  return store.enriched           // Credits done (or skipped)
+        default: return false
+        }
     }
-    // …and the step being shown (a past one if the user clicked back).
-    private var step: Int { viewStep ?? liveStep }
-    private var viewingPast: Bool { viewStep != nil && viewStep != liveStep }
+    // The current step's own pass has finished (so Next may light up).
+    private var stepDone: Bool { canReach(step + 1) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -85,6 +88,7 @@ struct PerfectView: View {
         }
         .sheet(isPresented: $showApplyConfirm) { applyConfirmSheet }
         .sheet(item: $albumSheet) { ref in albumSheetView(ref.id) }
+        .onChange(of: store.root) { _ in currentStep = 1 }   // new library → back to Scan
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -180,22 +184,25 @@ struct PerfectView: View {
                     Text(stepSubtitle).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                if viewingPast {
-                    Button { viewStep = nil } label: { Label("Back to current step", systemImage: "arrow.uturn.forward") }
-                        .controlSize(.large)
-                } else {
-                    stepAction
+                stepAction
+                if step < 4 && canReach(step + 1) {
+                    Button { currentStep += 1 } label: {
+                        Label("Next", systemImage: "arrow.right").frame(minWidth: 64)
+                    }
+                    .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
                 }
             }
-            if step == 4, !viewingPast, reviewQueueCount > 0 { needsBanner }
+            if step == 4, reviewQueueCount > 0 { needsBanner }
         }
         .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 13)
     }
 
     private func stepChip(_ n: Int, _ label: String) -> some View {
-        let done = liveStep > n, now = step == n, reachable = n <= liveStep
+        // "done" = this step's own pass has finished (its next step is reachable).
+        let done = n < 5 && canReach(n + 1) && n != step
+        let now = step == n, reachable = canReach(n)
         return Button {
-            if reachable { viewStep = (n == liveStep ? nil : n) }
+            if reachable { currentStep = n }
         } label: {
             HStack(spacing: 7) {
                 ZStack {
@@ -245,22 +252,31 @@ struct PerfectView: View {
         if store.identifying || store.enriching || (store.busy && !store.diagnosed) {
             Button("Cancel") { store.cancel() }.controlSize(.large)
         } else if step == 1 {
-            Button { store.explore() } label: { Label("Scan library", systemImage: "magnifyingglass") }
-                .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
+            passButton(stepDone ? "Re-scan" : "Scan library", "magnifyingglass") { store.explore() }
         } else if !store.hasAcoustIDKey {
             Text("needs an AcoustID key").font(.caption).foregroundStyle(.orange)
         } else if step == 2 {
-            Button { store.identify() } label: { Label("Identify tracks", systemImage: "waveform.and.magnifyingglass") }
-                .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
+            passButton(stepDone ? "Re-identify" : "Identify tracks", "waveform.and.magnifyingglass") { store.identify() }
         } else if step == 3 {
-            Button { store.enrich() } label: { Label("Fill credits", systemImage: "text.badge.plus") }
-                .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
-            Button("Skip to review →") { store.enriched = true }.controlSize(.large)
+            passButton(stepDone ? "Re-fill credits" : "Fill credits", "text.badge.plus") { store.enrich() }
+            if !stepDone { Button("Skip to review →") { store.enriched = true }.controlSize(.large) }
         } else {
             Button { store.identify() } label: { Label("Re-identify", systemImage: "arrow.clockwise") }.controlSize(.large)
             if !store.proposals.isEmpty {
                 Button { store.enrich() } label: { Label("Re-fill credits", systemImage: "text.badge.plus") }.controlSize(.large)
             }
+        }
+    }
+
+    // The step's own pass button — prominent while it's the thing to do, quiet
+    // once done (Next becomes the prominent button then).
+    @ViewBuilder private func passButton(_ title: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
+        if stepDone {
+            Button(action: action) { Label(title, systemImage: icon) }
+                .controlSize(.large).buttonStyle(.bordered)
+        } else {
+            Button(action: action) { Label(title, systemImage: icon) }
+                .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
         }
     }
 
@@ -283,14 +299,20 @@ struct PerfectView: View {
 
     // ── MIDDLE: swaps by step ──
     @ViewBuilder private var phasedMiddle: some View {
-        if viewStep == nil && store.busy && !store.diagnosed { workingMiddle(title: "Scanning your library", sub: "reading tags, finding junk and duplicate artists") }
-        else if viewStep == nil && store.identifying { workingMiddle(title: "matched by sound", sub: store.identifyProgress, live: true) }
-        else if viewStep == nil && store.enriching { workingMiddle(title: "looking up credits", sub: store.enrichProgress, live: true, credits: true) }
-        else if step == 1 {
-            if store.diagnosed { cleanupMiddle }     // Scan results
-            else { scanPrompt }                       // not scanned yet
+        switch step {
+        case 1:
+            if store.busy && !store.diagnosed { workingMiddle(title: "Scanning your library", sub: "reading tags, finding junk and duplicate artists") }
+            else if store.diagnosed { cleanupMiddle }   // Scan results
+            else { scanPrompt }                          // not scanned yet
+        case 2:
+            if store.identifying { workingMiddle(title: "matched by sound", sub: store.identifyProgress, live: true) }
+            else { reviewMiddle }                        // name suggestions (or prompt if not run)
+        case 3:
+            if store.enriching { workingMiddle(title: "looking up credits", sub: store.enrichProgress, live: true, credits: true) }
+            else { reviewMiddle }                        // credit/artwork adds (or prompt if not run)
+        default:
+            reviewMiddle                                 // Review
         }
-        else { reviewMiddle }                    // Identify / Credits / Review
     }
 
     private var scanPrompt: some View {
@@ -406,7 +428,7 @@ struct PerfectView: View {
                 showApplyConfirm = true
             } label: { Label("Apply changes", systemImage: "checkmark.circle") }
                 .buttonStyle(.borderedProminent).tint(.purple)
-                .disabled(liveStep != 4 || !store.hasWork || store.busy)
+                .disabled(!canReach(4) || !store.hasWork || store.busy)
         }
         .padding(.horizontal, 14).padding(.vertical, 9)
     }
