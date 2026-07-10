@@ -268,17 +268,32 @@ delivers the cleaned result.
 
 ---
 
-## 10. Open decisions
+## 10. Settled decisions
 
-- **One-shot vs ongoing:** a one-time restore pass, a re-runnable maintenance
-  pass, or both (a full pass and a "new/changed files only" pass).
-- **Delete vs quarantine:** default to moving junk/empties/duplicates to a
-  recoverable quarantine rather than deleting outright, at least until the
-  workflow is trusted.
-- **Authority vs user policy:** when the canonical (MusicBrainz) form disagrees
-  with the user's chosen convention, the user policy is applied on top of the
-  resolved canonical identity.
-- **Classical scope:** include Phase 3 classical tagging or defer.
+- **Usage model:** support **both** a full restore pass over the whole library
+  and an incremental "new/changed files only" re-run. The model tracks what it
+  has already processed so later runs surface only what is new or has drifted.
+- **Removal behaviour:** removed items (junk, empty folders, duplicate tracks)
+  are **quarantined** to a recoverable holding area by default, not deleted;
+  nothing is permanently gone until the user empties the quarantine.
+- **Naming:** the metadata authority determines the *identity* (which artist /
+  album a track really is); where the authority's canonical *form* differs from
+  the user's chosen convention (e.g. "The" handling, `&`/`and`), the difference
+  is **flagged in the review for a manual choice** rather than auto-applied.
+- **Where it works:** **hybrid, stream-as-needed** — Perfect operates against the
+  library wherever it lives (local or server) and pulls each file's audio locally
+  only when it needs to fingerprint/read it, caching temporarily; no full upfront
+  copy.
+- **UI placement:** Perfect is its **own tab** on the main window's top bar
+  (after Browse), with a self-contained diagnose → review → commit flow, separate
+  from the dedupe wizard.
+- **Classical:** the **full classical tag model** (composer / work / movement /
+  ensemble / soloist) is in scope for Phase 3.
+
+### Still open
+- Exact quarantine location and retention (in-library folder vs system Trash vs
+  app-managed store).
+- Duplicate-artist merge granularity in the review (per-artist vs per-album).
 
 ---
 
