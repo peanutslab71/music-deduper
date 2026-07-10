@@ -9,7 +9,7 @@
 import SwiftUI
 
 struct PerfectView: View {
-    @StateObject private var store = PerfectStore()
+    @ObservedObject var store: PerfectStore
     @State private var expanded: Set<String> = []   // all sections collapsed initially — reads as a summary
     @State private var showSettings = false
 
@@ -40,8 +40,8 @@ struct PerfectView: View {
             }
             Spacer()
             if store.diagnosed {
-                Button { store.diagnose() } label: { Label("Re-diagnose", systemImage: "arrow.clockwise") }
-                    .disabled(store.busy)
+                Button { store.explore() } label: { Label("Re-explore", systemImage: "arrow.clockwise") }
+                    .disabled(store.busy || store.checkingTags)
             }
             Button { showSettings.toggle() } label: { Image(systemName: "gearshape") }
                 .help("Settings")
@@ -60,6 +60,18 @@ struct PerfectView: View {
                 }.pickerStyle(.segmented).labelsHidden()
                 Text(store.thoroughness.blurb).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Text("When to analyse").font(.subheadline).fontWeight(.medium)
+                Picker("", selection: $store.autoRun) {
+                    Text("Automatically").tag(true)
+                    Text("Manually").tag(false)
+                }.pickerStyle(.segmented).labelsHidden()
+                Text(store.autoRun
+                     ? "All checks run as soon as you choose a library."
+                     : "Nothing runs until you press Run — then every check runs together.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Divider()
             VStack(alignment: .leading, spacing: 2) {
@@ -81,18 +93,20 @@ struct PerfectView: View {
             Image(systemName: "wand.and.stars").font(.system(size: 40, weight: .light)).foregroundStyle(.purple)
             Text(store.root == nil ? "Choose a music library" : store.root!.lastPathComponent)
                 .font(.title3).fontWeight(.medium)
-            Text("Perfect scans the library and shows what it can tidy — junk files, empty folders, and protected (DRM) tracks — for you to review before anything is changed. Removed items go to a recoverable quarantine.")
+            Text("Perfect looks over the whole library and shows what it can tidy — junk files, empty folders, protected (DRM) tracks, duplicate artist folders, and the same artist tagged under different spellings — for you to review before anything is changed. Removed items go to a recoverable quarantine.")
                 .font(.callout).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).frame(maxWidth: 460)
             HStack(spacing: 10) {
                 Button { store.pickRoot() } label: {
                     Label(store.root == nil ? "Choose library…" : "Change…", systemImage: "folder")
                 }
-                Button { store.diagnose() } label: {
-                    Label("Diagnose", systemImage: "stethoscope").frame(minWidth: 120)
+                if store.root != nil && !store.autoRun {
+                    Button { store.explore() } label: {
+                        Label("Run", systemImage: "play.fill").frame(minWidth: 120)
+                    }
+                    .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
+                    .disabled(store.busy)
                 }
-                .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
-                .disabled(store.root == nil || store.busy)
             }
             Spacer()
             history
@@ -104,7 +118,7 @@ struct PerfectView: View {
         VStack(spacing: 12) {
             Spacer()
             ProgressView()
-            Text(store.progress.isEmpty ? "Diagnosing…" : store.progress)
+            Text(store.progress.isEmpty ? "Exploring…" : store.progress)
                 .foregroundStyle(.secondary)
             Button("Cancel") { store.cancel() }
             Spacer()
@@ -208,23 +222,21 @@ struct PerfectView: View {
                 }
                 Image(systemName: "tag").foregroundStyle(.brown)
                 Text("Artist names in tags").fontWeight(.semibold)
-                if store.tagGroups.isEmpty {
-                    Text("what your server actually reads").font(.caption).foregroundStyle(.secondary)
+                if store.checkingTags {
+                    Text("reading tags…").font(.caption).foregroundStyle(.secondary)
+                } else if store.tagGroups.isEmpty {
+                    Text("no split spellings found").font(.caption).foregroundStyle(.secondary)
                 } else {
                     Text("\(store.tagGroups.count) split · pick one spelling").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if store.checkingTags {
                     HStack(spacing: 6) { ProgressView().controlSize(.small); Text(store.tagProgress).font(.caption).foregroundStyle(.secondary) }
-                    Button("Cancel") { store.cancel() }.controlSize(.small)
-                } else if store.tagGroups.isEmpty {
-                    Button("Check artist tags") { expanded.insert("tags"); store.checkTags() }.controlSize(.small)
-                } else {
+                } else if !store.tagGroups.isEmpty {
                     let allOn = store.tagGroups.allSatisfy { $0.accepted }
                     Button(allOn ? "Deselect all" : "Select all") {
                         for i in store.tagGroups.indices { store.tagGroups[i].accepted = !allOn }
                     }.controlSize(.small)
-                    Button("Re-check") { store.checkTags() }.controlSize(.small)
                 }
             }
             .padding(.vertical, 6).padding(.horizontal, 10)

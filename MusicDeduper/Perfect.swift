@@ -131,8 +131,16 @@ final class PerfectStore: ObservableObject {
             if diagnosed && !busy { diagnose() }   // re-scope the review to the new level
         }
     }
-    @Published var status = "Choose a music library to diagnose."
+    // run every check automatically on choosing a library, or wait for one Run
+    // press — persisted; defaults to automatic. Never task-by-task.
+    @Published var autoRun: Bool = (UserDefaults.standard.object(forKey: "perfectAutoRun") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(autoRun, forKey: "perfectAutoRun") }
+    }
+    @Published var status = "Choose a music library to explore."
     @Published var busy = false
+    // when true, the tag pass runs automatically after the structure scan (one
+    // exploration); a thoroughness re-scope re-scans structure only.
+    private var chainTags = false
     @Published var progress = ""
     @Published var findings: [PerfectFinding] = []
     @Published var merges: [MergeProposal] = []
@@ -160,11 +168,22 @@ final class PerfectStore: ObservableObject {
 
     func setRoot(_ url: URL) {
         root = url
-        findings = []
+        findings = []; merges = []; renames = []; tagGroups = []
         diagnosed = false
         lastRunSummary = nil
-        status = "Ready to diagnose \(url.lastPathComponent)."
         loadRuns()
+        if autoRun {
+            explore()
+        } else {
+            status = "Ready — press Run to explore \(url.lastPathComponent)."
+        }
+    }
+
+    /// One exploration pass: structure scan followed by the artist-tag scan.
+    /// This is the single entry point — there are no per-check buttons.
+    func explore() {
+        chainTags = true
+        diagnose()
     }
 
     func pickRoot() {
@@ -331,7 +350,14 @@ final class PerfectStore: ObservableObject {
         if !renames.isEmpty { found2.append("\(renames.count) untidy name(s)") }
         if drm > 0 { found2.append("\(drm) protected track(s)") }
         if !found2.isEmpty { parts.append("found " + found2.joined(separator: ", ")) }
-        status = cancelled ? "Diagnosis cancelled." : parts.joined(separator: " — ") + "."
+        status = cancelled ? "Exploration cancelled." : parts.joined(separator: " — ") + "."
+        // second half of a full exploration: read the tags too
+        if chainTags && !cancelled {
+            chainTags = false
+            checkTags()
+        } else {
+            chainTags = false
+        }
     }
 
     /// Safe cosmetic tidy of a folder name — trailing underscores (stripped

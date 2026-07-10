@@ -10,6 +10,9 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var store = DedupStore()
+    // one Perfect session for the whole app run, so leaving and returning to the
+    // Perfect step keeps everything it found
+    @StateObject private var perfect = PerfectStore()
     @State private var step: WizardStep = .source
     @State private var reviewTab = 0            // 0 duplicates · 1 library
     @State private var destFolder: URL? = nil
@@ -43,7 +46,7 @@ struct ContentView: View {
         case .browse:
             ServerFilesView(store: store)
         case .perfect:
-            PerfectView()
+            PerfectView(store: perfect)
         }
     }
 
