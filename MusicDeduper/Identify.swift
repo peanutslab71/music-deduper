@@ -91,10 +91,30 @@ struct TrackProposal: Identifiable {
         return norm(curArtist) != norm(newArtist)
     }
 
-    var artistChanged: Bool { !newArtist.isEmpty && newArtist != curArtist }
-    var titleChanged: Bool  { !newTitle.isEmpty && newTitle != curTitle }
-    var albumChanged: Bool  { !chosenAlbum.isEmpty && chosenAlbum != curAlbum }
+    var artistChanged: Bool { !newArtist.isEmpty && Self.differs(newArtist, curArtist) }
+    var titleChanged: Bool  { !newTitle.isEmpty && Self.differs(newTitle, curTitle) }
+    var albumChanged: Bool  { !chosenAlbum.isEmpty && Self.differs(chosenAlbum, curAlbum) }
     var hasChange: Bool { artistChanged || titleChanged || albumChanged }
+
+    /// Real difference test used for "is this a change worth showing?". A value that
+    /// only differs by typography — curly vs straight quotes/apostrophes, dash style,
+    /// an ellipsis character, or whitespace — is NOT a change: it's invisible to the
+    /// user and pointless churn. Genuine spelling/word/case differences still count.
+    static func differs(_ a: String, _ b: String) -> Bool { typoFold(a) != typoFold(b) }
+
+    static func typoFold(_ s: String) -> String {
+        var t = s
+        let map: [(String, String)] = [
+            ("\u{2018}", "'"), ("\u{2019}", "'"), ("\u{201B}", "'"), ("\u{02BC}", "'"), ("`", "'"),
+            ("\u{201C}", "\""), ("\u{201D}", "\""), ("\u{201E}", "\""),
+            ("\u{2013}", "-"), ("\u{2014}", "-"), ("\u{2015}", "-"), ("\u{2212}", "-"),
+            ("\u{2026}", "..."), ("\u{00A0}", " ")
+        ]
+        for (from, to) in map { t = t.replacingOccurrences(of: from, with: to) }
+        // collapse runs of whitespace and trim
+        t = t.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        return t
+    }
 }
 
 // MARK: - Identifier
