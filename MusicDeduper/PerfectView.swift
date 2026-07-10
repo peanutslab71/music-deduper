@@ -134,15 +134,14 @@ struct PerfectView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    if store.groups.isEmpty && store.merges.isEmpty && store.renames.isEmpty {
+                    if store.groups.isEmpty && store.artists.isEmpty && store.renames.isEmpty && !store.checkingTags {
                         allClean
                     }
-                    if !store.merges.isEmpty { mergesSection }
+                    artistsSection
                     if !store.renames.isEmpty { renamesSection }
                     ForEach(store.groups, id: \.kind.rawValue) { group in
                         section(group.kind, group.items)
                     }
-                    tagPreview
                 }
                 .padding(16)
             }
@@ -152,133 +151,104 @@ struct PerfectView: View {
         }
     }
 
-    // Duplicate-artist merges — judgement calls; pick the name to keep
-    private var mergesSection: some View {
-        let isOpen = expanded.contains("merge")
-        return VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Button {
-                    if isOpen { expanded.remove("merge") } else { expanded.insert("merge") }
-                } label: {
-                    Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption).foregroundStyle(.secondary)
-                }.buttonStyle(.plain)
-                Image(systemName: "person.2").foregroundStyle(.pink)
-                Text("Merge duplicate artists").fontWeight(.semibold)
-                Text("\(store.merges.count) · review each").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                let allOn = store.merges.allSatisfy { $0.accepted }
-                Button(allOn ? "Deselect all" : "Select all") {
-                    for i in store.merges.indices { store.merges[i].accepted = !allOn }
-                }.controlSize(.small)
-            }
-            .padding(.vertical, 6).padding(.horizontal, 10)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.pink.opacity(0.07)))
-
-            if isOpen {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(store.merges) { m in mergeRow(m) }
-                }
-                .padding(.top, 6).padding(.leading, 6)
-            }
-        }
-    }
-
-    private func mergeRow(_ m: MergeProposal) -> some View {
-        HStack(spacing: 8) {
-            Toggle("", isOn: Binding(
-                get: { m.accepted },
-                set: { v in if let i = store.merges.firstIndex(where: { $0.id == m.id }) { store.merges[i].accepted = v } }
-            )).labelsHidden().toggleStyle(.checkbox)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(zip(m.sources, m.fileCounts).map { "\($0.0) (\($0.1))" }.joined(separator: "  +  "))
-                    .font(.caption).lineLimit(1)
-                HStack(spacing: 6) {
-                    Text("keep:").font(.caption2).foregroundStyle(.secondary)
-                    Picker("", selection: Binding(
-                        get: { m.canonical },
-                        set: { v in if let i = store.merges.firstIndex(where: { $0.id == m.id }) { store.merges[i].canonical = v } }
-                    )) {
-                        ForEach(m.sources, id: \.self) { Text($0).tag($0) }
-                    }.labelsHidden().frame(maxWidth: 260)
-                }
-            }
-            Spacer()
-        }
-        .padding(.vertical, 1)
-    }
-
-    // Tag-level artist splits — the same artist written under several spellings
-    // inside the files. Pick one spelling; the rest are rewritten to it.
-    @ViewBuilder private var tagPreview: some View {
-        let isOpen = expanded.contains("tags")
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                if !store.tagGroups.isEmpty {
-                    Button {
-                        if isOpen { expanded.remove("tags") } else { expanded.insert("tags") }
-                    } label: {
-                        Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption).foregroundStyle(.secondary)
-                    }.buttonStyle(.plain)
-                }
-                Image(systemName: "tag").foregroundStyle(.brown)
-                Text("Artist names in tags").fontWeight(.semibold)
-                if store.checkingTags {
-                    Text("reading tags…").font(.caption).foregroundStyle(.secondary)
-                } else if store.tagGroups.isEmpty {
-                    Text("no split spellings found").font(.caption).foregroundStyle(.secondary)
-                } else {
-                    Text("\(store.tagGroups.count) split · pick one spelling").font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                if store.checkingTags {
-                    HStack(spacing: 6) { ProgressView().controlSize(.small); Text(store.tagProgress).font(.caption).foregroundStyle(.secondary) }
-                } else if !store.tagGroups.isEmpty {
-                    let allOn = store.tagGroups.allSatisfy { $0.accepted }
-                    Button(allOn ? "Deselect all" : "Select all") {
-                        for i in store.tagGroups.indices { store.tagGroups[i].accepted = !allOn }
-                    }.controlSize(.small)
-                }
-            }
-            .padding(.vertical, 6).padding(.horizontal, 10)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.brown.opacity(0.07)))
-
-            if !store.tagGroups.isEmpty && isOpen {
-                Text("Each of these artists is tagged under more than one spelling — a server reads each spelling as a separate artist. The most common one is kept by default; change it if the other is correct.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 8).padding(.horizontal, 6)
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(store.tagGroups) { g in tagRow(g) }
-                }
-                .padding(.top, 6).padding(.leading, 6)
-            }
-        }
-    }
-
-    private func tagRow(_ g: TagArtistGroup) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Toggle("", isOn: Binding(
-                get: { g.accepted },
-                set: { v in if let i = store.tagGroups.firstIndex(where: { $0.id == g.id }) { store.tagGroups[i].accepted = v } }
-            )).labelsHidden().toggleStyle(.checkbox)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(g.variants.map { "\($0.name) (\($0.count))" }.joined(separator: "   vs   "))
-                    .font(.system(size: 11, design: .monospaced)).lineLimit(1).truncationMode(.middle)
-                HStack(spacing: 6) {
-                    Text("keep:").font(.caption2).foregroundStyle(.secondary)
-                    Picker("", selection: Binding(
-                        get: { g.canonical },
-                        set: { v in if let i = store.tagGroups.firstIndex(where: { $0.id == g.id }) { store.tagGroups[i].canonical = v } }
-                    )) {
-                        ForEach(g.variants, id: \.name) { Text($0.name).tag($0.name) }
-                    }.labelsHidden().frame(maxWidth: 260)
-                    if g.willChange > 0 {
-                        Text("rewrites \(g.willChange) track(s)").font(.caption2).foregroundStyle(.secondary)
+    // One artist-centric list — a folder split, a tag split, or both. One "keep"
+    // name drives whichever fixes are needed (merge folders and/or rewrite tags).
+    @ViewBuilder private var artistsSection: some View {
+        // show the section while tags are still being read, or if there's anything to fix
+        if store.checkingTags || !store.artists.isEmpty {
+            let isOpen = expanded.contains("artists")
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
+                    if !store.artists.isEmpty {
+                        Button {
+                            if isOpen { expanded.remove("artists") } else { expanded.insert("artists") }
+                        } label: {
+                            Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption).foregroundStyle(.secondary)
+                        }.buttonStyle(.plain)
+                    }
+                    Image(systemName: "person.2").foregroundStyle(.pink)
+                    Text("Artists").fontWeight(.semibold)
+                    if store.checkingTags {
+                        Text("reading tags…").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        let applicable = store.artists.filter { store.artistHasApplicableWork($0) }.count
+                        Text("\(applicable) to fix · pick one name each").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if store.checkingTags {
+                        HStack(spacing: 6) { ProgressView().controlSize(.small); Text(store.tagProgress).font(.caption).foregroundStyle(.secondary) }
+                    } else if !store.artists.isEmpty {
+                        let allOn = store.artists.allSatisfy { $0.accepted }
+                        Button(allOn ? "Deselect all" : "Select all") {
+                            for i in store.artists.indices { store.artists[i].accepted = !allOn }
+                        }.controlSize(.small)
                     }
                 }
+                .padding(.vertical, 6).padding(.horizontal, 10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.pink.opacity(0.07)))
+
+                if !store.artists.isEmpty && isOpen {
+                    Text("Each of these is one artist that shows up more than once — as separate folders, tagged under different spellings, or both. Pick the one name to keep; the folders are merged on disk to match.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 8).padding(.horizontal, 6)
+                    if !store.tagWritingEnabled && store.artists.contains(where: { $0.tagRewrites > 0 }) {
+                        Label("Rewriting the tags themselves is paused for now — it can drop other tag data (like the release year), so those files aren't changed yet. Folder merges still apply.",
+                              systemImage: "pause.circle")
+                            .font(.caption2).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                            .padding(.horizontal, 6)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(store.artists) { a in artistRow(a) }
+                    }
+                    .padding(.top, 6).padding(.leading, 6)
+                }
+            }
+        }
+    }
+
+    private func artistRow(_ a: ArtistIssue) -> some View {
+        let tagOn = store.tagWritingEnabled
+        let willMerge = a.folderMerges > 0
+        let willTag = tagOn && a.tagRewrites > 0
+        let applicable = willMerge || willTag              // anything to do right now
+        let tagPaused = a.tagRewrites > 0 && !tagOn        // tag fix wanted but gated off
+        // action summary honouring the gate
+        var bits: [String] = []
+        if willMerge { bits.append("merges \(a.folderSources.count) folders") }
+        if willTag { bits.append("rewrites \(a.tagRewrites) tag(s)") }
+        let summary = bits.isEmpty ? (tagPaused ? "tag fix paused" : "already consistent")
+                                   : bits.joined(separator: " · ")
+        return HStack(alignment: .top, spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { a.accepted && applicable },
+                set: { v in if let i = store.artists.firstIndex(where: { $0.id == a.id }) { store.artists[i].accepted = v } }
+            )).labelsHidden().toggleStyle(.checkbox).disabled(!applicable)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Picker("", selection: Binding(
+                        get: { a.canonical },
+                        set: { v in if let i = store.artists.firstIndex(where: { $0.id == a.id }) { store.artists[i].canonical = v } }
+                    )) {
+                        ForEach(a.candidates, id: \.self) { Text($0).tag($0) }
+                    }.labelsHidden().frame(maxWidth: 260).disabled(!applicable)
+                    Text(a.kindLabel).font(.caption2).foregroundStyle(.secondary)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.12)))
+                    Text(summary).font(.caption2).foregroundStyle(applicable ? .secondary : .tertiary)
+                    if tagPaused {
+                        Image(systemName: "pause.circle").font(.caption2).foregroundStyle(.orange)
+                            .help("Rewriting tags is paused until it's proven not to lose other tag data")
+                    }
+                }
+                // show the spellings/folders being unified
+                Text(a.candidates.joined(separator: "   ·   "))
+                    .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                    .lineLimit(1).truncationMode(.middle)
             }
             Spacer()
         }
         .padding(.vertical, 1)
+        .opacity(applicable ? 1 : 0.6)
     }
 
     // Untidy folder names — editable proposed name
@@ -397,12 +367,13 @@ struct PerfectView: View {
     }
 
     private var footer: some View {
-        let mergeCount = store.merges.filter { $0.accepted }.count
-        let tagCount = store.tagGroups.filter { $0.accepted }.reduce(0) { $0 + $1.willChange }
+        let acc = store.artists.filter { $0.accepted }
+        let mergeCount = acc.reduce(0) { $0 + $1.folderMerges }
+        let tagCount = store.tagWritingEnabled ? acc.reduce(0) { $0 + $1.tagRewrites } : 0
         return HStack {
             if store.hasWork {
                 Text("\(store.acceptedCount) cleanup(s)"
-                     + (mergeCount > 0 ? ", \(mergeCount) merge(s)" : "")
+                     + (mergeCount > 0 ? ", \(mergeCount) folder merge(s)" : "")
                      + (tagCount > 0 ? ", \(tagCount) tag fix(es)" : "") + " selected")
                     .font(.caption).foregroundStyle(.secondary)
             } else {

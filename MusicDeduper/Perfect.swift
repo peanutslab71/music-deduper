@@ -61,15 +61,12 @@ struct PerfectFinding: Identifiable {
     var accepted: Bool
 }
 
-/// A proposed merge of several folders whose names mean the same artist
-/// (e.g. "Buzzcocks" + "The Buzzcocks"). The user picks which name to keep.
-struct MergeProposal: Identifiable {
-    let id = UUID()
-    let key: String                 // normalized collision key
-    var canonical: String           // chosen folder name to keep (one of `sources`)
+/// Raw folder-level detection: top-level folders whose names mean the same
+/// artist (e.g. "Buzzcocks" + "The Buzzcocks"). Internal — folded into ArtistIssue.
+struct FolderGroup {
+    let key: String
     let sources: [String]           // the colliding top-level folder names
     let fileCounts: [Int]           // audio-file count per source (same order)
-    var accepted: Bool
 }
 
 /// One file caught in a tag-level artist split, with the exact artist spelling
@@ -80,18 +77,55 @@ struct TagMember {
     let oldName: String
 }
 
-/// One artist that appears in the embedded tags under several spellings
-/// (e.g. "Buzzcocks" and "The Buzzcocks") — a tag-level split that servers
-/// like Roon read as two different artists. The user picks the one correct
-/// spelling; every other spelling's tags are rewritten to it.
-struct TagArtistGroup: Identifiable {
-    let id = UUID()
+/// Raw tag-level detection: one artist written under several spellings in the
+/// files' tags. Internal — folded into ArtistIssue.
+struct TagGroup {
     let key: String
     let variants: [(name: String, count: Int)]   // spelling → track count
-    var canonical: String                        // editable — the spelling to keep
+    let members: [TagMember]                      // every file carrying this key
+}
+
+/// One artist that needs attention — a folder split, a tag split, or both.
+/// The user picks ONE name to keep; applying it does only what's wrong for this
+/// artist: merges the differing folders and/or rewrites the differing tags, all
+/// to the same name, so the folder on disk and the tags a server reads agree.
+struct ArtistIssue: Identifiable {
+    let id = UUID()
+    let key: String
+    var canonical: String            // editable — the one name for folder AND tags
     var accepted: Bool
-    let members: [TagMember]                      // every file in the group
-    var willChange: Int { members.filter { $0.oldName != canonical }.count }
+    let candidates: [String]         // union of folder names + tag spellings, for the picker
+    // folder side (empty / single = no folder work)
+    let folderSources: [String]
+    let folderFileCounts: [Int]
+    // tag side
+    let tagVariants: [(name: String, count: Int)]
+    let tagMembers: [TagMember]
+
+    var hasFolderSplit: Bool { folderSources.count > 1 }
+    var hasTagSplit: Bool { tagVariants.count > 1 }
+    /// number of tag rewrites this artist would make with the current `canonical`
+    var tagRewrites: Int { tagMembers.filter { $0.oldName != canonical }.count }
+    /// folders that would be folded away (all sources except the kept one)
+    var folderMerges: Int { hasFolderSplit ? folderSources.filter { $0 != canonical }.count : 0 }
+    var hasWork: Bool { folderMerges > 0 || tagRewrites > 0 }
+
+    /// one-line summary of what applying this would do
+    var actionSummary: String {
+        var bits: [String] = []
+        if folderMerges > 0 { bits.append("merges \(folderSources.count) folders") }
+        if tagRewrites > 0 { bits.append("rewrites \(tagRewrites) tag(s)") }
+        return bits.isEmpty ? "already consistent" : bits.joined(separator: " · ")
+    }
+    /// short kind label
+    var kindLabel: String {
+        switch (hasFolderSplit, hasTagSplit) {
+        case (true, true):  return "folder + tags"
+        case (true, false): return "folder"
+        case (false, true): return "tags"
+        default:            return ""
+        }
+    }
 }
 
 /// A proposed rename of a folder with an obviously untidy name (trailing
@@ -143,8 +177,12 @@ final class PerfectStore: ObservableObject {
     private var chainTags = false
     @Published var progress = ""
     @Published var findings: [PerfectFinding] = []
-    @Published var merges: [MergeProposal] = []
     @Published var renames: [RenameProposal] = []
+    // one artist-centric list, folding folder merges and tag fixes together
+    @Published var artists: [ArtistIssue] = []
+    // raw detection, kept internally and combined into `artists`
+    private var folderGroups: [FolderGroup] = []
+    private var tagGroups: [TagGroup] = []
     @Published var diagnosed = false
 
     // commit-result summary
@@ -154,10 +192,20 @@ final class PerfectStore: ObservableObject {
     // persistent run history (each run's quarantine folder holds a run.json)
     @Published var runs: [RunRecord] = []
 
-    // tag-level artist inconsistencies (Phase 2 preview — read-only for now)
-    @Published var tagGroups: [TagArtistGroup] = []
     @Published var checkingTags = false
     @Published var tagProgress = ""
+
+    // Rewriting tags in place is PAUSED until a lossless writer lands: the current
+    // tag library rewrites the whole tag and drops fields it doesn't model (e.g.
+    // the release year), which would damage files. Detection and folder merges are
+    // safe and stay on; only the tag write-back is gated by this flag.
+    let tagWritingEnabled = false
+
+    /// work this artist would actually apply right now — folder merges always,
+    /// tag rewrites only when tag-writing is enabled
+    func artistHasApplicableWork(_ a: ArtistIssue) -> Bool {
+        a.folderMerges > 0 || (tagWritingEnabled && a.tagRewrites > 0)
+    }
 
     private let cancelFlag = CancelBox()
 
@@ -168,7 +216,7 @@ final class PerfectStore: ObservableObject {
 
     func setRoot(_ url: URL) {
         root = url
-        findings = []; merges = []; renames = []; tagGroups = []
+        findings = []; renames = []; artists = []; folderGroups = []; tagGroups = []
         diagnosed = false
         lastRunSummary = nil
         loadRuns()
@@ -270,29 +318,27 @@ final class PerfectStore: ObservableObject {
 
             // duplicate-artist folders: top-level folders whose names normalise
             // to the same artist (Buzzcocks / The Buzzcocks; & vs and; "X, The")
-            var proposals: [MergeProposal] = []
+            var folderGroups: [FolderGroup] = []
             let topDirs = allDirs.filter { $0.deletingLastPathComponent().path == root.path
                                            && $0.lastPathComponent != "Music Librarian Quarantine" }
             var byKey: [String: [URL]] = [:]
             for d in topDirs { byKey[Self.artistKey(d.lastPathComponent), default: []].append(d) }
             for (key, dirs) in byKey where dirs.count > 1 {
                 let names = dirs.map { $0.lastPathComponent }
-                let counts = dirs.map { d in
-                    (fm.enumerator(at: d, includingPropertiesForKeys: nil)?
-                        .allObjects.compactMap { $0 as? URL }.filter { Self.isAudio($0) }.count) ?? 0
+                let counts = dirs.map { d -> Int in
+                    var c = 0
+                    if let e = fm.enumerator(at: d, includingPropertiesForKeys: nil) {
+                        while let f = e.nextObject() as? URL { if Self.isAudio(f) { c += 1 } }
+                    }
+                    return c
                 }
-                // default: keep the name with the most audio (ties: the "The …" form)
-                let best = zip(names, counts).max { a, b in
-                    a.1 != b.1 ? a.1 < b.1 : (!a.0.lowercased().hasPrefix("the ") && b.0.lowercased().hasPrefix("the "))
-                }?.0 ?? names[0]
-                proposals.append(MergeProposal(key: key, canonical: best, sources: names,
-                                               fileCounts: counts, accepted: true))
+                folderGroups.append(FolderGroup(key: key, sources: names, fileCounts: counts))
             }
 
             // bad folder names — safe cosmetic tidy. Skip empties (being removed)
             // and anything under a merge source (its contents move during merge).
             let emptyPaths = Set(found.filter { $0.kind == .emptyFolder }.map { $0.url.path })
-            let mergeSrcRoots = proposals.flatMap { p in p.sources.map { root.appendingPathComponent($0).path + "/" } }
+            let mergeSrcRoots = folderGroups.flatMap { g in g.sources.map { root.appendingPathComponent($0).path + "/" } }
             var renameProposals: [RenameProposal] = []
             for d in allDirs {
                 if emptyPaths.contains(d.path) { continue }
@@ -321,8 +367,8 @@ final class PerfectStore: ObservableObject {
             }
 
             let (ff, fo, fb) = (files, folders, bytes)
-            await self.finishDiagnose(found: found,
-                                      merges: proposals.sorted { $0.canonical.lowercased() < $1.canonical.lowercased() },
+            let fg = folderGroups
+            await self.finishDiagnose(found: found, folderGroups: fg,
                                       renames: filteredRenames.sorted { $0.relPath.lowercased() < $1.relPath.lowercased() },
                                       files: ff, folders: fo, bytes: fb, cancelled: box.cancelled)
         }
@@ -330,13 +376,14 @@ final class PerfectStore: ObservableObject {
 
     private func setProgress(_ s: String) { progress = s }
 
-    private func finishDiagnose(found: [PerfectFinding], merges m: [MergeProposal],
+    private func finishDiagnose(found: [PerfectFinding], folderGroups fg: [FolderGroup],
                                renames r: [RenameProposal],
                                files: Int, folders: Int, bytes: Int64, cancelled: Bool) {
         findings = found.sorted { $0.relPath.lowercased() < $1.relPath.lowercased() }
         // gate by thoroughness (junk/empties/DRM always; renames Standard+; merges Thorough)
-        merges = thoroughness.doesMerges ? m : []
+        folderGroups = fg
         renames = thoroughness.doesRenames ? r : []
+        rebuildArtists()
         totalFiles = files; totalFolders = folders; totalBytes = bytes
         busy = false; diagnosed = !cancelled; progress = ""
         let junk = found.filter { $0.kind == .junk }.count
@@ -346,7 +393,7 @@ final class PerfectStore: ObservableObject {
         var found2: [String] = []
         if junk > 0 { found2.append("\(junk) junk") }
         if empties > 0 { found2.append("\(empties) empty folder(s)") }
-        if !merges.isEmpty { found2.append("\(merges.count) duplicate artist(s)") }
+        if !artists.isEmpty { found2.append("\(artists.count) artist(s) to fix") }
         if !renames.isEmpty { found2.append("\(renames.count) untidy name(s)") }
         if drm > 0 { found2.append("\(drm) protected track(s)") }
         if !found2.isEmpty { parts.append("found " + found2.joined(separator: ", ")) }
@@ -358,6 +405,55 @@ final class PerfectStore: ObservableObject {
         } else {
             chainTags = false
         }
+    }
+
+    /// Combine the raw folder-level and tag-level detections into one
+    /// artist-centric list. Preserves the user's `accepted`/`canonical` edits
+    /// across rebuilds (matched by key), so a later tag scan or a thoroughness
+    /// change doesn't wipe choices already made.
+    private func rebuildArtists() {
+        // remember prior user edits
+        let prior = Dictionary(uniqueKeysWithValues: artists.map { ($0.key, $0) })
+
+        let folderByKey = Dictionary(uniqueKeysWithValues: folderGroups.map { ($0.key, $0) })
+        let tagByKey = Dictionary(uniqueKeysWithValues: tagGroups.map { ($0.key, $0) })
+        let allKeys = Set(folderByKey.keys).union(tagByKey.keys)
+
+        var result: [ArtistIssue] = []
+        for key in allKeys {
+            let fg = folderByKey[key]
+            let tg = tagByKey[key]
+            // folder side only counts when the level allows folder merges
+            let folderSources = (thoroughness.doesMerges ? fg?.sources : nil) ?? []
+            let folderCounts  = (thoroughness.doesMerges ? fg?.fileCounts : nil) ?? []
+            let tagVariants = tg?.variants ?? []
+            let tagMembers = tg?.members ?? []
+
+            let hasFolderSplit = folderSources.count > 1
+            let hasTagSplit = tagVariants.count > 1
+            guard hasFolderSplit || hasTagSplit else { continue }   // nothing to do
+
+            // candidate names for the picker: union of folder names + tag spellings,
+            // ranked by how many files back each name (tags + matching folder)
+            var score: [String: Int] = [:]
+            for (n, c) in tagVariants { score[n, default: 0] += c }
+            for (n, c) in zip(folderSources, folderCounts) { score[n, default: 0] += c }
+            let candidates = score.sorted { $0.value != $1.value ? $0.value > $1.value
+                                                                 : $0.key.lowercased() < $1.key.lowercased() }.map { $0.key }
+
+            // default kept name: prior choice if still valid, else the top candidate
+            let canonical: String = {
+                if let p = prior[key], candidates.contains(p.canonical) { return p.canonical }
+                return candidates.first ?? (tagVariants.first?.name ?? folderSources.first ?? "")
+            }()
+            let accepted = prior[key]?.accepted ?? true
+
+            result.append(ArtistIssue(key: key, canonical: canonical, accepted: accepted,
+                                      candidates: candidates,
+                                      folderSources: folderSources, folderFileCounts: folderCounts,
+                                      tagVariants: tagVariants, tagMembers: tagMembers))
+        }
+        artists = result.sorted { $0.canonical.lowercased() < $1.canonical.lowercased() }
     }
 
     /// Safe cosmetic tidy of a folder name — trailing underscores (stripped
@@ -386,7 +482,7 @@ final class PerfectStore: ObservableObject {
 
     func checkTags() {
         guard let root, !checkingTags else { return }
-        checkingTags = true; tagGroups = []; tagProgress = "Reading tags…"
+        checkingTags = true; tagProgress = "Reading tags…"
         let box = cancelFlag
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
@@ -408,29 +504,28 @@ final class PerfectStore: ObservableObject {
             // group exact spellings by normalised key; keep only real splits
             var byKey: [String: [(String, Int)]] = [:]
             for (name, c) in counts { byKey[Self.artistKey(name), default: []].append((name, c)) }
-            let groups = byKey.compactMap { (k, v) -> TagArtistGroup? in
+            let groups = byKey.compactMap { (k, v) -> TagGroup? in
                 guard v.count > 1 else { return nil }
                 let variants = v.sorted { $0.1 > $1.1 }
-                let canonical = variants[0].0          // default: the most common spelling
                 let members = variants.flatMap { (name, _) in
                     (filesByName[name] ?? []).map { TagMember(url: $0, relPath: Self.rel($0, root), oldName: name) }
                 }
-                return TagArtistGroup(key: k, variants: variants, canonical: canonical,
-                                      accepted: true, members: members)
-            }.sorted { $0.variants[0].name.lowercased() < $1.variants[0].name.lowercased() }
+                return TagGroup(key: k, variants: variants, members: members)
+            }
             await self.finishTagCheck(groups: groups, tracks: seen, cancelled: box.cancelled)
         }
     }
 
     private func setTagProgress(_ s: String) { tagProgress = s }
 
-    private func finishTagCheck(groups: [TagArtistGroup], tracks: Int, cancelled: Bool) {
+    private func finishTagCheck(groups: [TagGroup], tracks: Int, cancelled: Bool) {
         checkingTags = false; tagProgress = ""
-        tagGroups = groups
+        if !cancelled { tagGroups = groups; rebuildArtists() }
         if !cancelled {
-            status = groups.isEmpty
+            let splits = artists.filter { $0.hasTagSplit }.count
+            status = splits == 0
                 ? "Read \(tracks) tags — no split artist spellings found."
-                : "Read \(tracks) tags — \(groups.count) artist(s) split across different spellings."
+                : "Read \(tracks) tags — \(splits) artist(s) split across different spellings."
         }
     }
 
@@ -454,24 +549,26 @@ final class PerfectStore: ObservableObject {
 
     var hasWork: Bool {
         findings.contains { $0.accepted && $0.kind.safe }
-            || merges.contains { $0.accepted }
             || renames.contains { $0.accepted && $0.newName != $0.oldName }
-            || tagGroups.contains { $0.accepted && $0.willChange > 0 }
+            || artists.contains { $0.accepted && artistHasApplicableWork($0) }
     }
 
     func commit() {
         guard let root, hasWork else { return }
         busy = true; status = "Applying changes…"
         let removals = findings.filter { $0.accepted && $0.kind.safe }.map { ($0.relPath, $0.kind.rawValue) }
-        let accMerges = merges.filter { $0.accepted }.map { ($0.canonical, $0.sources) }
+        // folder merges from accepted artists that have a folder split
+        let accMerges = artists.filter { $0.accepted && $0.folderMerges > 0 }
+            .map { ($0.canonical, $0.folderSources) }
         let accRenames = renames.filter { $0.accepted && $0.newName != $0.oldName }
             .map { ($0.relPath, $0.newName) }
-        // tag rewrites: (file, relPath, oldArtist, newArtist) for every member
-        // whose current spelling differs from the chosen canonical one
-        let accTagEdits: [(URL, String, String, String)] = tagGroups
-            .filter { $0.accepted && $0.willChange > 0 }
-            .flatMap { g in g.members.filter { $0.oldName != g.canonical }
-                .map { ($0.url, $0.relPath, $0.oldName, g.canonical) } }
+        // tag rewrites from accepted artists: (file, relPath, oldArtist, newArtist)
+        // for every member whose current spelling differs from the kept name.
+        // Gated off until the tag writer is proven lossless — folder merges still run.
+        let accTagEdits: [(URL, String, String, String)] = tagWritingEnabled ? artists
+            .filter { $0.accepted && $0.tagRewrites > 0 }
+            .flatMap { a in a.tagMembers.filter { $0.oldName != a.canonical }
+                .map { ($0.url, $0.relPath, $0.oldName, a.canonical) } } : []
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
@@ -568,9 +665,8 @@ final class PerfectStore: ObservableObject {
         lastQuarantine = quarantine
         lastRunSummary = "Applied \(count) change(s)."
         findings.removeAll { $0.accepted && $0.kind.safe }
-        merges.removeAll { $0.accepted }
         renames.removeAll { $0.accepted && $0.newName != $0.oldName }
-        tagGroups.removeAll { $0.accepted && $0.willChange > 0 }
+        artists.removeAll { $0.accepted && artistHasApplicableWork($0) }
         status = lastRunSummary ?? status
         loadRuns()
     }
