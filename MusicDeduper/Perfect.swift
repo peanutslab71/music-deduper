@@ -227,7 +227,7 @@ final class PerfectStore: ObservableObject {
 
             if let en = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
                                       options: []) {
-                for case let u as URL in en {
+                while let u = en.nextObject() as? URL {
                     if box.cancelled { break }
                     let v = try? u.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
                     if v?.isDirectory == true {
@@ -251,7 +251,7 @@ final class PerfectStore: ObservableObject {
                     if let junkReason = Self.junkReason(u) {
                         found.append(PerfectFinding(kind: .junk, url: u, relPath: rel,
                                                     detail: junkReason, bytes: size, accepted: true))
-                    } else if Self.isAudio(u), Self.isDRM(u) {
+                    } else if Self.isAudio(u), await Self.isDRM(u) {
                         found.append(PerfectFinding(kind: .drm, url: u, relPath: rel,
                                                     detail: "FairPlay-protected — most players can't play this",
                                                     bytes: size, accepted: false))
@@ -394,7 +394,7 @@ final class PerfectStore: ObservableObject {
             var filesByName: [String: [URL]] = [:]  // exact artist string → its files
             var seen = 0
             if let en = fm.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
-                for case let u as URL in en {
+                while let u = en.nextObject() as? URL {
                     if box.cancelled { break }
                     guard Self.isAudio(u) else { continue }
                     seen += 1
@@ -694,10 +694,10 @@ final class PerfectStore: ObservableObject {
     nonisolated static func isAudio(_ u: URL) -> Bool { audioExts.contains(u.pathExtension.lowercased()) }
 
     /// FairPlay-protected content is reported by AVFoundation directly.
-    nonisolated static func isDRM(_ u: URL) -> Bool {
-        if u.pathExtension.lowercased() == "m4p" { return true }   // fast path
+    nonisolated static func isDRM(_ u: URL) async -> Bool {
         let ext = u.pathExtension.lowercased()
+        if ext == "m4p" { return true }   // fast path
         guard ext == "m4a" || ext == "mp4" || ext == "aac" else { return false }
-        return AVURLAsset(url: u).hasProtectedContent
+        return (try? await AVURLAsset(url: u).load(.hasProtectedContent)) ?? false
     }
 }
