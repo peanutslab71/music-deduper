@@ -58,7 +58,7 @@ struct PerfectView: View {
     // The step the work is actually on — it LANDS on Identify/Credits waiting for
     // you to run them, rather than skipping straight to Review.
     private var liveStep: Int {
-        if store.busy && !store.diagnosed { return 1 }   // Scan (running)
+        if !store.diagnosed { return 1 }                  // Scan (waiting or running)
         if store.identifying { return 2 }                 // Identify (running)
         if store.enriching { return 3 }                   // Credits (running)
         if store.proposals.isEmpty { return 2 }           // scanned, waiting to identify
@@ -73,7 +73,7 @@ struct PerfectView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            if store.root == nil || (!store.diagnosed && !store.busy) {
+            if store.root == nil {
                 intro
             } else {
                 stepBar
@@ -256,6 +256,9 @@ struct PerfectView: View {
     @ViewBuilder private var stepAction: some View {
         if store.identifying || store.enriching || (store.busy && !store.diagnosed) {
             Button("Cancel") { store.cancel() }.controlSize(.large)
+        } else if step == 1 {
+            Button { store.explore() } label: { Label("Scan library", systemImage: "magnifyingglass") }
+                .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
         } else if !store.hasAcoustIDKey {
             Text("needs an AcoustID key").font(.caption).foregroundStyle(.orange)
         } else if step == 2 {
@@ -295,8 +298,24 @@ struct PerfectView: View {
         if viewStep == nil && store.busy && !store.diagnosed { workingMiddle(title: "Scanning your library", sub: "reading tags, finding junk and duplicate artists") }
         else if viewStep == nil && store.identifying { workingMiddle(title: "matched by sound", sub: store.identifyProgress, live: true) }
         else if viewStep == nil && store.enriching { workingMiddle(title: "looking up credits", sub: store.enrichProgress, live: true, credits: true) }
-        else if step == 1 { cleanupMiddle }     // Scan results
+        else if step == 1 {
+            if store.diagnosed { cleanupMiddle }     // Scan results
+            else { scanPrompt }                       // not scanned yet
+        }
         else { reviewMiddle }                    // Identify / Credits / Review
+    }
+
+    private var scanPrompt: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "magnifyingglass.circle").font(.system(size: 44, weight: .light)).foregroundStyle(.purple)
+            Text("Ready to scan").font(.title3).fontWeight(.semibold)
+            Text(store.root?.lastPathComponent ?? "").font(.callout).foregroundStyle(.secondary)
+            Text("Press “Scan library” above to read the tags and find junk, empty folders and duplicate artists. Nothing is changed.")
+                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 420)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // Scan's output — the structural cleanups, shown as their own step (not hidden).

@@ -313,11 +313,8 @@ final class PerfectStore: ObservableObject {
         diagnosed = false
         lastRunSummary = nil
         loadRuns()
-        if autoRun {
-            explore()
-        } else {
-            status = "Ready — press Run to explore \(url.lastPathComponent)."
-        }
+        // Nothing runs automatically — the user triggers Scan (step 1).
+        status = "Ready — press Scan to check \(url.lastPathComponent)."
     }
 
     /// One exploration pass: structure scan followed by the artist-tag scan.
