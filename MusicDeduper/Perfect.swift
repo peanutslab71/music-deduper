@@ -305,7 +305,7 @@ final class PerfectStore: ObservableObject {
     /// tracks' folder; each carries which kinds of change it will get.
     var albumChanges: [AlbumChange] {
         var byDir: [String: [TrackProposal]] = [:]
-        for p in proposals where p.accepted {
+        for p in proposals where p.isActionable {
             byDir[p.url.deletingLastPathComponent().path, default: []].append(p)
         }
         return byDir.map { (dirPath, props) -> AlbumChange in
@@ -676,12 +676,17 @@ final class PerfectStore: ObservableObject {
                 let curA = Self.readField(u, "artist") ?? ""
                 let curT = Self.readField(u, "title") ?? ""
                 let curAl = Self.readField(u, "album") ?? ""
+                let curC = Self.readField(u, "composer") ?? ""
+                let curL = Self.readField(u, "label") ?? ""
                 let hasArt = md_has_artwork(u.path) == 1
                 if let p = try? await id.identify(url: u, relPath: rel,
                                                   curArtist: curA, curTitle: curT, curAlbum: curAl,
-                                                  curHasArt: hasArt) {
+                                                  curHasArt: hasArt, curComposer: curC, curLabel: curL) {
                     await self.pushFind("\(p.newTitle) — \(p.newArtist)", changed: p.hasChange)
-                    if p.hasChange { found.append(p) }
+                    // keep every matched track — even ones with correct names still
+                    // need album/credits/art filling. The review shows only the
+                    // actionable ones; enrichment runs across them all.
+                    found.append(p)
                 }
                 done += 1
                 if done % 3 == 0 { await self.setIdentifyProgress("Listened to \(done)/\(files.count)…") }
@@ -704,9 +709,10 @@ final class PerfectStore: ObservableObject {
         identifying = false; identifyProgress = ""
         proposals = p.sorted { $0.relPath.lowercased() < $1.relPath.lowercased() }
         if !cancelled {
+            let act = p.filter { $0.isActionable }.count
             status = p.isEmpty
-                ? "Identified \(total) tracks — nothing to correct."
-                : "Identified \(total) tracks — \(p.count) with suggested corrections."
+                ? "Identified \(total) tracks — nothing matched."
+                : "Identified \(p.count) tracks — \(act) with changes so far · run Fill credits to check the rest."
         }
     }
 
@@ -720,7 +726,13 @@ final class PerfectStore: ObservableObject {
         enriching = true; enrichProgress = "Looking up credits…"
         let box = cancelFlag; box.cancelled = false
         let client = MusicBrainzClient()
-        let targets = proposals.compactMap { p in p.recordingID.map { (p.id, $0) } }
+        // look up every track that could gain something — missing composer, label,
+        // or cover art — not just the ones whose names changed
+        let targets = proposals.compactMap { p -> (UUID, String)? in
+            guard let rid = p.recordingID else { return nil }
+            let couldGain = p.curComposer.isEmpty || p.curLabel.isEmpty || !p.curHasArt
+            return couldGain ? (p.id, rid) : nil
+        }
         Task.detached(priority: .userInitiated) {
             var done = 0
             for (pid, rid) in targets {

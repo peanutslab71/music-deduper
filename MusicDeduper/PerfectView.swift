@@ -349,7 +349,7 @@ struct PerfectView: View {
 
     // The selected album's tracks — the per-track detail that used to be its own tree.
     @ViewBuilder private func albumDetail(_ id: String) -> some View {
-        let props = store.proposals.filter { $0.url.deletingLastPathComponent().path == id }
+        let props = store.proposals.filter { $0.url.deletingLastPathComponent().path == id && $0.isActionable }
         if !props.isEmpty, let a = store.albumChanges.first(where: { $0.id == id }) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {

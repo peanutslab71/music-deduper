@@ -59,10 +59,24 @@ struct TrackProposal: Identifiable {
 
     let recordingID: String?          // MusicBrainz recording, for the relationship lookups
     let curHasArt: Bool               // does the file already have embedded cover art?
+    let curComposer: String           // existing composer tag (to know if it's a blank to fill)
+    let curLabel: String              // existing label tag
     var enrichment: Enrichment?       // composer/label/performers, filled by the MusicBrainz pass
 
     /// artwork will be offered when the file has none and we found a release to fetch from
     var canAddArt: Bool { !curHasArt && (enrichment?.releaseMBID != nil) }
+
+    /// credits/label the enrichment can fill into currently-blank fields
+    var hasCreditGap: Bool {
+        guard let e = enrichment else { return false }
+        if e.composer != nil && curComposer.isEmpty { return true }
+        if e.label != nil && curLabel.isEmpty { return true }
+        if !e.performers.isEmpty { return true }
+        return false
+    }
+
+    /// worth showing / applying: a name change, artwork to add, or a credit gap to fill
+    var isActionable: Bool { hasChange || canAddArt || hasCreditGap }
 
     /// Needs a deliberate look: a low-confidence match, or a genuine artist
     /// re-attribution (a different artist — not just a spelling/case fix, which
@@ -98,10 +112,23 @@ struct Identifier {
 
     /// Fingerprint one file and look it up. Returns nil on no match. `current*`
     /// are the file's existing tags, used to pick the closest album.
+    /// Placeholder tag values that should be treated as blank (and filled), not kept.
+    static func isJunkValue(_ s: String) -> Bool {
+        let t = s.trimmingCharacters(in: .whitespaces).lowercased()
+        if t.isEmpty { return true }
+        if t == "unknown" || t.hasPrefix("unknown ") || t.contains("unknown album")
+            || t.contains("unknown artist") || t == "various" || t == "various artists" { return true }
+        if t.range(of: "^track ?0*\\d+$", options: .regularExpression) != nil { return true }
+        return false
+    }
+
     func identify(url: URL, relPath: String,
                   curArtist: String, curTitle: String, curAlbum: String,
-                  curHasArt: Bool) async throws -> TrackProposal? {
+                  curHasArt: Bool, curComposer: String, curLabel: String) async throws -> TrackProposal? {
         guard !apiKey.isEmpty else { throw IdentifyError.noKey }
+        // treat placeholder tags as blank so they get filled, not trusted
+        let cleanArtist = Self.isJunkValue(curArtist) ? "" : curArtist
+        let cleanAlbum = Self.isJunkValue(curAlbum) ? "" : curAlbum
 
         // Decode + fingerprint inside an autorelease pool so the (tens-of-MB) PCM
         // buffers are freed the instant we're done with this file, instead of
@@ -113,30 +140,29 @@ struct Identifier {
         let (score, recordings) = try await lookup(fingerprint: fp.base64, duration: Int(fp.duration.rounded()))
         // Consensus pick that trusts the existing tag — never overrides a good
         // artist on one junk cluster entry (e.g. AC/DC → "Maynard Ferguson").
-        guard let pick = Self.chooseRecording(recordings, existingArtist: curArtist) else { return nil }
+        guard let pick = Self.chooseRecording(recordings, existingArtist: cleanArtist) else { return nil }
         let artist = pick.artist
         let title = pick.rec.title ?? ""
-        // Album is ambiguous (a recording lives on many releases) and the file's
-        // own album tag is often correct and not even among the candidates — so
-        // the default is NO album change. The fingerprint's albums are offered as
-        // options, with the current album kept first and selected.
-        let ranked = rankAlbums(pick.rec.releasegroups ?? [], preferring: curAlbum)
+        // Album: keep the existing album if present; if it's blank/junk, fill it
+        // from the fingerprint's release. Alternatives are offered either way.
+        let ranked = rankAlbums(pick.rec.releasegroups ?? [], preferring: cleanAlbum)
         var candidates = ranked
         var chosen = ranked.first ?? ""
-        if !curAlbum.isEmpty {
-            candidates = ([curAlbum] + ranked).reduced()
-            chosen = curAlbum          // keep the existing album unless the user picks another
+        if !cleanAlbum.isEmpty {
+            candidates = ([cleanAlbum] + ranked).reduced()
+            chosen = cleanAlbum        // keep the existing album unless the user picks another
         }
 
         let proposal = TrackProposal(
             url: url, relPath: relPath, score: score,
-            curArtist: curArtist, curTitle: curTitle, curAlbum: curAlbum,
+            curArtist: cleanArtist, curTitle: curTitle, curAlbum: cleanAlbum,
             newArtist: artist, newTitle: title,
             albumCandidates: candidates,
             chosenAlbum: chosen,
             accepted: true,
             recordingID: pick.rec.id,
             curHasArt: curHasArt,
+            curComposer: curComposer, curLabel: curLabel,
             enrichment: nil)
         return proposal
     }
