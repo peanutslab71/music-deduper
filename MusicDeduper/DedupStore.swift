@@ -782,6 +782,28 @@ final class DedupStore: ObservableObject {
     }
     private func presentConflict(_ c: CopyConflict?) { pendingConflict = c }
 
+    /// Zip the contents of a staging folder to a destination .zip, then remove
+    /// the staging folder and reveal the archive in Finder. Runs `ditto`.
+    func zipStaging(_ stage: URL, to zipURL: URL) {
+        Task.detached {
+            try? FileManager.default.removeItem(at: zipURL)
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            p.arguments = ["-c", "-k", "--sequesterRsrc", stage.path, zipURL.path]
+            try? p.run(); p.waitUntilExit()
+            try? FileManager.default.removeItem(at: stage)
+            let ok = p.terminationStatus == 0
+            await MainActor.run {
+                if ok {
+                    self.status = "Exported \(zipURL.lastPathComponent)"
+                    NSWorkspace.shared.activateFileViewerSelecting([zipURL])
+                } else {
+                    self.status = "Couldn't create the zip."
+                }
+            }
+        }
+    }
+
     // MARK: File Commander transfers (arbitrary files/folders between locations)
 
     /// One end of a transfer: a local folder, or a folder on a server share.

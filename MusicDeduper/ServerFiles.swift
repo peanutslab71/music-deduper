@@ -10,6 +10,8 @@
 
 import Foundation
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 // MARK: - One pane = one location
 
@@ -389,6 +391,25 @@ struct PaneView: View {
         }
     }
 
+    /// Download (or gather) the selection into a temp folder, zip it locally,
+    /// and reveal the archive — a one-click backup of a server folder.
+    private func exportZip() {
+        let picked = model.selectedItems
+        guard !picked.isEmpty else { return }
+        makeActive()
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.zip]
+        panel.nameFieldStringValue = (picked.count == 1 ? picked[0].name : "export") + ".zip"
+        panel.message = "Save a zip of the \(picked.count) selected item(s)"
+        guard panel.runModal() == .OK, let zipURL = panel.url else { return }
+        let stage = FileManager.default.temporaryDirectory
+            .appendingPathComponent("md-zip-" + UUID().uuidString)
+        try? FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
+        store.runTransfer(picked, from: model.endpoint, to: .local(stage), move: false) {
+            store.zipStaging(stage, to: zipURL)
+        }
+    }
+
     @State private var showPicker = false
     @State private var showNewFolder = false
     @State private var newFolderName = ""
@@ -476,6 +497,9 @@ struct PaneView: View {
                     Button("Move to \(other.destFolderLabel)") {
                         model.selection = sel; transfer(move: true)
                     }
+                    Button("Export as ZIP…") {
+                        model.selection = sel; exportZip()
+                    }
                 }
                 if !sel.isEmpty {
                     Button(model.kind == .local ? "Move to Trash" : "Delete…", role: .destructive) {
@@ -518,6 +542,13 @@ struct PaneView: View {
                 .help(model.canMoveInstantly(to: other)
                       ? "Move into the other pane (\(other.destFolderLabel)) — instant, same share"
                       : "Move into the other pane (\(other.destFolderLabel)) — copies then removes the originals")
+                Button {
+                    exportZip()
+                } label: {
+                    Label("Export ZIP", systemImage: "doc.zipper")
+                }
+                .disabled(model.selection.isEmpty)
+                .help("Save the selection as a zip archive on this Mac")
                 Button(role: .destructive) {
                     confirmDelete1 = true
                 } label: {
