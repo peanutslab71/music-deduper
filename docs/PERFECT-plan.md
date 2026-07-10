@@ -284,9 +284,10 @@ delivers the cleaned result.
   library wherever it lives (local or server) and pulls each file's audio locally
   only when it needs to fingerprint/read it, caching temporarily; no full upfront
   copy.
-- **UI placement:** Perfect is its **own tab** on the main window's top bar
-  (after Browse), with a self-contained diagnose → review → commit flow, separate
-  from the dedupe wizard.
+- **UI placement:** Perfect is the **first item** on the main window's top bar,
+  ahead of the dedupe wizard (Perfect › Source › Review › Clean up › Copy |
+  Browse). Restoring/cleaning the library is the start of the process; dedupe and
+  copy follow. Perfect has a self-contained diagnose → review → commit flow.
 - **Classical:** the **full classical tag model** (composer / work / movement /
   ensemble / soloist) is in scope for Phase 3.
 
