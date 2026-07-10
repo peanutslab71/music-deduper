@@ -138,6 +138,7 @@ struct PerfectView: View {
                         allClean
                     }
                     albumCarousel
+                    categoryBar
                     artistsSection
                     if !store.renames.isEmpty { renamesSection }
                     ForEach(store.groups, id: \.kind.rawValue) { group in
@@ -151,6 +152,66 @@ struct PerfectView: View {
             Divider()
             footer
         }
+    }
+
+    // Bulk category toggles — the mockup's on/off buttons. Coarse control; the
+    // detail stays in each section below.
+    @ViewBuilder private var categoryBar: some View {
+        let namesN = store.proposals.filter { $0.hasChange }.count
+        let artN = store.proposals.filter { $0.canAddArt }.count
+        let credN = store.proposals.filter { !($0.enrichment?.isEmpty ?? true) }.count
+        let mergeN = store.artists.filter { store.artistHasApplicableWork($0) }.count
+        let renameN = store.renames.count
+        let junkN = store.findings.filter { $0.kind == .junk }.count
+        let emptyN = store.findings.filter { $0.kind == .emptyFolder }.count
+        if namesN + artN + credN + mergeN + renameN + junkN + emptyN > 0 {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 9) {
+                    if namesN > 0 { categoryPill("Identify names", namesN, .blue, on: store.applyNames) { store.applyNames.toggle() } }
+                    if artN > 0 { categoryPill("Add artwork", artN, .pink, on: store.applyArtwork) { store.applyArtwork.toggle() } }
+                    if credN > 0 { categoryPill("Fill credits", credN, Color(red: 0.13, green: 0.6, blue: 0.3), on: store.applyCredits) { store.applyCredits.toggle() } }
+                    if mergeN > 0 {
+                        let on = store.artists.allSatisfy { $0.accepted }
+                        categoryPill("Merge artists", mergeN, .purple, on: on) {
+                            for i in store.artists.indices { store.artists[i].accepted = !on }
+                        }
+                    }
+                    if renameN > 0 {
+                        let on = store.renames.allSatisfy { $0.accepted }
+                        categoryPill("Tidy folders", renameN, .orange, on: on) {
+                            for i in store.renames.indices { store.renames[i].accepted = !on }
+                        }
+                    }
+                    if junkN > 0 { findingsPill("Remove junk", junkN, .gray, kind: .junk) }
+                    if emptyN > 0 { findingsPill("Empty folders", emptyN, .gray, kind: .emptyFolder) }
+                }
+                .padding(.horizontal, 2).padding(.bottom, 2)
+            }
+        }
+    }
+
+    private func findingsPill(_ label: String, _ count: Int, _ color: Color, kind: FixKind) -> some View {
+        let on = store.findings.filter { $0.kind == kind }.allSatisfy { $0.accepted }
+        return categoryPill(label, count, color, on: on) {
+            for i in store.findings.indices where store.findings[i].kind == kind { store.findings[i].accepted = !on }
+        }
+    }
+
+    private func categoryPill(_ label: String, _ count: Int, _ color: Color, on: Bool, toggle: @escaping () -> Void) -> some View {
+        Button(action: toggle) {
+            HStack(spacing: 7) {
+                Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 13)).foregroundStyle(on ? color : Color.secondary)
+                Circle().fill(color).frame(width: 7, height: 7)
+                Text(label).font(.system(size: 12, weight: .medium))
+                Text("\(count)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 11).padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 9).fill(Color.secondary.opacity(0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.secondary.opacity(0.15)))
+            .opacity(on ? 1 : 0.55)
+        }
+        .buttonStyle(.plain)
     }
 
     // Album cover carousel — the media-first overview of what's being tidied.

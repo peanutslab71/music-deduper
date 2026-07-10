@@ -205,6 +205,10 @@ final class PerfectStore: ObservableObject {
     @Published var identifyMatched = 0           // running count of tracks matched
     @Published var enriching = false
     @Published var enrichProgress = ""
+    // category-level toggles (the mockup's bulk on/off buttons)
+    @Published var applyNames = true       // identify: artist/title/album corrections
+    @Published var applyArtwork = true     // add missing cover art
+    @Published var applyCredits = true     // composer/label/performers gap-fills
     var hasAcoustIDKey: Bool { !Identifier.configuredKey.isEmpty }
 
     // Tag writing uses a surgical TagLib shim (MDTagShim) that changes only the
@@ -613,7 +617,10 @@ final class PerfectStore: ObservableObject {
         findings.contains { $0.accepted && $0.kind.safe }
             || renames.contains { $0.accepted && $0.newName != $0.oldName }
             || artists.contains { $0.accepted && artistHasApplicableWork($0) }
-            || (tagWritingEnabled && proposals.contains { $0.accepted && $0.hasChange })
+            || (tagWritingEnabled && proposals.contains { p in p.accepted && (
+                    (applyNames && p.hasChange)
+                    || (applyArtwork && p.canAddArt)
+                    || (applyCredits && !(p.enrichment?.isEmpty ?? true))) })
     }
 
     // MARK: Identify — fingerprint each track and propose the correct names
@@ -725,14 +732,16 @@ final class PerfectStore: ObservableObject {
             .flatMap { a in a.tagMembers.filter { $0.oldName != a.canonical }
                 .map { ($0.url, $0.relPath, "artist", $0.oldName, a.canonical) } } : []
         // identify proposals — each changed field becomes its own reversible edit
-        for p in proposals where p.accepted && p.hasChange {
-            if p.artistChanged { accTagEdits.append((p.url, p.relPath, "artist", p.curArtist, p.newArtist)) }
-            if p.titleChanged  { accTagEdits.append((p.url, p.relPath, "title",  p.curTitle,  p.newTitle)) }
-            if p.albumChanged  { accTagEdits.append((p.url, p.relPath, "album",  p.curAlbum,  p.chosenAlbum)) }
+        if tagWritingEnabled && applyNames {
+            for p in proposals where p.accepted && p.hasChange {
+                if p.artistChanged { accTagEdits.append((p.url, p.relPath, "artist", p.curArtist, p.newArtist)) }
+                if p.titleChanged  { accTagEdits.append((p.url, p.relPath, "title",  p.curTitle,  p.newTitle)) }
+                if p.albumChanged  { accTagEdits.append((p.url, p.relPath, "album",  p.curAlbum,  p.chosenAlbum)) }
+            }
         }
         // enrichment gap-fills (composer/label/date) — candidate values; only
         // written where the file's field is actually blank (checked at apply time)
-        let accEnrich: [(URL, String, [(String, String)])] = tagWritingEnabled ? proposals
+        let accEnrich: [(URL, String, [(String, String)])] = (tagWritingEnabled && applyCredits) ? proposals
             .filter { $0.accepted }
             .compactMap { p in
                 guard let e = p.enrichment, !e.isEmpty else { return nil }
@@ -744,14 +753,14 @@ final class PerfectStore: ObservableObject {
                 return fields.isEmpty ? nil : (p.url, p.relPath, fields)
             } : []
         // performer credits from enrichment — added to the credits list, reversibly
-        let accPerf: [(URL, String, [(String, String)])] = tagWritingEnabled ? proposals
+        let accPerf: [(URL, String, [(String, String)])] = (tagWritingEnabled && applyCredits) ? proposals
             .filter { $0.accepted }
             .compactMap { p in
                 guard let e = p.enrichment, !e.performers.isEmpty else { return nil }
                 return (p.url, p.relPath, e.performers.map { ($0.name, $0.role) })
             } : []
         // cover art: accepted proposals with no art and a release to fetch from
-        let accArt: [(URL, String, String)] = tagWritingEnabled ? proposals
+        let accArt: [(URL, String, String)] = (tagWritingEnabled && applyArtwork) ? proposals
             .filter { $0.accepted && $0.canAddArt }
             .compactMap { p in p.enrichment?.releaseMBID.map { (p.url, p.relPath, $0) } } : []
         Task.detached(priority: .userInitiated) {
