@@ -297,10 +297,23 @@ delivers the cleaned result.
 - **Classical:** the **full classical tag model** (composer / work / movement /
   ensemble / soloist) is in scope for Phase 3.
 
+- **Review layout:** changes are grouped **by type of fix** (junk, empties,
+  renames, artist merges, tag fixes, DRM), with low-risk automatic cleanups
+  separated from judgement calls so the safe items can be bulk-approved.
+- **Quarantine location:** a dated "Music Librarian Quarantine" folder beside the
+  library (per-run subfolder); works the same local or on a server; the user
+  empties it when satisfied.
+- **Thoroughness:** presets **Light / Standard / Thorough**, each explained by an
+  info popup, **defaulting to Thorough** (the pedantic/audiophile default);
+  cautious users can drop to Light/Standard.
+- **Default folder layout:** **Album Artist / Album / NN Title** (top folder by
+  album artist so compilations and guest-heavy albums stay together).
+  Configurable.
+
 ### Still open
-- Exact quarantine location and retention (in-library folder vs system Trash vs
-  app-managed store).
 - Duplicate-artist merge granularity in the review (per-artist vs per-album).
+- Cover-art handling detail (sources, minimum resolution, overwrite vs fill-gaps).
+- Various-Artists / compilation and multi-disc tag conventions.
 
 ---
 
