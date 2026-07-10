@@ -124,6 +124,10 @@ struct PerfectView: View {
                 Text("Merge duplicate artists").fontWeight(.semibold)
                 Text("\(store.merges.count) · review each").font(.caption).foregroundStyle(.secondary)
                 Spacer()
+                let allOn = store.merges.allSatisfy { $0.accepted }
+                Button(allOn ? "Deselect all" : "Select all") {
+                    for i in store.merges.indices { store.merges[i].accepted = !allOn }
+                }.controlSize(.small)
             }
             .padding(.vertical, 6).padding(.horizontal, 10)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.pink.opacity(0.07)))
