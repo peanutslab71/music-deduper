@@ -10,7 +10,7 @@ import SwiftUI
 
 struct PerfectView: View {
     @StateObject private var store = PerfectStore()
-    @State private var expanded: Set<String> = ["junk", "emptyFolder"]
+    @State private var expanded: Set<String> = []   // all sections collapsed initially — reads as a summary
 
     var body: some View {
         VStack(spacing: 0) {
@@ -91,11 +91,12 @@ struct PerfectView: View {
             if let summary = store.lastRunSummary {
                 committedBanner(summary)
             }
-            if store.groups.isEmpty {
+            if store.groups.isEmpty && store.merges.isEmpty {
                 allClean
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
+                        if !store.merges.isEmpty { mergesSection }
                         ForEach(store.groups, id: \.kind.rawValue) { group in
                             section(group.kind, group.items)
                         }
@@ -107,6 +108,57 @@ struct PerfectView: View {
             Divider()
             footer
         }
+    }
+
+    // Duplicate-artist merges — judgement calls; pick the name to keep
+    private var mergesSection: some View {
+        let isOpen = expanded.contains("merge")
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    if isOpen { expanded.remove("merge") } else { expanded.insert("merge") }
+                } label: {
+                    Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption).foregroundStyle(.secondary)
+                }.buttonStyle(.plain)
+                Image(systemName: "person.2").foregroundStyle(.pink)
+                Text("Merge duplicate artists").fontWeight(.semibold)
+                Text("\(store.merges.count) · review each").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.vertical, 6).padding(.horizontal, 10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.pink.opacity(0.07)))
+
+            if isOpen {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(store.merges) { m in mergeRow(m) }
+                }
+                .padding(.top, 6).padding(.leading, 6)
+            }
+        }
+    }
+
+    private func mergeRow(_ m: MergeProposal) -> some View {
+        HStack(spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { m.accepted },
+                set: { v in if let i = store.merges.firstIndex(where: { $0.id == m.id }) { store.merges[i].accepted = v } }
+            )).labelsHidden().toggleStyle(.checkbox)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(zip(m.sources, m.fileCounts).map { "\($0.0) (\($0.1))" }.joined(separator: "  +  "))
+                    .font(.caption).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text("keep:").font(.caption2).foregroundStyle(.secondary)
+                    Picker("", selection: Binding(
+                        get: { m.canonical },
+                        set: { v in if let i = store.merges.firstIndex(where: { $0.id == m.id }) { store.merges[i].canonical = v } }
+                    )) {
+                        ForEach(m.sources, id: \.self) { Text($0).tag($0) }
+                    }.labelsHidden().frame(maxWidth: 260)
+                }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 1)
     }
 
     private var allClean: some View {
@@ -178,9 +230,10 @@ struct PerfectView: View {
     }
 
     private var footer: some View {
-        HStack {
-            if store.acceptedCount > 0 {
-                Text("\(store.acceptedCount) item(s) selected to move to quarantine")
+        let mergeCount = store.merges.filter { $0.accepted }.count
+        return HStack {
+            if store.hasWork {
+                Text("\(store.acceptedCount) cleanup(s)" + (mergeCount > 0 ? ", \(mergeCount) merge(s)" : "") + " selected")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text("Protected tracks are listed for information and are never removed.")
@@ -190,10 +243,10 @@ struct PerfectView: View {
             Button {
                 store.commit()
             } label: {
-                Label("Apply — move \(store.acceptedCount) to quarantine", systemImage: "checkmark.circle")
+                Label("Apply changes", systemImage: "checkmark.circle")
             }
             .buttonStyle(.borderedProminent).tint(.purple)
-            .disabled(store.acceptedCount == 0 || store.busy)
+            .disabled(!store.hasWork || store.busy)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
     }

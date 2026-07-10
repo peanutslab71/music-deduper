@@ -43,13 +43,25 @@ struct PerfectFinding: Identifiable {
     var accepted: Bool
 }
 
-/// A committed run, reconstructed from its quarantine folder's run.json,
-/// so it can be listed and undone (restored) later.
+/// A proposed merge of several folders whose names mean the same artist
+/// (e.g. "Buzzcocks" + "The Buzzcocks"). The user picks which name to keep.
+struct MergeProposal: Identifiable {
+    let id = UUID()
+    let key: String                 // normalized collision key
+    var canonical: String           // chosen folder name to keep (one of `sources`)
+    let sources: [String]           // the colliding top-level folder names
+    let fileCounts: [Int]           // audio-file count per source (same order)
+    var accepted: Bool
+}
+
+/// A committed run, reconstructed from its quarantine folder's run.json, so it
+/// can be listed and undone. Every change is one move (from → to), both paths
+/// relative to the library root; undo reverses them.
 struct RunRecord: Identifiable {
     let id: String          // quarantine subfolder name (timestamp)
     let folder: URL         // the run's quarantine folder
     let date: Date
-    let rels: [String]      // library-relative paths that were quarantined
+    let ops: [(from: String, to: String)]   // each move, root-relative
     let summary: String
 }
 
@@ -62,6 +74,7 @@ final class PerfectStore: ObservableObject {
     @Published var busy = false
     @Published var progress = ""
     @Published var findings: [PerfectFinding] = []
+    @Published var merges: [MergeProposal] = []
     @Published var diagnosed = false
 
     // commit-result summary
@@ -169,84 +182,152 @@ final class PerfectStore: ObservableObject {
                                             detail: "No audio or files inside", bytes: 0, accepted: true))
             }
 
+            // duplicate-artist folders: top-level folders whose names normalise
+            // to the same artist (Buzzcocks / The Buzzcocks; & vs and; "X, The")
+            var proposals: [MergeProposal] = []
+            let topDirs = allDirs.filter { $0.deletingLastPathComponent().path == root.path
+                                           && $0.lastPathComponent != "Music Librarian Quarantine" }
+            var byKey: [String: [URL]] = [:]
+            for d in topDirs { byKey[Self.artistKey(d.lastPathComponent), default: []].append(d) }
+            for (key, dirs) in byKey where dirs.count > 1 {
+                let names = dirs.map { $0.lastPathComponent }
+                let counts = dirs.map { d in
+                    (fm.enumerator(at: d, includingPropertiesForKeys: nil)?
+                        .allObjects.compactMap { $0 as? URL }.filter { Self.isAudio($0) }.count) ?? 0
+                }
+                // default: keep the name with the most audio (ties: the "The …" form)
+                let best = zip(names, counts).max { a, b in
+                    a.1 != b.1 ? a.1 < b.1 : (!a.0.lowercased().hasPrefix("the ") && b.0.lowercased().hasPrefix("the "))
+                }?.0 ?? names[0]
+                proposals.append(MergeProposal(key: key, canonical: best, sources: names,
+                                               fileCounts: counts, accepted: false))
+            }
+
             let (ff, fo, fb) = (files, folders, bytes)
-            await self.finishDiagnose(found: found, files: ff, folders: fo, bytes: fb, cancelled: box.cancelled)
+            await self.finishDiagnose(found: found, merges: proposals.sorted { $0.canonical.lowercased() < $1.canonical.lowercased() },
+                                      files: ff, folders: fo, bytes: fb, cancelled: box.cancelled)
         }
     }
 
     private func setProgress(_ s: String) { progress = s }
 
-    private func finishDiagnose(found: [PerfectFinding], files: Int, folders: Int, bytes: Int64, cancelled: Bool) {
+    private func finishDiagnose(found: [PerfectFinding], merges m: [MergeProposal],
+                               files: Int, folders: Int, bytes: Int64, cancelled: Bool) {
         findings = found.sorted { $0.relPath.lowercased() < $1.relPath.lowercased() }
+        merges = m
         totalFiles = files; totalFolders = folders; totalBytes = bytes
         busy = false; diagnosed = !cancelled; progress = ""
         let junk = found.filter { $0.kind == .junk }.count
         let empties = found.filter { $0.kind == .emptyFolder }.count
         let drm = found.filter { $0.kind == .drm }.count
-        status = cancelled
-            ? "Diagnosis cancelled."
-            : "\(files) files · \(folders) folders · \(fmtBytes(bytes)) — found \(junk) junk, \(empties) empty folder(s), \(drm) protected track(s)."
+        var parts = ["\(files) files · \(folders) folders · \(fmtBytes(bytes))"]
+        var found2: [String] = []
+        if junk > 0 { found2.append("\(junk) junk") }
+        if empties > 0 { found2.append("\(empties) empty folder(s)") }
+        if !m.isEmpty { found2.append("\(m.count) duplicate artist(s)") }
+        if drm > 0 { found2.append("\(drm) protected track(s)") }
+        if !found2.isEmpty { parts.append("found " + found2.joined(separator: ", ")) }
+        status = cancelled ? "Diagnosis cancelled." : parts.joined(separator: " — ") + "."
+    }
+
+    /// Normalise an artist folder name to a collision key: drops a leading
+    /// "The"/trailing ", The", unifies & and "and", strips punctuation/spaces.
+    nonisolated static func artistKey(_ name: String) -> String {
+        var s = name.lowercased()
+        s = s.replacingOccurrences(of: " & ", with: " and ")
+        if s.hasSuffix(", the") { s = "the " + s.dropLast(5) }
+        if s.hasPrefix("the ") { s = String(s.dropFirst(4)) }
+        return s.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
     }
 
     func cancel() { cancelFlag.cancelled = true }
 
-    // MARK: Commit — quarantine accepted safe items + write a change log
+    // MARK: Commit — apply accepted removals + merges as a log of reversible moves
+
+    var hasWork: Bool {
+        findings.contains { $0.accepted && $0.kind.safe } || merges.contains { $0.accepted }
+    }
 
     func commit() {
-        guard let root else { return }
-        let toRemove = findings.filter { $0.accepted && $0.kind.safe }
-        guard !toRemove.isEmpty else { return }
+        guard let root, hasWork else { return }
         busy = true; status = "Applying changes…"
-        let items = toRemove.map { ($0.url, $0.relPath, $0.kind) }
+        let removals = findings.filter { $0.accepted && $0.kind.safe }.map { ($0.relPath, $0.kind.rawValue) }
+        let accMerges = merges.filter { $0.accepted }.map { ($0.canonical, $0.sources) }
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
-            let quarantine = root.appendingPathComponent("Music Librarian Quarantine/\(stamp)", isDirectory: true)
+            let qRel = "Music Librarian Quarantine/\(stamp)"
+            let quarantine = root.appendingPathComponent(qRel, isDirectory: true)
             try? fm.createDirectory(at: quarantine, withIntermediateDirectories: true)
+            var ops: [(from: String, to: String)] = []   // recorded moves (root-relative)
             var log = "Music Librarian — change log \(Date())\nLibrary: \(root.path)\n\n"
-            var moved = 0, failed = 0
 
-            // move deepest paths first so removing a folder doesn't orphan a
-            // child move (empties last after their contents)
-            let ordered = items.sorted { $0.1.count > $1.1.count }
-            for (url, rel, kind) in ordered {
-                guard fm.fileExists(atPath: url.path) else { continue }
-                let dest = quarantine.appendingPathComponent(rel)
+            func move(_ fromRel: String, _ toRel: String) -> Bool {
+                let from = root.appendingPathComponent(fromRel), to = root.appendingPathComponent(toRel)
+                guard fm.fileExists(atPath: from.path) else { return false }
                 do {
-                    try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    try fm.moveItem(at: url, to: dest)
-                    moved += 1
-                    log += "QUARANTINED (\(kind.rawValue)): \(rel)\n"
-                } catch {
-                    failed += 1
-                    log += "FAILED to move \(rel): \(error.localizedDescription)\n"
+                    try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try fm.moveItem(at: from, to: to)
+                    ops.append((fromRel, toRel))
+                    return true
+                } catch { log += "FAILED \(fromRel): \(error.localizedDescription)\n"; return false }
+            }
+
+            // 1) merges — move each non-canonical source's contents into the canonical
+            //    folder, then quarantine the emptied source folder.
+            for (canonical, sources) in accMerges {
+                for src in sources where src != canonical {
+                    let srcDir = root.appendingPathComponent(src)
+                    let children = (try? fm.contentsOfDirectory(atPath: srcDir.path)) ?? []
+                    for child in children {
+                        let fromRel = src + "/" + child
+                        let toRel = canonical + "/" + child
+                        if fm.fileExists(atPath: root.appendingPathComponent(toRel).path) {
+                            // album/file already exists under the canonical — merge its
+                            // files in (one level) rather than clobber
+                            let sub = (try? fm.contentsOfDirectory(atPath: srcDir.appendingPathComponent(child).path)) ?? []
+                            for f in sub {
+                                let fFrom = fromRel + "/" + f, fTo = toRel + "/" + f
+                                if !fm.fileExists(atPath: root.appendingPathComponent(fTo).path) {
+                                    if move(fFrom, fTo) { log += "MERGED: \(fFrom) → \(fTo)\n" }
+                                } else { log += "SKIPPED (exists): \(fTo)\n" }
+                            }
+                        } else if move(fromRel, toRel) {
+                            log += "MERGED: \(fromRel) → \(toRel)\n"
+                        }
+                    }
+                    // the source folder should now be empty → quarantine it
+                    if move(src, qRel + "/" + src) { log += "QUARANTINED (emptied): \(src)\n" }
                 }
             }
-            log += "\n\(moved) item(s) moved to quarantine, \(failed) failed.\nRestore with 'Undo this run', or by moving items back from this folder.\n"
+
+            // 2) removals — junk + empty folders → quarantine (deepest first)
+            for (rel, kind) in removals.sorted(by: { $0.0.count > $1.0.count }) {
+                if move(rel, qRel + "/" + rel) { log += "QUARANTINED (\(kind)): \(rel)\n" }
+            }
+
+            log += "\n\(ops.count) change(s). Restore with 'Undo this run'.\n"
             try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
 
-            // structured record so the app can list and undo this run
-            let movedRels = ordered.filter { fm.fileExists(atPath: quarantine.appendingPathComponent($0.1).path) }
-                .map { ["rel": $0.1, "kind": $0.2.rawValue] }
             let record: [String: Any] = [
                 "date": ISO8601DateFormatter().string(from: Date()),
                 "root": root.path,
-                "summary": "\(moved) item(s) moved to quarantine",
-                "items": movedRels,
+                "summary": "\(ops.count) change(s) applied",
+                "ops": ops.map { ["from": $0.from, "to": $0.to] },
             ]
             if let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) {
                 try? data.write(to: quarantine.appendingPathComponent("run.json"))
             }
-
-            await self.finishCommit(moved: moved, failed: failed, quarantine: quarantine)
+            await self.finishCommit(count: ops.count, quarantine: quarantine)
         }
     }
 
-    private func finishCommit(moved: Int, failed: Int, quarantine: URL) {
+    private func finishCommit(count: Int, quarantine: URL) {
         busy = false
         lastQuarantine = quarantine
-        lastRunSummary = "Moved \(moved) item(s) to quarantine" + (failed > 0 ? ", \(failed) failed." : ".")
+        lastRunSummary = "Applied \(count) change(s)."
         findings.removeAll { $0.accepted && $0.kind.safe }
+        merges.removeAll { $0.accepted }
         status = lastRunSummary ?? status
         loadRuns()
     }
@@ -260,41 +341,57 @@ final class PerfectStore: ObservableObject {
         var found: [RunRecord] = []
         if let subs = try? fm.contentsOfDirectory(at: qroot, includingPropertiesForKeys: nil) {
             for sub in subs {
-                let jsonURL = sub.appendingPathComponent("run.json")
-                guard let data = try? Data(contentsOf: jsonURL),
+                guard let data = try? Data(contentsOf: sub.appendingPathComponent("run.json")),
                       let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-                let dateStr = obj["date"] as? String ?? ""
-                let date = ISO8601DateFormatter().date(from: dateStr) ?? Date(timeIntervalSince1970: 0)
-                let items = (obj["items"] as? [[String: String]] ?? []).compactMap { $0["rel"] }
+                let date = ISO8601DateFormatter().date(from: obj["date"] as? String ?? "") ?? Date(timeIntervalSince1970: 0)
+                let ops = (obj["ops"] as? [[String: String]] ?? []).compactMap { d -> (String, String)? in
+                    guard let f = d["from"], let t = d["to"] else { return nil }; return (f, t)
+                }
                 found.append(RunRecord(id: sub.lastPathComponent, folder: sub, date: date,
-                                       rels: items, summary: obj["summary"] as? String ?? "\(items.count) items"))
+                                       ops: ops, summary: obj["summary"] as? String ?? "\(ops.count) changes"))
             }
         }
-        runs = found.sorted { $0.date > $1.date }   // newest first
+        runs = found.sorted { $0.date > $1.date }
     }
 
-    /// Restore a run: move each quarantined item back to its original location,
-    /// then remove the (now empty) quarantine folder. Reverses the run exactly.
+    /// Reverse a run: move each recorded change back (to → from), newest moves
+    /// first, then remove the emptied quarantine folder.
     func undo(_ run: RunRecord) {
         guard let root else { return }
         busy = true; status = "Undoing run…"
-        let folder = run.folder, rels = run.rels
+        let folder = run.folder, ops = run.ops
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var restored = 0, failed = 0
-            // shallowest first so a restored parent folder exists before its children
-            for rel in rels.sorted(by: { $0.count < $1.count }) {
-                let from = folder.appendingPathComponent(rel)
-                let to = root.appendingPathComponent(rel)
-                guard fm.fileExists(atPath: from.path) else { continue }
+
+            // merge-aware restore: never clobber an existing directory (the emptied
+            // source folder of a merge is restored into one the file-restores have
+            // already rebuilt) — merge its contents in instead.
+            func restore(_ from: URL, _ to: URL) -> Bool {
+                let fromIsDir = (try? from.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                let toExists = fm.fileExists(atPath: to.path)
+                if fromIsDir && toExists {
+                    for child in (try? fm.contentsOfDirectory(atPath: from.path)) ?? [] {
+                        _ = restore(from.appendingPathComponent(child), to.appendingPathComponent(child))
+                    }
+                    try? fm.removeItem(at: from)   // now-empty source shell
+                    return true
+                }
                 do {
                     try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    if fm.fileExists(atPath: to.path) { try? fm.removeItem(at: to) }
+                    if toExists { try? fm.removeItem(at: to) }
                     try fm.moveItem(at: from, to: to)
-                    restored += 1
-                } catch { failed += 1 }
+                    return true
+                } catch { return false }
             }
-            // clean up the run folder (and its parent if now empty)
+
+            // deepest `to` first so files come out before their quarantined parent
+            for op in ops.reversed().sorted(by: { $0.to.count > $1.to.count }) {
+                let from = root.appendingPathComponent(op.to)     // where it is now
+                let to = root.appendingPathComponent(op.from)      // where it belongs
+                guard fm.fileExists(atPath: from.path) else { continue }
+                if restore(from, to) { restored += 1 } else { failed += 1 }
+            }
             try? fm.removeItem(at: folder)
             let qroot = root.appendingPathComponent("Music Librarian Quarantine")
             if let empty = try? fm.contentsOfDirectory(atPath: qroot.path), empty.isEmpty {
@@ -307,7 +404,7 @@ final class PerfectStore: ObservableObject {
     private func finishUndo(restored: Int, failed: Int) {
         busy = false
         lastRunSummary = nil
-        status = "Restored \(restored) item(s)" + (failed > 0 ? ", \(failed) failed." : ".") + " Re-diagnose to see them again."
+        status = "Restored \(restored) change(s)" + (failed > 0 ? ", \(failed) failed." : ".") + " Re-diagnose to see them again."
         loadRuns()
     }
 
