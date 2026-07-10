@@ -199,6 +199,8 @@ final class PerfectStore: ObservableObject {
     @Published var proposals: [TrackProposal] = []
     @Published var identifying = false
     @Published var identifyProgress = ""
+    @Published var enriching = false
+    @Published var enrichProgress = ""
     var hasAcoustIDKey: Bool { !Identifier.configuredKey.isEmpty }
 
     // Tag writing uses a surgical TagLib shim (MDTagShim) that changes only the
@@ -610,6 +612,42 @@ final class PerfectStore: ObservableObject {
                 ? "Identified \(total) tracks — nothing to correct."
                 : "Identified \(total) tracks — \(p.count) with suggested corrections."
         }
+    }
+
+    // MARK: Enrich — second pass: MusicBrainz relationships (composer/label/credits)
+
+    /// Looks up composer, lyricist, label and performer credits for the identified
+    /// tracks. Slower than identify (MusicBrainz allows ~1 request/second), so it's
+    /// its own pass and can be cancelled; results attach to each proposal.
+    func enrich() {
+        guard !proposals.isEmpty, !enriching else { return }
+        enriching = true; enrichProgress = "Looking up credits…"
+        let box = cancelFlag; box.cancelled = false
+        let client = MusicBrainzClient()
+        let targets = proposals.compactMap { p in p.recordingID.map { (p.id, $0) } }
+        Task.detached(priority: .userInitiated) {
+            var done = 0
+            for (pid, rid) in targets {
+                if box.cancelled { break }
+                let e = await client.enrich(recordingID: rid)
+                await self.attachEnrichment(pid, e)
+                done += 1
+                await self.setEnrichProgress("Credits \(done)/\(targets.count)…")
+            }
+            await self.finishEnrich(cancelled: box.cancelled)
+        }
+    }
+
+    private func setEnrichProgress(_ s: String) { enrichProgress = s }
+
+    private func attachEnrichment(_ id: UUID, _ e: Enrichment) {
+        if let i = proposals.firstIndex(where: { $0.id == id }) { proposals[i].enrichment = e }
+    }
+
+    private func finishEnrich(cancelled: Bool) {
+        enriching = false; enrichProgress = ""
+        let filled = proposals.filter { !($0.enrichment?.isEmpty ?? true) }.count
+        if !cancelled { status = "Looked up credits — \(filled) track(s) enriched." }
     }
 
     func commit() {

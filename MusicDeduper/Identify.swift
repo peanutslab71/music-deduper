@@ -25,6 +25,7 @@ private struct ACResult: Decodable {
     let recordings: [ACRecording]?
 }
 private struct ACRecording: Decodable {
+    let id: String?                   // MusicBrainz recording MBID — key to the relationship lookups
     let title: String?
     let artists: [ACArtist]?
     let releasegroups: [ACReleaseGroup]?
@@ -55,6 +56,9 @@ struct TrackProposal: Identifiable {
     let albumCandidates: [String]     // suggested albums, best first
     var chosenAlbum: String           // editable
     var accepted: Bool
+
+    let recordingID: String?          // MusicBrainz recording, for the relationship lookups
+    var enrichment: Enrichment?       // composer/label/performers, filled by the MusicBrainz pass
 
     var artistChanged: Bool { !newArtist.isEmpty && newArtist != curArtist }
     var titleChanged: Bool  { !newTitle.isEmpty && newTitle != curTitle }
@@ -116,7 +120,9 @@ struct Identifier {
             newArtist: artist, newTitle: title,
             albumCandidates: candidates,
             chosenAlbum: chosen,
-            accepted: true)
+            accepted: true,
+            recordingID: rec.id,
+            enrichment: nil)
         return proposal
     }
 
@@ -168,5 +174,118 @@ private extension Array where Element == String {
         var seen = Set<String>(); var out: [String] = []
         for s in self where !seen.contains(s) { seen.insert(s); out.append(s) }
         return out
+    }
+}
+
+// MARK: - MusicBrainz relationship enrichment
+
+/// The extra metadata a MusicBrainz recording gives us beyond names: composer,
+/// lyricist, label, and performer credits (sidemen with instruments). These are
+/// filled only when the file's field is blank — see docs/metadata-mapping.md.
+struct Enrichment {
+    var composer: String?
+    var lyricist: String?
+    var label: String?
+    var catalogNumber: String?
+    var date: String?
+    var performers: [Performer] = []       // (name, role) — go in the credits field, never artist
+    struct Performer { let name: String; let role: String }
+
+    var isEmpty: Bool {
+        composer == nil && lyricist == nil && label == nil && catalogNumber == nil
+            && date == nil && performers.isEmpty
+    }
+}
+
+// Minimal MusicBrainz JSON models (only the fields we read)
+private struct MBRecording: Decodable { let relations: [MBRelation]?; let releases: [MBRef]? }
+private struct MBWork: Decodable { let relations: [MBRelation]? }
+private struct MBRelease: Decodable {
+    let date: String?
+    let labelInfo: [MBLabelInfo]?
+    enum CodingKeys: String, CodingKey { case date; case labelInfo = "label-info" }
+}
+private struct MBRelation: Decodable {
+    let type: String
+    let artist: MBRef?
+    let work: MBRef?
+    let attributes: [String]?
+}
+private struct MBRef: Decodable { let id: String?; let name: String?; let title: String? }
+private struct MBLabelInfo: Decodable {
+    let label: MBRef?
+    let catalogNumber: String?
+    enum CodingKeys: String, CodingKey { case label; case catalogNumber = "catalog-number" }
+}
+
+/// Looks up MusicBrainz relationships for a recording. An actor so its per-run
+/// caches are safe, and it serialises requests — MusicBrainz allows ~1 req/sec,
+/// so each network call waits a beat, and works/releases are cached to avoid
+/// repeat lookups (many tracks share a release).
+actor MusicBrainzClient {
+    private let session = URLSession(configuration: .ephemeral)
+    private let userAgent = "MusicDeduper ( neil.cottyincar@gmail.com )"
+    private var workCache: [String: (composer: String?, lyricist: String?)] = [:]
+    private var releaseCache: [String: (label: String?, catalog: String?, date: String?)] = [:]
+
+    func enrich(recordingID: String) async -> Enrichment {
+        var e = Enrichment()
+        guard let rec: MBRecording = await get(
+            "recording/\(recordingID)?inc=work-rels+artist-rels+releases") else { return e }
+
+        // performers (instrument / vocal relationships) → credits
+        for r in rec.relations ?? [] where r.type == "instrument" || r.type == "vocal" {
+            if let name = r.artist?.name {
+                let role = (r.attributes?.first) ?? r.type
+                e.performers.append(.init(name: name, role: role))
+            }
+        }
+        // composer / lyricist via the linked work
+        if let workID = (rec.relations ?? []).first(where: { $0.type == "performance" })?.work?.id {
+            let w = await cachedWork(workID)
+            e.composer = w.composer; e.lyricist = w.lyricist
+        }
+        // label / catalog / date via the first release
+        if let releaseID = rec.releases?.first?.id {
+            let r = await cachedRelease(releaseID)
+            e.label = r.label; e.catalogNumber = r.catalog; e.date = r.date
+        }
+        return e
+    }
+
+    private func cachedWork(_ id: String) async -> (composer: String?, lyricist: String?) {
+        if let c = workCache[id] { return c }
+        var out: (composer: String?, lyricist: String?) = (nil, nil)
+        if let w: MBWork = await get("work/\(id)?inc=artist-rels") {
+            for r in w.relations ?? [] {
+                if r.type == "composer", out.composer == nil { out.composer = r.artist?.name }
+                if r.type == "lyricist", out.lyricist == nil { out.lyricist = r.artist?.name }
+            }
+        }
+        workCache[id] = out
+        return out
+    }
+
+    private func cachedRelease(_ id: String) async -> (label: String?, catalog: String?, date: String?) {
+        if let c = releaseCache[id] { return c }
+        var out: (label: String?, catalog: String?, date: String?) = (nil, nil, nil)
+        if let r: MBRelease = await get("release/\(id)?inc=labels") {
+            out.date = r.date
+            if let li = r.labelInfo?.first {
+                out.label = li.label?.name; out.catalog = li.catalogNumber
+            }
+        }
+        releaseCache[id] = out
+        return out
+    }
+
+    /// One MusicBrainz GET, JSON-decoded, after a courtesy delay for the rate limit.
+    private func get<T: Decodable>(_ path: String) async -> T? {
+        try? await Task.sleep(nanoseconds: 1_100_000_000)   // ~1 req/sec
+        guard let url = URL(string: "https://musicbrainz.org/ws/2/\(path)&fmt=json") else { return nil }
+        var req = URLRequest(url: url)
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        guard let (data, _) = try? await session.data(for: req) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
     }
 }
