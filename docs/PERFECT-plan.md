@@ -222,14 +222,15 @@ avoid that. Perfect does not attempt to replicate server-side presentation
 
 ## 8. Phasing (each phase usable on its own)
 
-**Phase 1 — Tidy** *(local, no network, low risk; reuses the File Commander
-engine)*
+**Phase 1 — Tidy + Dedupe** *(local, no network, low risk; reuses the existing
+dedupe and File Commander engines)*
 - Detect + review + fix: junk removal (class A), empty-folder cleanup and
   illegal-char renames (class B), duplicate-*folder* merges (class C at the
-  folder level), duplicate-recording handling (class E), and DRM detection +
-  manifest (class F).
+  folder level), **duplicate-recording handling (class E), reusing the existing
+  clustering/keeper-ranking logic**, and DRM detection + manifest (class F).
 - Ships the **before/after review + commit + undo** workflow with zero network
-  risk, establishing the safety model everything later depends on.
+  risk, establishing the safety model everything later depends on, and folds the
+  old Review/Clean up dedupe steps into the unified Perfect review.
 
 **Phase 2 — Identify & Tag**
 - Acoustic identification (AcoustID + ShazamKit), MusicBrainz resolution,
@@ -284,10 +285,15 @@ delivers the cleaned result.
   library wherever it lives (local or server) and pulls each file's audio locally
   only when it needs to fingerprint/read it, caching temporarily; no full upfront
   copy.
-- **UI placement:** Perfect is the **first item** on the main window's top bar,
-  ahead of the dedupe wizard (Perfect › Source › Review › Clean up › Copy |
-  Browse). Restoring/cleaning the library is the start of the process; dedupe and
-  copy follow. Perfect has a self-contained diagnose → review → commit flow.
+- **App structure:** the whole flow collapses to **Source › Perfect › Copy |
+  Browse**. Perfect **absorbs** the old Review and Clean up steps *and* the
+  separate de-duplication function — de-duplication becomes one of the things
+  Perfect does, not a standalone step. Source picks the library; Perfect makes it
+  right (diagnose → review → commit); Copy delivers the result to a server (used
+  only when the destination differs from the source — if the library is already
+  on the server, Perfect fixes it in place and no copy is needed); Browse is the
+  separate File Commander tool. The existing dedupe logic (clustering, keeper
+  ranking, conflict handling) is **reused inside Perfect**, not discarded.
 - **Classical:** the **full classical tag model** (composer / work / movement /
   ensemble / soloist) is in scope for Phase 3.
 
