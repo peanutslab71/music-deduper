@@ -371,11 +371,10 @@ struct PaneView: View {
     @ObservedObject var model: PaneModel
     @ObservedObject var other: PaneModel
     @ObservedObject var store: DedupStore
-    @ObservedObject var drag: DragState
+    @ObservedObject var drag: DragState      // reserved for a future drag-and-drop pass
     let arrow: String
     let isActive: Bool
     let makeActive: () -> Void
-    @State private var dropTargeted = false
 
     private func transfer(move: Bool) {
         let picked = model.selectedItems
@@ -388,28 +387,6 @@ struct PaneView: View {
         store.runTransfer(picked, from: model.endpoint, to: other.endpoint, move: move) {
             model.reload(); other.reload()
         }
-    }
-
-    /// A drop landed on this pane (optionally into a sub-folder here). Source is
-    /// the dragged-from pane; same-location drops move, cross-location copy —
-    /// the Finder convention.
-    private func handleDrop(intoSubfolder sub: String? = nil) -> Bool {
-        guard let sp = drag.source, !drag.items.isEmpty else { return false }
-        let picked = drag.items
-        drag.clear()
-        // dropping onto the same folder it came from with no sub-target = no-op
-        if sp === model && sub == nil { return false }
-        let destEnd = model.endpoint(appendingSub: sub)
-        let move = PaneModel.sameLocation(sp, model)
-        if move, sub == nil, sp.canMoveInstantly(to: model) {
-            sp.selection = Set(picked.map(\.name))
-            sp.moveSelection(to: model)
-            return true
-        }
-        store.runTransfer(picked, from: sp.endpoint, to: destEnd, move: move) {
-            sp.reload(); model.reload()
-        }
-        return true
     }
 
     @State private var showPicker = false
@@ -475,19 +452,6 @@ struct PaneView: View {
                 TableColumn("Name") { item in
                     Label(item.name, systemImage: item.isDir ? "folder.fill" : "music.note")
                         .labelStyle(.titleAndIcon)
-                        // draggable source; double-click to open is preserved by
-                        // re-issuing it as a simultaneous gesture (onDrag alone
-                        // swallows the Table's primaryAction double-click)
-                        .onDrag {
-                            let names = model.selection.contains(item.name)
-                                ? model.selectedItems
-                                : [(item.name, item.isDir)]
-                            drag.begin(model, items: names)
-                            return NSItemProvider(object: item.name as NSString)
-                        }
-                        .simultaneousGesture(TapGesture(count: 2).onEnded {
-                            if item.isDir { model.open(item.name) }
-                        })
                 }
                 .width(min: 200, ideal: 320)
                 TableColumn("Size") { item in
@@ -573,14 +537,11 @@ struct PaneView: View {
             }
             .padding(8)
         }
-        .background((isActive || dropTargeted) ? Color.accentColor.opacity(dropTargeted ? 0.12 : 0.04) : Color.clear)
+        .background(isActive ? Color.accentColor.opacity(0.04) : Color.clear)
         .overlay(alignment: .top) {
             Rectangle().fill(isActive ? Color.accentColor : Color.clear).frame(height: 2)
         }
-        .contentShape(Rectangle())
-        .onTapGesture { makeActive() }
         .onChange(of: model.selection) { sel in if !sel.isEmpty { makeActive() } }
-        .onDrop(of: [.text], isTargeted: $dropTargeted) { _ in handleDrop() }
         .sheet(isPresented: $showPicker) {
             ServerPickerSheet { host, share in
                 model.setServer(host: host, share: share)
