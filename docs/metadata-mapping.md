@@ -105,6 +105,45 @@ Notes:
 - **Title / album**: canonical form from MusicBrainz (including proper typography).
 - **Artwork**: Cover Art Archive → embedded image frame (APIC / covr), reversible.
 
+## Second enrichment source: Discogs
+
+MusicBrainz is the canonical identity (CC0, fingerprint-linked) but is often thin
+on **credits** — for many recordings its performer list is empty. **Discogs**
+fills that gap: it's strong on personnel, production credits, labels/pressings,
+and genres/styles, and — critically — **its data is released CC0 (public domain)**,
+so we can embed it into files, exactly like MusicBrainz and unlike Gracenote
+(whose licence forbids persisting its metadata into user files).
+
+**Why not Gracenote:** excellent data, but its licence only permits using the API
+*inside* a licensed app, not extracting and writing its metadata permanently into
+the user's files — which is Perfect's whole job. It's also a closed SDK and can't
+ship in a public open-source repo. CC0 sources (MusicBrainz, Discogs, Cover Art
+Archive) are the only ones we can legally bake into tags.
+
+**Matching (no fuzzy search):** the MusicBrainz release we already look up carries
+a curated URL relationship to its Discogs release (`inc=url-rels`, relation type
+`discogs`). We take that Discogs release ID directly — an exact, human-verified
+link — and read the Discogs release. This avoids Discogs text-search ambiguity
+entirely. Fallback (only if no MB link): Discogs search, which needs a token.
+
+**What Discogs supplies** (`GET api.discogs.com/releases/{id}`):
+- `extraartists` — credits with free-text roles. Route by role:
+  - instrument/vocal roles (e.g. "Tenor Saxophone", "Guitar", "Vocals") → **performer** (TMCL)
+  - "Producer", "Engineer", "Mixed By", "Mastered By" → **production credits** (TIPL)
+  - "Written-By", "Composed By" → **composer**; "Lyrics By" → **lyricist**
+- `labels` → label + catalog number (backup to MusicBrainz)
+- `genres` / `styles` → genre
+- `year` → date (backup)
+
+**Precedence:** MusicBrainz first for canonical identity and any field it has;
+Discogs tops up **blank** fields and adds the production/performer credits MB
+lacks. Never overwrite an existing value (same gap-fill rule as everything else).
+
+**Access:** reads are unauthenticated at 25 requests/min; a free personal token
+raises this to 60/min and enables search. A `User-Agent` header is required. If
+used, the token lives in the gitignored `Secrets.xcconfig` like the AcoustID key.
+Per-release caching keeps it to one Discogs read per album.
+
 ## Known bug to fix (current code)
 
 `Identify.swift` builds the artist as
