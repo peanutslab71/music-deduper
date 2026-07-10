@@ -143,6 +143,28 @@ items are illustrative, not a fixed list.
 - Low-confidence matches are never auto-applied.
 - No "one-click fix everything" that writes before review.
 
+### Backup & recovery
+
+- Before any run that will modify the library, Perfect offers to make a
+  **backup first — enabled (checked) by default**. The user can uncheck it, but
+  the safe default is always to back up before touching anything.
+- The backup is a **zip** (reusing the existing zip-export machinery), written to
+  a dated location beside the library (or a user-chosen location).
+- A **restore path**: the app lists existing backups and can recover the library
+  (or selected parts) from a chosen backup.
+- Together with the quarantine (removed items) and the change log (below), this
+  gives three independent layers of recoverability: restore a whole backup, undo
+  a run from the change log, or fish an item out of quarantine.
+
+### Change log (audit trail)
+
+- Every committed change is recorded with **before → after**: the file, the
+  action (tag write / rename / move / delete-to-quarantine), the old value and
+  the new value.
+- Written per run, human-readable, and complete enough to **drive the undo** — so
+  a run can be reversed field-by-field, not just "restore everything".
+- Extends the existing run-log infrastructure.
+
 ---
 
 ## 5. Metadata & identification stack
