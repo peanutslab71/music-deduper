@@ -8,6 +8,40 @@
 
 import SwiftUI
 
+/// An album cover: the file's embedded art if it has one, else the cover we
+/// *found* (Cover Art Archive) if art is going to be added, else a placeholder.
+struct AlbumCover: View {
+    @ObservedObject private var art = ArtworkCache.shared
+    @ObservedObject private var found = FoundArtCache.shared
+    let key: String
+    let sampleURL: URL?
+    let foundMBID: String?
+    let size: CGFloat
+    var corner: CGFloat = 12
+
+    var body: some View {
+        Group {
+            if let img = art.cached(key) ?? foundMBID.flatMap({ found.cached($0) }) {
+                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                ZStack {
+                    LinearGradient(colors: [Color.secondary.opacity(0.18), Color.secondary.opacity(0.10)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                    Image(systemName: "music.note").font(.system(size: size * 0.32, weight: .light))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: corner))
+        .overlay(RoundedRectangle(cornerRadius: corner).strokeBorder(Color.black.opacity(0.08)))
+        .onAppear {
+            art.request(key: key, sampleURL: sampleURL)
+            if let m = foundMBID { found.request(m) }
+        }
+    }
+}
+
 struct PerfectView: View {
     @ObservedObject var store: PerfectStore
     @ObservedObject private var audio = AudioPreview.shared
@@ -378,7 +412,7 @@ struct PerfectView: View {
         let a = store.albumChanges.first(where: { $0.id == id })
         return VStack(spacing: 0) {
             HStack(spacing: 12) {
-                ArtworkView(key: id, sampleURL: props.first?.url, size: 52, corner: 8)
+                AlbumCover(key: id, sampleURL: props.first?.url, foundMBID: a?.artReleaseMBID, size: 52, corner: 8)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(a?.title ?? "Album").font(.headline)
                     Text("\(a?.subtitle ?? "") · \(props.count) track(s)").font(.caption).foregroundStyle(.secondary)
@@ -418,7 +452,7 @@ struct PerfectView: View {
                         Image(systemName: "chevron.left").frame(width: 28, height: 28)
                     }.buttonStyle(.bordered).disabled(queue.count < 2)
 
-                    ArtworkView(key: p.url.deletingLastPathComponent().path, sampleURL: p.url, size: 96, corner: 8)
+                    AlbumCover(key: p.url.deletingLastPathComponent().path, sampleURL: p.url, foundMBID: p.enrichment?.releaseMBID, size: 96, corner: 8)
 
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 6) {
@@ -551,7 +585,7 @@ struct PerfectView: View {
         } label: {
             VStack(alignment: .leading, spacing: 8) {
                 ZStack(alignment: .bottomLeading) {
-                    ArtworkView(key: a.id, sampleURL: a.sampleURL, size: 176, corner: 12)
+                    AlbumCover(key: a.id, sampleURL: a.sampleURL, foundMBID: a.artReleaseMBID, size: 176)
                     HStack(spacing: 5) {
                         if a.names { cardTag("Names", .blue) }
                         if a.artwork { cardTag("+ Art", .pink) }
@@ -738,6 +772,21 @@ struct PerfectView: View {
         .animation(.easeOut(duration: 0.25), value: store.recentFinds)
     }
 
+    private func fmtTime(_ s: Double) -> String {
+        guard s.isFinite, s >= 0 else { return "0:00" }
+        return String(format: "%d:%02d", Int(s) / 60, Int(s) % 60)
+    }
+
+    private var scrubBar: some View {
+        HStack(spacing: 8) {
+            Text(fmtTime(audio.currentTime)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+            Slider(value: Binding(get: { audio.progress }, set: { audio.seek(to: $0) }), in: 0...1)
+                .controlSize(.mini).tint(.teal)
+            Text(fmtTime(audio.duration)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+
     private func playButton(_ url: URL) -> some View {
         let playing = audio.playingURL == url
         return Button { audio.toggle(url) } label: {
@@ -755,6 +804,12 @@ struct PerfectView: View {
                         .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
                     Text(String(format: "%.0f%%", p.score * 100)).font(.caption2)
                         .foregroundStyle(p.score >= 0.9 ? .green : .orange)
+                    if let rid = p.recordingID, let url = URL(string: "https://musicbrainz.org/recording/\(rid)") {
+                        Link(destination: url) {
+                            HStack(spacing: 2) { Text("source"); Image(systemName: "arrow.up.forward.square") }
+                                .font(.caption2)
+                        }.foregroundStyle(.teal)
+                    }
                     Spacer()
                     Picker("", selection: Binding(
                         get: { p.accepted },
@@ -765,6 +820,7 @@ struct PerfectView: View {
                     }.pickerStyle(.segmented).labelsHidden().frame(width: 220).controlSize(.small)
                         .disabled(!p.hasChange && !p.canAddArt)
                 }
+                if audio.playingURL == p.url { scrubBar }
                 fieldChange("Artist", p.curArtist, p.newArtist, p.artistChanged)
                 fieldChange("Title", p.curTitle, p.newTitle, p.titleChanged)
                 HStack(spacing: 6) {

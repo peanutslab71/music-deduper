@@ -154,6 +154,39 @@ struct RunRecord: Identifiable {
     let summary: String
 }
 
+// MARK: - Found cover art (preview before it's embedded)
+
+/// Fetches Cover Art Archive thumbnails by release MBID so an album whose art we
+/// *found* (but haven't embedded yet) shows the real cover in the grid.
+@MainActor
+final class FoundArtCache: ObservableObject {
+    static let shared = FoundArtCache()
+    private let images: NSCache<NSString, NSImage> = { let c = NSCache<NSString, NSImage>(); c.countLimit = 400; return c }()
+    private var misses = Set<String>(); private var inflight = Set<String>()
+
+    func cached(_ mbid: String) -> NSImage? { images.object(forKey: mbid as NSString) }
+
+    func request(_ mbid: String) {
+        guard images.object(forKey: mbid as NSString) == nil, !misses.contains(mbid), !inflight.contains(mbid) else { return }
+        inflight.insert(mbid)
+        Task {
+            let img = await Self.fetch(mbid)
+            self.inflight.remove(mbid)
+            if let img { self.images.setObject(img, forKey: mbid as NSString) } else { self.misses.insert(mbid) }
+            self.objectWillChange.send()
+        }
+    }
+
+    nonisolated private static func fetch(_ mbid: String) async -> NSImage? {
+        guard let url = URL(string: "https://coverartarchive.org/release/\(mbid)/front-250") else { return nil }
+        var req = URLRequest(url: url)
+        req.setValue("MusicDeduper ( neil.cottyincar@gmail.com )", forHTTPHeaderField: "User-Agent")
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200, let img = NSImage(data: data) else { return nil }
+        return img
+    }
+}
+
 // MARK: - Audio preview
 
 /// Plays a track so the user can listen and judge whether a proposed change is
@@ -161,7 +194,11 @@ struct RunRecord: Identifiable {
 final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
     static let shared = AudioPreview()
     private var player: AVAudioPlayer?
+    private var timer: Timer?
     @Published var playingURL: URL?
+    @Published var progress: Double = 0        // 0…1 through the track
+    var duration: Double { player?.duration ?? 0 }
+    var currentTime: Double { player?.currentTime ?? 0 }
 
     func toggle(_ url: URL) {
         if playingURL == url { stop(); return }
@@ -170,17 +207,27 @@ final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
             let p = try AVAudioPlayer(contentsOf: url)
             p.delegate = self
             p.play()
-            player = p
-            playingURL = url
+            player = p; playingURL = url; progress = 0
+            timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+                guard let self, let p = self.player, p.duration > 0 else { return }
+                self.progress = p.currentTime / p.duration
+            }
         } catch { playingURL = nil }
     }
 
+    func seek(to frac: Double) {
+        guard let p = player, p.duration > 0 else { return }
+        p.currentTime = max(0, min(1, frac)) * p.duration
+        progress = frac
+    }
+
     func stop() {
-        player?.stop(); player = nil; playingURL = nil
+        timer?.invalidate(); timer = nil
+        player?.stop(); player = nil; playingURL = nil; progress = 0
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        DispatchQueue.main.async { self.player = nil; self.playingURL = nil }
+        DispatchQueue.main.async { self.stop() }
     }
 }
 
@@ -299,6 +346,7 @@ final class PerfectStore: ObservableObject {
         let sampleURL: URL?
         let trackCount: Int
         var names = false, artwork = false, credits = false
+        var artReleaseMBID: String? = nil   // for previewing found (not-yet-embedded) art
     }
 
     /// Albums touched by identify/enrich, for the cover carousel. Grouped by the
@@ -319,7 +367,8 @@ final class PerfectStore: ObservableObject {
                 trackCount: props.count,
                 names: props.contains { $0.hasChange },
                 artwork: props.contains { $0.canAddArt },
-                credits: props.contains { !($0.enrichment?.isEmpty ?? true) })
+                credits: props.contains { !($0.enrichment?.isEmpty ?? true) },
+                artReleaseMBID: props.first(where: { $0.canAddArt })?.enrichment?.releaseMBID)
         }.sorted { $0.title.lowercased() < $1.title.lowercased() }
     }
 
