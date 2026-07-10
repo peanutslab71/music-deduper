@@ -280,12 +280,17 @@ struct PerfectView: View {
                     Button("Cancel") { store.cancel() }.controlSize(.small)
                 } else if !store.hasAcoustIDKey {
                     Text("needs an AcoustID key").font(.caption2).foregroundStyle(.orange)
+                } else if store.enriching {
+                    HStack(spacing: 6) { ProgressView().controlSize(.small); Text(store.enrichProgress).font(.caption).foregroundStyle(.secondary) }
+                    Button("Cancel") { store.cancel() }.controlSize(.small)
                 } else {
                     if !store.proposals.isEmpty {
                         let allOn = store.proposals.allSatisfy { $0.accepted }
                         Button(allOn ? "Deselect all" : "Select all") {
                             for i in store.proposals.indices { store.proposals[i].accepted = !allOn }
                         }.controlSize(.small)
+                        Button("Fill credits") { store.enrich() }.controlSize(.small)
+                            .help("Look up composer, label and performers on MusicBrainz (slower)")
                     }
                     Button(store.proposals.isEmpty ? "Identify" : "Re-identify") {
                         expanded.insert("identify"); store.identify()
@@ -332,10 +337,35 @@ struct PerfectView: View {
                     }.labelsHidden().frame(maxWidth: 300)
                     if p.albumChanged { Text("change").font(.caption2).foregroundStyle(.blue) }
                 }
+                creditChips(p)
             }
             Spacer()
         }
         .padding(.vertical, 2)
+    }
+
+    private func creditStrings(_ e: Enrichment) -> [String] {
+        var chips: [String] = []
+        if let c = e.composer { chips.append("+ Composer: \(c)") }
+        if let l = e.lyricist { chips.append("+ Lyricist: \(l)") }
+        if let lb = e.label { chips.append("+ Label: \(lb)") }
+        for pf in e.performers.prefix(3) { chips.append("+ \(pf.name) · \(pf.role)") }
+        return chips
+    }
+
+    // Green "+" chips for the enrichment gap-fills (composer/label/performers).
+    @ViewBuilder private func creditChips(_ p: TrackProposal) -> some View {
+        if let e = p.enrichment, !e.isEmpty {
+            let chips = creditStrings(e)
+            HStack(spacing: 6) {
+                ForEach(chips, id: \.self) { c in
+                    Text(c).font(.system(size: 10)).foregroundStyle(Color(red: 0.03, green: 0.4, blue: 0.15))
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Capsule().fill(Color.green.opacity(0.18)))
+                }
+            }
+            .padding(.top, 1)
+        }
     }
 
     @ViewBuilder private func fieldChange(_ label: String, _ old: String, _ new: String, _ changed: Bool) -> some View {
