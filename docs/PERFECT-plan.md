@@ -434,6 +434,10 @@ UX decisions:
 - **Thoroughness:** presets **Light / Standard / Thorough**, each explained by an
   info popup, **defaulting to Thorough** (the pedantic/audiophile default);
   cautious users can drop to Light/Standard.
+- **Selection default:** every change Perfect proposes is **pre-selected (on)**
+  by default — the user opts *out* of anything they don't want, rather than
+  hunting for what's off. Consistent across all change types. (Informational
+  items like DRM have no checkbox — they're never actioned.)
 - **Default folder layout:** **Album Artist / Album / NN Title** (top folder by
   album artist so compilations and guest-heavy albums stay together).
   Configurable.
