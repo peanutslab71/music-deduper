@@ -110,21 +110,17 @@ struct Identifier {
         do { fp = try autoreleasepool { try AudioFingerprint(from: url) } }
         catch { throw IdentifyError.fingerprint(error) }
 
-        let (score, rec) = try await lookup(fingerprint: fp.base64, duration: Int(fp.duration.rounded()))
-        guard let rec else { return nil }
-
-        // Use only the PRIMARY billed artist. Never comma-join credited names —
-        // Roon (and any parser) breaks on it, and real names contain commas
-        // ("Earth, Wind & Fire"). Genuine multi-artist billing (as separate tag
-        // values) and additional performers (as performer credits) arrive with the
-        // MusicBrainz-relationship layer. See docs/metadata-mapping.md.
-        let artist = rec.artists?.first?.name ?? ""
-        let title = rec.title ?? ""
+        let (score, recordings) = try await lookup(fingerprint: fp.base64, duration: Int(fp.duration.rounded()))
+        // Consensus pick that trusts the existing tag — never overrides a good
+        // artist on one junk cluster entry (e.g. AC/DC → "Maynard Ferguson").
+        guard let pick = Self.chooseRecording(recordings, existingArtist: curArtist) else { return nil }
+        let artist = pick.artist
+        let title = pick.rec.title ?? ""
         // Album is ambiguous (a recording lives on many releases) and the file's
         // own album tag is often correct and not even among the candidates — so
         // the default is NO album change. The fingerprint's albums are offered as
         // options, with the current album kept first and selected.
-        let ranked = rankAlbums(rec.releasegroups ?? [], preferring: curAlbum)
+        let ranked = rankAlbums(pick.rec.releasegroups ?? [], preferring: curAlbum)
         var candidates = ranked
         var chosen = ranked.first ?? ""
         if !curAlbum.isEmpty {
@@ -139,7 +135,7 @@ struct Identifier {
             albumCandidates: candidates,
             chosenAlbum: chosen,
             accepted: true,
-            recordingID: rec.id,
+            recordingID: pick.rec.id,
             curHasArt: curHasArt,
             enrichment: nil)
         return proposal
@@ -147,7 +143,7 @@ struct Identifier {
 
     /// AcoustID lookup → (score, best recording). Own parser so a response shape
     /// we don't expect fails cleanly rather than silently.
-    private func lookup(fingerprint: String, duration: Int) async throws -> (Double, ACRecording?) {
+    private func lookup(fingerprint: String, duration: Int) async throws -> (Double, [ACRecording]) {
         var comps = URLComponents(string: "https://api.acoustid.org/v2/lookup")!
         // meta uses '+' as a separator (space); URLComponents encodes the rest
         comps.percentEncodedQuery =
@@ -162,8 +158,49 @@ struct Identifier {
 
         guard let resp = try? JSONDecoder().decode(ACResponse.self, from: data),
               resp.status == "ok" else { throw IdentifyError.decode }
-        guard let top = resp.results?.first else { return (0, nil) }
-        return (top.score, top.recordings?.first)
+        guard let results = resp.results, let top = results.first else { return (0, []) }
+        // Pool the recordings from every result. A fingerprint cluster usually
+        // contains the correct recording many times over plus the odd mis-tagged
+        // junk entry — so we never let a single entry (or its position) decide.
+        return (top.score, results.flatMap { $0.recordings ?? [] })
+    }
+
+    // Normalised artist key for matching (case, & vs and, punctuation).
+    private static func nk(_ s: String) -> String {
+        s.lowercased().replacingOccurrences(of: " & ", with: " and ")
+            .components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
+    }
+    private static func mostCommon(_ xs: [String]) -> String? {
+        guard !xs.isEmpty else { return nil }
+        var counts: [String: Int] = [:]
+        for x in xs { counts[x, default: 0] += 1 }
+        return counts.max { $0.value < $1.value }?.key
+    }
+
+    /// Choose a recording by consensus, trusting the existing tag:
+    /// - existing artist present and the cluster corroborates it → keep that
+    ///   artist, take the most common title among the agreeing recordings;
+    /// - existing artist present but absent from the cluster → return nil (the
+    ///   match is unreliable — leave the file alone, never override a good tag);
+    /// - existing artist blank/junk → fill from the cluster's majority.
+    private static func chooseRecording(_ recs: [ACRecording], existingArtist: String)
+        -> (artist: String, rec: ACRecording)? {
+        guard !recs.isEmpty else { return nil }
+        func recArtist(_ r: ACRecording) -> String { r.artists?.first?.name ?? "" }
+        let curKey = nk(existingArtist)
+        let pool: [ACRecording]
+        let useArtist: String
+        if !curKey.isEmpty {
+            let matching = recs.filter { nk(recArtist($0)) == curKey }
+            guard !matching.isEmpty else { return nil }   // cluster disagrees → keep as-is
+            pool = matching; useArtist = existingArtist
+        } else {
+            guard let artist = mostCommon(recs.map(recArtist).filter { !$0.isEmpty }) else { return nil }
+            pool = recs.filter { nk(recArtist($0)) == nk(artist) }; useArtist = artist
+        }
+        guard let title = mostCommon(pool.compactMap { $0.title }.filter { !$0.isEmpty }),
+              let rec = pool.first(where: { $0.title == title }) else { return nil }
+        return (useArtist, rec)
     }
 
     /// Rank candidate albums: an exact/one-line match to the current album wins,
