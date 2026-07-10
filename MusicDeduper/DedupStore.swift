@@ -913,6 +913,8 @@ final class DedupStore: ObservableObject {
         opPaused = false
         opActiveStreams = 0; opStreamLimit = 0
         let box = cancelBox
+        let conflicts = conflictBox
+        conflicts.reset()
 
         Task.detached(priority: .userInitiated) {
             await self.opLogLine("ℹ \(verb.lowercased()) from \(src.label)")
@@ -950,15 +952,49 @@ final class DedupStore: ObservableObject {
             }
 
             // 3) transfer each file
-            var ok = 0, fail = 0
+            var ok = 0, skip = 0, fail = 0
             for (n, f) in files.enumerated() {
                 if box.cancelled { break }
+
+                // conflict: destination file already exists → ask (Overwrite / Skip,
+                // each or All) unless a sticky policy is set. No silent overwrites.
+                if let dstSize = await Self.destFileSize(dst, rel: f.rel) {
+                    var decision = conflicts.policy
+                    if decision == nil {
+                        let name = (f.rel as NSString).lastPathComponent
+                        await self.presentConflict(CopyConflict(
+                            name: name, artist: "", album: (f.rel as NSString).deletingLastPathComponent,
+                            srcURL: URL(fileURLWithPath: "/"), srcSize: f.size,
+                            dstSize: dstSize, dstDate: nil, identical: dstSize == f.size))
+                        while !box.cancelled {
+                            if let d = conflicts.take() { decision = d; break }
+                            try? await Task.sleep(nanoseconds: 200_000_000)
+                        }
+                        await self.presentConflict(nil)
+                        if box.cancelled { break }
+                    }
+                    if decision == .skip || decision == .skipAll {
+                        skip += 1
+                        await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail,
+                                          line: "• kept existing \(f.rel)")
+                        continue
+                    }
+                }
+
+                await self.setNote("→ \(f.rel)  0%")
+                let fSize = f.size, fRel = f.rel
+                let onBytes: @Sendable (Int64) -> Void = { bytes in
+                    Task { @MainActor in
+                        let pct = fSize > 0 ? Int(Double(bytes) / Double(fSize) * 100) : 100
+                        self.opNote = "→ \(fRel)  \(pct)%  (\(fmtBytes(bytes)) / \(fmtBytes(fSize)))"
+                    }
+                }
                 var done = false
                 var attempt = 0
                 while !box.cancelled && attempt < 3 {
                     do {
                         try await Self.transferFile(rel: f.rel, from: src, to: dst,
-                                                    expected: f.size, cancel: box)
+                                                    expected: f.size, cancel: box, onBytes: onBytes)
                         done = true; break
                     } catch {
                         attempt += 1
@@ -969,13 +1005,14 @@ final class DedupStore: ObservableObject {
                         }
                     }
                 }
+                await self.setNote("")
                 if done {
                     ok += 1
                     await MainActor.run { self.opBytesDone += f.size }
-                    await self.opStep(done: n + 1, ok: ok, skip: 0, fail: fail, line: "✓ \(f.rel)")
+                    await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail, line: "✓ \(f.rel)")
                 } else if !box.cancelled {
                     fail += 1
-                    await self.opStep(done: n + 1, ok: ok, skip: 0, fail: fail, line: "✗ \(f.rel) — failed")
+                    await self.opStep(done: n + 1, ok: ok, skip: skip, fail: fail, line: "✗ \(f.rel) — failed")
                 }
             }
 
@@ -1032,6 +1069,19 @@ final class DedupStore: ObservableObject {
         }
     }
 
+    /// Size of an existing file at the destination, or nil if it doesn't exist.
+    private static func destFileSize(_ end: XferEnd, rel: String) async -> Int64? {
+        switch end {
+        case .server(let c, let base):
+            return (try? await c.fileSize(base.isEmpty ? rel : base + "/" + rel)).flatMap { $0 }
+        case .local(let baseURL):
+            let url = baseURL.appendingPathComponent(rel)
+            guard FileManager.default.fileExists(atPath: url.path),
+                  let v = try? url.resourceValues(forKeys: [.fileSizeKey]) else { return nil }
+            return Int64(v.fileSize ?? 0)
+        }
+    }
+
     private static func makeDir(end: XferEnd, rel: String) async throws {
         switch end {
         case .server(let c, let base):
@@ -1054,7 +1104,8 @@ final class DedupStore: ObservableObject {
     /// Transfer one file (source relative path → same relative path at dest),
     /// via a temp name + verify + rename so a partial file is never visible.
     private static func transferFile(rel: String, from src: XferEnd, to dst: XferEnd,
-                                     expected: Int64, cancel: CancelBox) async throws {
+                                     expected: Int64, cancel: CancelBox,
+                                     onBytes: (@Sendable (Int64) -> Void)? = nil) async throws {
         switch (src, dst) {
         case let (.local(sBase), .local(dBase)):
             let s = sBase.appendingPathComponent(rel)
@@ -1062,20 +1113,21 @@ final class DedupStore: ObservableObject {
             try FileManager.default.createDirectory(at: d.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
             if FileManager.default.fileExists(atPath: d.path) { try? FileManager.default.removeItem(at: d) }
-            try FileManager.default.copyItem(at: s, to: d)
+            try FileManager.default.copyItem(at: s, to: d)   // local copy is fast, no per-byte progress
+            onBytes?(expected)
 
         case let (.local(sBase), .server(c, dBase)):
             let s = sBase.appendingPathComponent(rel)
             let dPath = DirectSMBClient.nfc(dBase.isEmpty ? rel : dBase + "/" + rel)
             try await c.mkdirs((dPath as NSString).deletingLastPathComponent)
-            try await c.upload(local: s, to: dPath)
+            try await c.upload(local: s, to: dPath, onBytes: onBytes)
 
         case let (.server(c, sBase), .local(dBase)):
             let sPath = sBase.isEmpty ? rel : sBase + "/" + rel
             let d = dBase.appendingPathComponent(rel)
             try FileManager.default.createDirectory(at: d.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
-            try await c.download(path: sPath, to: d)
+            try await c.download(path: sPath, to: d, onBytes: onBytes)
 
         case let (.server(sc, sBase), .server(dc, dBase)):
             // Same-share MOVES are intercepted upstream (instant rename), so any
@@ -1085,10 +1137,10 @@ final class DedupStore: ObservableObject {
             let dPath = DirectSMBClient.nfc(dBase.isEmpty ? rel : dBase + "/" + rel)
             let tmp = FileManager.default.temporaryDirectory
                 .appendingPathComponent("md-xfer-" + UUID().uuidString)
-            try await sc.download(path: sPath, to: tmp)
+            try await sc.download(path: sPath, to: tmp)          // download phase (silent)
             defer { try? FileManager.default.removeItem(at: tmp) }
             try await dc.mkdirs((dPath as NSString).deletingLastPathComponent)
-            try await dc.upload(local: tmp, to: dPath)
+            try await dc.upload(local: tmp, to: dPath, onBytes: onBytes)   // upload phase shows %
         }
     }
 
@@ -1284,10 +1336,17 @@ final class DedupStore: ObservableObject {
         var attempt = 0
         let maxAttempts = 5
         let tmpPath = dirPath + "/." + DirectSMBClient.nfc(t.name) + ".mdtmp"
+        let tSize = t.size, tName = t.name
+        let onBytes: @Sendable (Int64) -> Void = { bytes in
+            Task { @MainActor in
+                let pct = tSize > 0 ? Int(Double(bytes) / Double(tSize) * 100) : 100
+                self.opNote = "→ \(tName)  \(pct)%  (\(fmtBytes(bytes)) / \(fmtBytes(tSize)))"
+            }
+        }
         while !box.cancelled {
             do {
                 try await client.mkdirs(dirPath)
-                try await client.upload(local: t.url, to: tmpPath)
+                try await client.upload(local: t.url, to: tmpPath, onBytes: onBytes)
                 let landed = try await client.fileSize(tmpPath)
                 guard landed == t.size else {
                     await client.remove(tmpPath)

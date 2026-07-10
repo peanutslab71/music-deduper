@@ -200,11 +200,13 @@ final class DirectSMBClient: @unchecked Sendable {
     }
 
     /// Upload a local file to a remote path (any existing file at the path
-    /// is removed first).
-    func upload(local: URL, to path: String) async throws {
+    /// is removed first). onBytes reports cumulative bytes written.
+    func upload(local: URL, to path: String,
+                onBytes: (@Sendable (Int64) -> Void)? = nil) async throws {
         let m = try await ensure()
         try? await m.removeFile(atPath: path)
-        try await m.uploadItem(at: local, toPath: path, progress: nil)
+        try await m.uploadItem(at: local, toPath: path,
+                               progress: { written in onBytes?(written); return true })
     }
 
     /// Rename, replacing any existing destination.
@@ -215,10 +217,13 @@ final class DirectSMBClient: @unchecked Sendable {
     }
 
     /// Download a server file to a local URL (any existing local file replaced).
-    func download(path: String, to local: URL) async throws {
+    /// onBytes reports cumulative bytes read.
+    func download(path: String, to local: URL,
+                  onBytes: (@Sendable (Int64) -> Void)? = nil) async throws {
         let m = try await ensure()
         try? FileManager.default.removeItem(at: local)
-        try await m.downloadItem(atPath: path, to: local, progress: nil)
+        try await m.downloadItem(atPath: path, to: local,
+                                 progress: { bytes, _ in onBytes?(bytes); return true })
     }
 
     /// Recursively enumerate a server folder. Returns file paths (relative to
