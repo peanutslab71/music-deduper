@@ -18,6 +18,23 @@ import SwiftUI
 
 // MARK: - Model
 
+enum Thoroughness: String, CaseIterable, Identifiable {
+    case light, standard, thorough
+    var id: String { rawValue }
+    var title: String {
+        switch self { case .light: return "Light"; case .standard: return "Standard"; case .thorough: return "Thorough" }
+    }
+    var blurb: String {
+        switch self {
+        case .light:    return "Only the safest cleanups — remove junk files and empty folders. Nothing renamed or merged."
+        case .standard: return "Safe cleanups plus tidying obviously-untidy folder names. No artist merges."
+        case .thorough: return "Everything — cleanups, name tidying, and merging duplicate artist folders. The most consistent result."
+        }
+    }
+    var doesRenames: Bool { self != .light }
+    var doesMerges: Bool { self == .thorough }
+}
+
 enum FixKind: String {
     case junk           // OS litter / temp / orphan files
     case emptyFolder    // folder with no files anywhere inside
@@ -82,6 +99,14 @@ struct RunRecord: Identifiable {
 @MainActor
 final class PerfectStore: ObservableObject {
     @Published var root: URL?
+    // how much Perfect proposes — persisted; defaults to Thorough
+    @Published var thoroughness: Thoroughness =
+        Thoroughness(rawValue: UserDefaults.standard.string(forKey: "perfectThoroughness") ?? "") ?? .thorough {
+        didSet {
+            UserDefaults.standard.set(thoroughness.rawValue, forKey: "perfectThoroughness")
+            if diagnosed && !busy { diagnose() }   // re-scope the review to the new level
+        }
+    }
     @Published var status = "Choose a music library to diagnose."
     @Published var busy = false
     @Published var progress = ""
@@ -261,8 +286,9 @@ final class PerfectStore: ObservableObject {
                                renames r: [RenameProposal],
                                files: Int, folders: Int, bytes: Int64, cancelled: Bool) {
         findings = found.sorted { $0.relPath.lowercased() < $1.relPath.lowercased() }
-        merges = m
-        renames = r
+        // gate by thoroughness (junk/empties/DRM always; renames Standard+; merges Thorough)
+        merges = thoroughness.doesMerges ? m : []
+        renames = thoroughness.doesRenames ? r : []
         totalFiles = files; totalFolders = folders; totalBytes = bytes
         busy = false; diagnosed = !cancelled; progress = ""
         let junk = found.filter { $0.kind == .junk }.count
@@ -272,8 +298,8 @@ final class PerfectStore: ObservableObject {
         var found2: [String] = []
         if junk > 0 { found2.append("\(junk) junk") }
         if empties > 0 { found2.append("\(empties) empty folder(s)") }
-        if !m.isEmpty { found2.append("\(m.count) duplicate artist(s)") }
-        if !r.isEmpty { found2.append("\(r.count) untidy name(s)") }
+        if !merges.isEmpty { found2.append("\(merges.count) duplicate artist(s)") }
+        if !renames.isEmpty { found2.append("\(renames.count) untidy name(s)") }
         if drm > 0 { found2.append("\(drm) protected track(s)") }
         if !found2.isEmpty { parts.append("found " + found2.joined(separator: ", ")) }
         status = cancelled ? "Diagnosis cancelled." : parts.joined(separator: " — ") + "."

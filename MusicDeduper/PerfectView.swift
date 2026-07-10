@@ -11,6 +11,7 @@ import SwiftUI
 struct PerfectView: View {
     @StateObject private var store = PerfectStore()
     @State private var expanded: Set<String> = []   // all sections collapsed initially — reads as a summary
+    @State private var showSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -42,8 +43,34 @@ struct PerfectView: View {
                 Button { store.diagnose() } label: { Label("Re-diagnose", systemImage: "arrow.clockwise") }
                     .disabled(store.busy)
             }
+            Button { showSettings.toggle() } label: { Image(systemName: "gearshape") }
+                .help("Settings")
+                .popover(isPresented: $showSettings, arrowEdge: .bottom) { settingsPopover }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
+    }
+
+    private var settingsPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Settings").font(.headline)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Thoroughness").font(.subheadline).fontWeight(.medium)
+                Picker("", selection: $store.thoroughness) {
+                    ForEach(Thoroughness.allCases) { Text($0.title).tag($0) }
+                }.pickerStyle(.segmented).labelsHidden()
+                Text(store.thoroughness.blurb).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Removed items go to").font(.caption).foregroundStyle(.secondary)
+                Text("“Music Librarian Quarantine” beside the library — recoverable via Undo.")
+                    .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+            }
+            Text("Naming rules, identification providers and cover art arrive with the identify-and-tag step.")
+                .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16).frame(width: 320)
     }
 
     // MARK: states
