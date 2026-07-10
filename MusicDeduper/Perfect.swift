@@ -282,6 +282,7 @@ final class PerfectStore: ObservableObject {
     @Published var identifyMatched = 0           // running count of tracks matched
     @Published var enriching = false
     @Published var enrichProgress = ""
+    @Published var enriched = false          // credits pass has run (or was skipped)
     // category-level toggles (the mockup's bulk on/off buttons)
     @Published var applyNames = true       // identify: artist/title/album corrections
     @Published var applyArtwork = true     // add missing cover art
@@ -308,7 +309,7 @@ final class PerfectStore: ObservableObject {
 
     func setRoot(_ url: URL) {
         root = url
-        findings = []; renames = []; artists = []; folderGroups = []; tagGroups = []; proposals = []
+        findings = []; renames = []; artists = []; folderGroups = []; tagGroups = []; proposals = []; enriched = false
         diagnosed = false
         lastRunSummary = nil
         loadRuns()
@@ -707,7 +708,7 @@ final class PerfectStore: ObservableObject {
     func identify() {
         guard let root, hasAcoustIDKey, !identifying else { return }
         identifying = true; proposals = []; identifyProgress = "Identifying…"
-        recentFinds = []; identifyMatched = 0
+        recentFinds = []; identifyMatched = 0; enriched = false
         let box = cancelFlag; box.cancelled = false
         let id = Identifier(apiKey: Identifier.configuredKey)
         Task.detached(priority: .userInitiated) {
@@ -802,7 +803,7 @@ final class PerfectStore: ObservableObject {
     }
 
     private func finishEnrich(cancelled: Bool) {
-        enriching = false; enrichProgress = ""
+        enriching = false; enrichProgress = ""; enriched = true
         let filled = proposals.filter { !($0.enrichment?.isEmpty ?? true) }.count
         if !cancelled { status = "Looked up credits — \(filled) track(s) enriched." }
     }

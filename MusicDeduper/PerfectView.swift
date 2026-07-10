@@ -55,11 +55,14 @@ struct PerfectView: View {
 
     @State private var viewStep: Int? = nil          // a past step the user clicked back to
 
-    // The step the work is actually on…
+    // The step the work is actually on — it LANDS on Identify/Credits waiting for
+    // you to run them, rather than skipping straight to Review.
     private var liveStep: Int {
-        if store.busy && !store.diagnosed { return 1 }   // Scan
-        if store.identifying { return 2 }                 // Identify
-        if store.enriching { return 3 }                   // Credits
+        if store.busy && !store.diagnosed { return 1 }   // Scan (running)
+        if store.identifying { return 2 }                 // Identify (running)
+        if store.enriching { return 3 }                   // Credits (running)
+        if store.proposals.isEmpty { return 2 }           // scanned, waiting to identify
+        if !store.enriched { return 3 }                   // identified, waiting for credits
         return 4                                          // Review
     }
     // …and the step being shown (a past one if the user clicked back).
@@ -255,14 +258,18 @@ struct PerfectView: View {
             Button("Cancel") { store.cancel() }.controlSize(.large)
         } else if !store.hasAcoustIDKey {
             Text("needs an AcoustID key").font(.caption).foregroundStyle(.orange)
-        } else if store.proposals.isEmpty {
+        } else if step == 2 {
             Button { store.identify() } label: { Label("Identify tracks", systemImage: "waveform.and.magnifyingglass") }
                 .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
-        } else {
+        } else if step == 3 {
             Button { store.enrich() } label: { Label("Fill credits", systemImage: "text.badge.plus") }
                 .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
-            Button { store.identify() } label: { Label("Re-identify", systemImage: "arrow.clockwise") }
-                .controlSize(.large)
+            Button("Skip to review →") { store.enriched = true }.controlSize(.large)
+        } else {
+            Button { store.identify() } label: { Label("Re-identify", systemImage: "arrow.clockwise") }.controlSize(.large)
+            if !store.proposals.isEmpty {
+                Button { store.enrich() } label: { Label("Re-fill credits", systemImage: "text.badge.plus") }.controlSize(.large)
+            }
         }
     }
 
@@ -342,7 +349,7 @@ struct PerfectView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if let summary = store.lastRunSummary { committedBanner(summary) }
-                if visibleAlbums.isEmpty && store.proposals.isEmpty && !store.checkingTags && !store.identifying {
+                if visibleAlbums.isEmpty && !store.identifying && !store.enriching {
                     emptyStageNote
                 }
                 if step == 4 { reviewQueueSection }   // the decision queue only on Review
@@ -368,8 +375,14 @@ struct PerfectView: View {
     }
     private var emptyStageMsg: String {
         switch step {
-        case 2: return "No name or album corrections — your tags already matched the audio."
-        case 3: return "No credits or artwork to add — run Fill credits, or these tracks are already complete."
+        case 2:
+            return store.proposals.isEmpty
+                ? "Press “Identify tracks” above to match your library by sound."
+                : "No name or album corrections — your tags already matched the audio."
+        case 3:
+            return store.enriched
+                ? "No credits or artwork were found to add."
+                : "Press “Fill credits” above to add composer, label and cover art (or Skip to review)."
         default: return "Nothing to change — this library is already tidy."
         }
     }
