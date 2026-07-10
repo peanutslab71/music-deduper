@@ -15,21 +15,36 @@ struct PerfectView: View {
     @State private var showSettings = false
     @State private var queueIndex = 0                // position in the step-through review queue
     @State private var showApplyConfirm = false      // the final "confirm before commit" dialog
-    @State private var selectedAlbum: String? = nil  // album card whose tracks are shown
+    @State private var albumSheet: AlbumRef? = nil   // album whose tracks are shown in a dialog
+    @State private var showCleanup = false           // structural-cleanup dialog
+
+    struct AlbumRef: Identifiable { let id: String }
+
+    // Which step we're on — drives the top bar, the middle, and the footer.
+    private var step: Int {
+        if store.busy && !store.diagnosed { return 1 }   // Scan
+        if store.identifying { return 2 }                 // Identify
+        if store.enriching { return 3 }                   // Credits
+        return 4                                          // Review
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            if store.busy && !store.diagnosed {
-                diagnosing
-            } else if !store.diagnosed {
+            if store.root == nil || (!store.diagnosed && !store.busy) {
                 intro
             } else {
-                review
+                stepBar
+                Divider()
+                phasedMiddle
+                Divider()
+                perfectFooter
             }
         }
         .sheet(isPresented: $showApplyConfirm) { applyConfirmSheet }
+        .sheet(item: $albumSheet) { ref in albumSheetView(ref.id) }
+        .sheet(isPresented: $showCleanup) { cleanupSheet }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -130,36 +145,254 @@ struct PerfectView: View {
         }
     }
 
-    // MARK: review
+    // MARK: - The three fixed zones
 
-    private var review: some View {
-        VStack(spacing: 0) {
-            if let summary = store.lastRunSummary {
-                committedBanner(summary)
+    // ── TOP: step bar + current action ──
+    private var stepBar: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 0) {
+                stepChip(1, "Scan"); stepDash()
+                stepChip(2, "Identify"); stepDash()
+                stepChip(3, "Credits"); stepDash()
+                stepChip(4, "Review"); stepDash()
+                stepChip(5, "Apply")
             }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if store.groups.isEmpty && store.artists.isEmpty && store.renames.isEmpty
-                        && store.proposals.isEmpty && !store.checkingTags && !store.identifying {
-                        allClean
-                    }
-                    identifyControls
-                    albumGrid
-                    if let sel = selectedAlbum { albumDetail(sel) }
-                    categoryBar
-                    reviewQueueSection
-                    artistsSection
-                    if !store.renames.isEmpty { renamesSection }
-                    ForEach(store.groups, id: \.kind.rawValue) { group in
-                        section(group.kind, group.items)
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(stepTitle).font(.system(size: 15, weight: .semibold))
+                    Text(stepSubtitle).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                stepAction
+            }
+            if step == 4, reviewQueueCount > 0 { needsBanner }
+        }
+        .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 13)
+    }
+
+    private func stepChip(_ n: Int, _ label: String) -> some View {
+        let done = step > n, now = step == n
+        return HStack(spacing: 7) {
+            ZStack {
+                Circle().fill(done ? Color.green : (now ? Color.purple : Color.clear))
+                    .overlay(Circle().strokeBorder(done || now ? .clear : Color.secondary.opacity(0.35), lineWidth: 1.5))
+                    .frame(width: 22, height: 22)
+                if done { Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(.white) }
+                else { Text("\(n)").font(.system(size: 11, weight: .semibold, design: .monospaced)).foregroundStyle(now ? .white : .secondary) }
+            }
+            Text(label).font(.system(size: 12.5, weight: now ? .semibold : .regular))
+                .foregroundStyle(now ? .primary : (done ? .secondary : .tertiary))
+        }
+    }
+    private func stepDash() -> some View {
+        Rectangle().fill(Color.secondary.opacity(0.25)).frame(width: 26, height: 1.5).padding(.horizontal, 10)
+    }
+
+    private var stepTitle: String {
+        switch step {
+        case 1: return "Step 1 — Scan"
+        case 2: return "Step 2 — Identify"
+        case 3: return "Step 3 — Fill credits"
+        default: return "Step 4 — Review"
+        }
+    }
+    private var stepSubtitle: String {
+        switch step {
+        case 1: return "Reading tags and finding junk, empty folders and duplicate artists."
+        case 2: return "Matching each track by its sound. Your tags are trusted; only real gaps get filled."
+        case 3: return "Looking up composer, label and cover art for the tracks missing them."
+        default:
+            let act = store.proposals.filter { $0.isActionable }.count
+            return "\(act) track(s) with a suggested change. \(reviewQueueCount) worth checking before you apply."
+        }
+    }
+
+    @ViewBuilder private var stepAction: some View {
+        if store.identifying || store.enriching || (store.busy && !store.diagnosed) {
+            Button("Cancel") { store.cancel() }.controlSize(.large)
+        } else if !store.hasAcoustIDKey {
+            Text("needs an AcoustID key").font(.caption).foregroundStyle(.orange)
+        } else if store.proposals.isEmpty {
+            Button { store.identify() } label: { Label("Identify tracks", systemImage: "waveform.and.magnifyingglass") }
+                .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
+        } else {
+            Button { store.enrich() } label: { Label("Fill credits", systemImage: "text.badge.plus") }
+                .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
+            Button { store.identify() } label: { Label("Re-identify", systemImage: "arrow.clockwise") }
+                .controlSize(.large)
+        }
+    }
+
+    private var reviewQueueCount: Int { store.proposals.filter { $0.needsReview }.count }
+
+    private var needsBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(reviewQueueCount) need your decision").font(.system(size: 13, weight: .semibold))
+                Text("genuine artist changes & low-confidence matches").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text("↓ in the queue below").font(.caption).foregroundStyle(.orange)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.orange.opacity(0.25)))
+    }
+
+    // ── MIDDLE: swaps by step ──
+    @ViewBuilder private var phasedMiddle: some View {
+        if store.busy && !store.diagnosed { workingMiddle(title: "Scanning your library", sub: "reading tags, finding junk and duplicate artists") }
+        else if store.identifying { workingMiddle(title: "matched by sound", sub: store.identifyProgress, live: true) }
+        else if store.enriching { workingMiddle(title: "looking up credits", sub: store.enrichProgress, live: true, credits: true) }
+        else { reviewMiddle }
+    }
+
+    private func workingMiddle(title: String, sub: String, live: Bool = false, credits: Bool = false) -> some View {
+        VStack(spacing: 10) {
+            Spacer()
+            if live {
+                Text("\(credits ? store.recentFinds.count : store.identifyMatched)")
+                    .font(.system(size: 44, weight: .bold, design: .rounded)).foregroundStyle(.teal)
+                    .contentTransition(.numericText())
+                Text(title).font(.headline)
+            } else {
+                ProgressView().controlSize(.large)
+                Text(title).font(.title3).fontWeight(.semibold)
+            }
+            Text(sub.isEmpty ? " " : sub).font(.caption).foregroundStyle(.secondary)
+            if live {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(store.recentFinds, id: \.self) { f in
+                        Text(f).font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(f.hasPrefix("✎") ? .primary : .secondary)
+                            .lineLimit(1).truncationMode(.middle)
                     }
                 }
-                .padding(16)
+                .frame(width: 460, alignment: .leading).padding(.top, 8)
+                .animation(.easeOut(duration: 0.25), value: store.recentFinds)
             }
-            history
-            Divider()
-            footer
+            Spacer()
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var reviewMiddle: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if let summary = store.lastRunSummary { committedBanner(summary) }
+                if store.proposals.isEmpty && store.artists.isEmpty && store.renames.isEmpty
+                    && store.groups.isEmpty && !store.checkingTags { allClean }
+                reviewQueueSection      // pinned at the top of the content
+                albumGrid
+                cleanupBar              // the structural fixes, behind one button
+            }
+            .padding(16)
+        }
+    }
+
+    // ── BOTTOM: status + apply (locked until Review) ──
+    private var perfectFooter: some View {
+        HStack(spacing: 14) {
+            perfectStatus
+            Spacer()
+            if !store.runs.isEmpty, let run = store.runs.first {
+                Button("Undo last run") { store.undo(run) }.disabled(store.busy)
+            }
+            Button {
+                showApplyConfirm = true
+            } label: { Label("Apply changes", systemImage: "checkmark.circle") }
+                .buttonStyle(.borderedProminent).tint(.purple)
+                .disabled(step != 4 || !store.hasWork || store.busy)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+    }
+
+    @ViewBuilder private var perfectStatus: some View {
+        if store.busy && !store.diagnosed {
+            statusLine("Scanning…", store.progress)
+        } else if store.identifying {
+            statusLine("Listening…", store.identifyProgress)
+        } else if store.enriching {
+            statusLine("Looking up credits…", store.enrichProgress)
+        } else {
+            let act = store.proposals.filter { $0.isActionable }.count
+            Text("\(act) change(s) · \(store.acceptedCount) cleanup(s) · all reversible")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+    private func statusLine(_ a: String, _ b: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(b.isEmpty ? a : b).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    // The structural cleanups (junk, empty folders, duplicate artists, renames)
+    // live behind one button, not stacked in a tree next to the albums.
+    @ViewBuilder private var cleanupBar: some View {
+        let junk = store.groups.reduce(0) { $0 + $1.items.count }
+        let merges = store.artists.count
+        let ren = store.renames.count
+        if junk + merges + ren > 0 || store.checkingTags {
+            Button { showCleanup = true } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "wrench.and.screwdriver").foregroundStyle(.secondary)
+                    Text("Library cleanup").fontWeight(.medium)
+                    Text(cleanupSummaryText).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 9).padding(.horizontal, 12)
+                .background(RoundedRectangle(cornerRadius: 9).fill(Color.secondary.opacity(0.06)))
+            }.buttonStyle(.plain)
+        }
+    }
+    private var cleanupSummaryText: String {
+        var b: [String] = []
+        let merges = store.artists.filter { store.artistHasApplicableWork($0) }.count
+        if merges > 0 { b.append("\(merges) duplicate artist(s)") }
+        if !store.renames.isEmpty { b.append("\(store.renames.count) untidy name(s)") }
+        for g in store.groups { b.append("\(g.items.count) \(g.kind.title.lowercased())") }
+        return b.isEmpty ? "reading…" : b.joined(separator: " · ")
+    }
+
+    private var cleanupSheet: some View {
+        VStack(spacing: 0) {
+            HStack { Text("Library cleanup").font(.headline); Spacer()
+                Button("Done") { showCleanup = false } }.padding(16)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    artistsSection
+                    if !store.renames.isEmpty { renamesSection }
+                    ForEach(store.groups, id: \.kind.rawValue) { group in section(group.kind, group.items) }
+                }.padding(16)
+            }
+        }.frame(width: 560, height: 560)
+    }
+
+    // The album's tracks in a dialog (not stacked in the main frame).
+    private func albumSheetView(_ id: String) -> some View {
+        let props = store.proposals.filter { $0.url.deletingLastPathComponent().path == id && $0.isActionable }
+        let a = store.albumChanges.first(where: { $0.id == id })
+        return VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                ArtworkView(key: id, sampleURL: props.first?.url, size: 52, corner: 8)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(a?.title ?? "Album").font(.headline)
+                    Text("\(a?.subtitle ?? "") · \(props.count) track(s)").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Done") { albumSheet = nil }
+            }.padding(16)
+            Divider()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(props) { p in proposalRow(p) }
+                }.padding(16)
+            }
+        }.frame(width: 620, height: 560)
     }
 
     // Step-through review queue — the handful that need a decision (genuine artist
@@ -313,9 +546,8 @@ struct PerfectView: View {
     }
 
     private func albumCard(_ a: PerfectStore.AlbumChange) -> some View {
-        let isSel = selectedAlbum == a.id
-        return Button {
-            selectedAlbum = isSel ? nil : a.id
+        Button {
+            albumSheet = AlbumRef(id: a.id)
         } label: {
             VStack(alignment: .leading, spacing: 8) {
                 ZStack(alignment: .bottomLeading) {
@@ -327,8 +559,6 @@ struct PerfectView: View {
                     }
                     .padding(8)
                 }
-                .overlay(RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(isSel ? Color.purple : .clear, lineWidth: 3))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(a.title).font(.subheadline).fontWeight(.medium).lineLimit(1)
                     Text("\(a.subtitle) · \(a.trackCount) track(s)").font(.caption)
@@ -345,29 +575,6 @@ struct PerfectView: View {
             .padding(.horizontal, 7).padding(.vertical, 3)
             .background(Capsule().fill(color))
             .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
-    }
-
-    // The selected album's tracks — the per-track detail that used to be its own tree.
-    @ViewBuilder private func albumDetail(_ id: String) -> some View {
-        let props = store.proposals.filter { $0.url.deletingLastPathComponent().path == id && $0.isActionable }
-        if !props.isEmpty, let a = store.albumChanges.first(where: { $0.id == id }) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Image(systemName: "music.note.list").foregroundStyle(.purple)
-                    Text(a.title).fontWeight(.semibold)
-                    Text("\(props.count) track(s)").font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button { selectedAlbum = nil } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                        .buttonStyle(.plain)
-                }
-                .padding(.vertical, 6).padding(.horizontal, 10)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.purple.opacity(0.06)))
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(props) { p in proposalRow(p) }
-                }
-                .padding(.leading, 6)
-            }
-        }
     }
 
     // One artist-centric list — a folder split, a tag split, or both. One "keep"
