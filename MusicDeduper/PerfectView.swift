@@ -348,6 +348,8 @@ struct PerfectView: View {
             .padding(.vertical, 6).padding(.horizontal, 10)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.teal.opacity(0.07)))
 
+            if store.identifying { workingFeed }
+
             if !store.proposals.isEmpty && isOpen {
                 Text("Each track was identified from its audio. Artist and title are reliable; album is only a suggestion — it defaults to your existing album, with alternatives to pick from. Applied changes are reversible.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -358,6 +360,26 @@ struct PerfectView: View {
                 .padding(.top, 6).padding(.leading, 6)
             }
         }
+    }
+
+    // Live feed while identify runs — watch it match tracks by sound.
+    @ViewBuilder private var workingFeed: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 7) {
+                Text("\(store.identifyMatched)")
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                    .foregroundStyle(.teal).contentTransition(.numericText())
+                Text("matched by sound").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(store.recentFinds, id: \.self) { f in
+                Text(f).font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(f.hasPrefix("✎") ? .primary : .secondary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 10).padding(.horizontal, 8)
+        .animation(.easeOut(duration: 0.25), value: store.recentFinds)
     }
 
     private func proposalRow(_ p: TrackProposal) -> some View {

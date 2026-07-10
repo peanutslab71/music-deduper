@@ -201,6 +201,8 @@ final class PerfectStore: ObservableObject {
     @Published var proposals: [TrackProposal] = []
     @Published var identifying = false
     @Published var identifyProgress = ""
+    @Published var recentFinds: [String] = []   // live feed of what identify just matched
+    @Published var identifyMatched = 0           // running count of tracks matched
     @Published var enriching = false
     @Published var enrichProgress = ""
     var hasAcoustIDKey: Bool { !Identifier.configuredKey.isEmpty }
@@ -619,6 +621,7 @@ final class PerfectStore: ObservableObject {
     func identify() {
         guard let root, hasAcoustIDKey, !identifying else { return }
         identifying = true; proposals = []; identifyProgress = "Identifying…"
+        recentFinds = []; identifyMatched = 0
         let box = cancelFlag; box.cancelled = false
         let id = Identifier(apiKey: Identifier.configuredKey)
         Task.detached(priority: .userInitiated) {
@@ -639,12 +642,12 @@ final class PerfectStore: ObservableObject {
                 let hasArt = md_has_artwork(u.path) == 1
                 if let p = try? await id.identify(url: u, relPath: rel,
                                                   curArtist: curA, curTitle: curT, curAlbum: curAl,
-                                                  curHasArt: hasArt),
-                   p.hasChange {
-                    found.append(p)
+                                                  curHasArt: hasArt) {
+                    await self.pushFind("\(p.newTitle) — \(p.newArtist)", changed: p.hasChange)
+                    if p.hasChange { found.append(p) }
                 }
                 done += 1
-                if done % 3 == 0 { await self.setIdentifyProgress("Identified \(done)/\(files.count)…") }
+                if done % 3 == 0 { await self.setIdentifyProgress("Listened to \(done)/\(files.count)…") }
                 // AcoustID asks for max 3 requests/second per key
                 try? await Task.sleep(nanoseconds: 350_000_000)
             }
@@ -653,6 +656,12 @@ final class PerfectStore: ObservableObject {
     }
 
     private func setIdentifyProgress(_ s: String) { identifyProgress = s }
+
+    private func pushFind(_ s: String, changed: Bool) {
+        identifyMatched += 1
+        recentFinds.insert((changed ? "✎ " : "✓ ") + s, at: 0)
+        if recentFinds.count > 7 { recentFinds.removeLast() }
+    }
 
     private func finishIdentify(proposals p: [TrackProposal], total: Int, cancelled: Bool) {
         identifying = false; identifyProgress = ""
