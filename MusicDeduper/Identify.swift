@@ -91,7 +91,12 @@ struct Identifier {
         let (score, rec) = try await lookup(fingerprint: fp.base64, duration: Int(fp.duration.rounded()))
         guard let rec else { return nil }
 
-        let artist = (rec.artists ?? []).compactMap { $0.name }.joined(separator: ", ")
+        // Use only the PRIMARY billed artist. Never comma-join credited names —
+        // Roon (and any parser) breaks on it, and real names contain commas
+        // ("Earth, Wind & Fire"). Genuine multi-artist billing (as separate tag
+        // values) and additional performers (as performer credits) arrive with the
+        // MusicBrainz-relationship layer. See docs/metadata-mapping.md.
+        let artist = rec.artists?.first?.name ?? ""
         let title = rec.title ?? ""
         // Album is ambiguous (a recording lives on many releases) and the file's
         // own album tag is often correct and not even among the candidates — so
