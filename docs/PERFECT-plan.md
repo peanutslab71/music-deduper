@@ -172,6 +172,23 @@ similarity of existing tags, and release-context sanity into confidence bands
 re-runs are instant. Be a good API citizen — descriptive User-Agent, respect
 rate limits, keep fingerprinting on-device.
 
+**Multi-provider fallback chain:** identification tries providers in order and
+only gives up when all enabled ones fail — e.g. AcoustID fingerprint → ShazamKit
+fingerprint → MusicBrainz text search → Discogs (vinyl/electronic long tail).
+A track is only "unmatched" after the whole chain misses; unmatched tracks are
+**left untouched and flagged** for manual handling, never guessed. Which
+providers are enabled, and their order, are user-configurable (see Settings).
+
+## 5a. Settings
+
+A dedicated Settings area holds configuration so the review flow stays
+uncluttered:
+- Reached via a **gear icon** in the top-right toolbar slot (freed when File
+  Commander moved into the step bar) and a standard **Settings menu (⌘,)**.
+- Holds: provider chain (which sources, order, any keys), default thoroughness
+  preset, naming convention ("The" and `&`/`and` policy), default folder layout,
+  quarantine location, and delete-vs-quarantine behaviour.
+
 ---
 
 ## 6. Related tools and the safety model
