@@ -60,6 +60,18 @@ final class PaneModel: ObservableObject {
         default: return false
         }
     }
+
+    /// True when both panes show the exact same folder (same location AND path).
+    static func sameFolder(_ a: PaneModel, _ b: PaneModel) -> Bool {
+        guard sameLocation(a, b) else { return false }
+        switch (a.kind, b.kind) {
+        case (.local, .local):
+            return a.localURL.standardizedFileURL == b.localURL.standardizedFileURL
+        case (.server, .server):
+            return a.serverDir == b.serverDir
+        default: return false
+        }
+    }
     var selectedItems: [(name: String, isDir: Bool)] {
         items.filter { selection.contains($0.name) }.map { ($0.name, $0.isDir) }
     }
@@ -382,8 +394,14 @@ struct PaneView: View {
         let picked = model.selectedItems
         guard !picked.isEmpty else { return }
         makeActive()
+        if PaneModel.sameFolder(model, other) {
+            model.errorMsg = "Both panes are showing the same folder — nothing to \(move ? "move" : "copy")."
+            return
+        }
         if move && model.canMoveInstantly(to: other) {
-            model.moveSelection(to: other)   // instant same-share rename
+            store.runInstantMove(picked, from: model.endpoint, to: other.endpoint) {
+                model.reload(); other.reload()
+            }
             return
         }
         store.runTransfer(picked, from: model.endpoint, to: other.endpoint, move: move) {

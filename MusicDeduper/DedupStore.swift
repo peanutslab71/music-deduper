@@ -819,6 +819,67 @@ final class DedupStore: ObservableObject {
         }
     }
 
+    /// Instant move within one location (same server+share, or both local):
+    /// a rename per item, but shown on the operation dialog with per-item
+    /// result and verification — so it's never a silent success or failure.
+    func runInstantMove(_ items: [(name: String, isDir: Bool)],
+                        from src: XferEnd, to dst: XferEnd,
+                        onFinish: @escaping () -> Void) {
+        opStart(title: "Moving \(items.count) item(s) → \(dst.label)", total: items.count)
+        opPaused = false; opActiveStreams = 0; opStreamLimit = 0
+        let box = cancelBox
+        Task.detached(priority: .userInitiated) {
+            await self.opLogLine("ℹ instant move within \(dst.label)")
+            var ok = 0, fail = 0
+            for (n, item) in items.enumerated() {
+                if box.cancelled { break }
+                do {
+                    try await Self.instantMoveOne(item, from: src, to: dst)
+                    ok += 1
+                    await self.opStep(done: n + 1, ok: ok, skip: 0, fail: fail, line: "✓ moved \(item.name)")
+                } catch {
+                    fail += 1
+                    await self.opStep(done: n + 1, ok: ok, skip: 0, fail: fail,
+                                      line: "✗ \(item.name) — \(error.localizedDescription)")
+                }
+            }
+            let summary = box.cancelled
+                ? "■ Cancelled — \(ok) moved."
+                : "✔ Done — \(ok) moved" + (fail > 0 ? ", \(fail) failed." : ".")
+            await self.opFinishLine(summary)
+            await MainActor.run { onFinish() }
+        }
+    }
+
+    private static func instantMoveOne(_ item: (name: String, isDir: Bool),
+                                       from src: XferEnd, to dst: XferEnd) async throws {
+        switch (src, dst) {
+        case let (.local(sBase), .local(dBase)):
+            let from = sBase.appendingPathComponent(item.name)
+            let to = dBase.appendingPathComponent(item.name)
+            if from.standardizedFileURL == to.standardizedFileURL {
+                throw DirectSMBClient.error("that's already where it is")
+            }
+            if FileManager.default.fileExists(atPath: to.path) {
+                throw DirectSMBClient.error("“\(item.name)” already exists there")
+            }
+            try FileManager.default.moveItem(at: from, to: to)
+
+        case let (.server(sc, sBase), .server(_, dBase)):
+            let from = sBase.isEmpty ? item.name : sBase + "/" + item.name
+            let to = dBase.isEmpty ? item.name : dBase + "/" + item.name
+            if from == to { throw DirectSMBClient.error("that's already where it is") }
+            // refuse moving a folder into itself or its own subtree
+            if item.isDir && (to == from || to.hasPrefix(from + "/")) {
+                throw DirectSMBClient.error("can't move a folder into itself")
+            }
+            try await sc.moveNoReplace(from, to: to)          // throws on any failure
+
+        default:
+            throw DirectSMBClient.error("instant move needs both sides in the same place")
+        }
+    }
+
     /// Copy or move the named items from one location's folder into another's.
     /// Handles files and (recursively) folders, in any Mac/server combination.
     /// Runs on the shared operation dialog with progress, stats, log and Cancel.
