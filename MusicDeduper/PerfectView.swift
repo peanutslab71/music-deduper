@@ -118,20 +118,19 @@ struct PerfectView: View {
             if let summary = store.lastRunSummary {
                 committedBanner(summary)
             }
-            if store.groups.isEmpty && store.merges.isEmpty && store.renames.isEmpty {
-                allClean
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        if !store.merges.isEmpty { mergesSection }
-                        if !store.renames.isEmpty { renamesSection }
-                        ForEach(store.groups, id: \.kind.rawValue) { group in
-                            section(group.kind, group.items)
-                        }
-                        tagPreview
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if store.groups.isEmpty && store.merges.isEmpty && store.renames.isEmpty {
+                        allClean
                     }
-                    .padding(16)
+                    if !store.merges.isEmpty { mergesSection }
+                    if !store.renames.isEmpty { renamesSection }
+                    ForEach(store.groups, id: \.kind.rawValue) { group in
+                        section(group.kind, group.items)
+                    }
+                    tagPreview
                 }
+                .padding(16)
             }
             history
             Divider()
@@ -194,39 +193,80 @@ struct PerfectView: View {
         .padding(.vertical, 1)
     }
 
-    // Tag-level artist splits (Phase 2 preview) — read-only for now
+    // Tag-level artist splits — the same artist written under several spellings
+    // inside the files. Pick one spelling; the rest are rewritten to it.
     @ViewBuilder private var tagPreview: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let isOpen = expanded.contains("tags")
+        VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
+                if !store.tagGroups.isEmpty {
+                    Button {
+                        if isOpen { expanded.remove("tags") } else { expanded.insert("tags") }
+                    } label: {
+                        Image(systemName: isOpen ? "chevron.down" : "chevron.right").font(.caption).foregroundStyle(.secondary)
+                    }.buttonStyle(.plain)
+                }
                 Image(systemName: "tag").foregroundStyle(.brown)
                 Text("Artist names in tags").fontWeight(.semibold)
-                Text("what your server actually reads").font(.caption).foregroundStyle(.secondary)
+                if store.tagGroups.isEmpty {
+                    Text("what your server actually reads").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("\(store.tagGroups.count) split · pick one spelling").font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
                 if store.checkingTags {
                     HStack(spacing: 6) { ProgressView().controlSize(.small); Text(store.tagProgress).font(.caption).foregroundStyle(.secondary) }
                     Button("Cancel") { store.cancel() }.controlSize(.small)
+                } else if store.tagGroups.isEmpty {
+                    Button("Check artist tags") { expanded.insert("tags"); store.checkTags() }.controlSize(.small)
                 } else {
-                    Button("Check artist tags") { store.checkTags() }.controlSize(.small)
+                    let allOn = store.tagGroups.allSatisfy { $0.accepted }
+                    Button(allOn ? "Deselect all" : "Select all") {
+                        for i in store.tagGroups.indices { store.tagGroups[i].accepted = !allOn }
+                    }.controlSize(.small)
+                    Button("Re-check") { store.checkTags() }.controlSize(.small)
                 }
             }
             .padding(.vertical, 6).padding(.horizontal, 10)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.brown.opacity(0.07)))
 
-            if !store.tagGroups.isEmpty {
-                Text("These artists are tagged under more than one spelling — a server reads each as a different artist. Fixing these (rewriting the tags to one spelling) arrives with the identify-and-tag step.")
+            if !store.tagGroups.isEmpty && isOpen {
+                Text("Each of these artists is tagged under more than one spelling — a server reads each spelling as a separate artist. The most common one is kept by default; change it if the other is correct.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(store.tagGroups) { g in
-                        HStack(spacing: 6) {
-                            Image(systemName: "exclamationmark.triangle").font(.caption2).foregroundStyle(.orange)
-                            Text(g.variants.map { "\($0.name) (\($0.count))" }.joined(separator: "   vs   "))
-                                .font(.system(size: 11, design: .monospaced)).lineLimit(1).truncationMode(.middle)
-                        }
-                    }
+                    .padding(.top, 8).padding(.horizontal, 6)
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(store.tagGroups) { g in tagRow(g) }
                 }
-                .padding(.leading, 6)
+                .padding(.top, 6).padding(.leading, 6)
             }
         }
+    }
+
+    private func tagRow(_ g: TagArtistGroup) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { g.accepted },
+                set: { v in if let i = store.tagGroups.firstIndex(where: { $0.id == g.id }) { store.tagGroups[i].accepted = v } }
+            )).labelsHidden().toggleStyle(.checkbox)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(g.variants.map { "\($0.name) (\($0.count))" }.joined(separator: "   vs   "))
+                    .font(.system(size: 11, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                HStack(spacing: 6) {
+                    Text("keep:").font(.caption2).foregroundStyle(.secondary)
+                    Picker("", selection: Binding(
+                        get: { g.canonical },
+                        set: { v in if let i = store.tagGroups.firstIndex(where: { $0.id == g.id }) { store.tagGroups[i].canonical = v } }
+                    )) {
+                        ForEach(g.variants, id: \.name) { Text($0.name).tag($0.name) }
+                    }.labelsHidden().frame(maxWidth: 260)
+                    if g.willChange > 0 {
+                        Text("rewrites \(g.willChange) track(s)").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 1)
     }
 
     // Untidy folder names — editable proposed name
@@ -346,9 +386,12 @@ struct PerfectView: View {
 
     private var footer: some View {
         let mergeCount = store.merges.filter { $0.accepted }.count
+        let tagCount = store.tagGroups.filter { $0.accepted }.reduce(0) { $0 + $1.willChange }
         return HStack {
             if store.hasWork {
-                Text("\(store.acceptedCount) cleanup(s)" + (mergeCount > 0 ? ", \(mergeCount) merge(s)" : "") + " selected")
+                Text("\(store.acceptedCount) cleanup(s)"
+                     + (mergeCount > 0 ? ", \(mergeCount) merge(s)" : "")
+                     + (tagCount > 0 ? ", \(tagCount) tag fix(es)" : "") + " selected")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text("Protected tracks are listed for information and are never removed.")
