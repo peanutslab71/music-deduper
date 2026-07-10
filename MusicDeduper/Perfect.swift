@@ -43,6 +43,16 @@ struct PerfectFinding: Identifiable {
     var accepted: Bool
 }
 
+/// A committed run, reconstructed from its quarantine folder's run.json,
+/// so it can be listed and undone (restored) later.
+struct RunRecord: Identifiable {
+    let id: String          // quarantine subfolder name (timestamp)
+    let folder: URL         // the run's quarantine folder
+    let date: Date
+    let rels: [String]      // library-relative paths that were quarantined
+    let summary: String
+}
+
 // MARK: - Store
 
 @MainActor
@@ -58,6 +68,9 @@ final class PerfectStore: ObservableObject {
     @Published var lastRunSummary: String?
     @Published var lastQuarantine: URL?
 
+    // persistent run history (each run's quarantine folder holds a run.json)
+    @Published var runs: [RunRecord] = []
+
     private let cancelFlag = CancelBox()
 
     // scanned totals for the header
@@ -71,6 +84,7 @@ final class PerfectStore: ObservableObject {
         diagnosed = false
         lastRunSummary = nil
         status = "Ready to diagnose \(url.lastPathComponent)."
+        loadRuns()
     }
 
     func pickRoot() {
@@ -208,8 +222,21 @@ final class PerfectStore: ObservableObject {
                     log += "FAILED to move \(rel): \(error.localizedDescription)\n"
                 }
             }
-            log += "\n\(moved) item(s) moved to quarantine, \(failed) failed.\nRestore by moving items back from this folder.\n"
+            log += "\n\(moved) item(s) moved to quarantine, \(failed) failed.\nRestore with 'Undo this run', or by moving items back from this folder.\n"
             try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
+
+            // structured record so the app can list and undo this run
+            let movedRels = ordered.filter { fm.fileExists(atPath: quarantine.appendingPathComponent($0.1).path) }
+                .map { ["rel": $0.1, "kind": $0.2.rawValue] }
+            let record: [String: Any] = [
+                "date": ISO8601DateFormatter().string(from: Date()),
+                "root": root.path,
+                "summary": "\(moved) item(s) moved to quarantine",
+                "items": movedRels,
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) {
+                try? data.write(to: quarantine.appendingPathComponent("run.json"))
+            }
 
             await self.finishCommit(moved: moved, failed: failed, quarantine: quarantine)
         }
@@ -219,9 +246,69 @@ final class PerfectStore: ObservableObject {
         busy = false
         lastQuarantine = quarantine
         lastRunSummary = "Moved \(moved) item(s) to quarantine" + (failed > 0 ? ", \(failed) failed." : ".")
-        // drop the removed findings and re-flag state
         findings.removeAll { $0.accepted && $0.kind.safe }
         status = lastRunSummary ?? status
+        loadRuns()
+    }
+
+    // MARK: Run history + undo
+
+    func loadRuns() {
+        guard let root else { runs = []; return }
+        let qroot = root.appendingPathComponent("Music Librarian Quarantine", isDirectory: true)
+        let fm = FileManager.default
+        var found: [RunRecord] = []
+        if let subs = try? fm.contentsOfDirectory(at: qroot, includingPropertiesForKeys: nil) {
+            for sub in subs {
+                let jsonURL = sub.appendingPathComponent("run.json")
+                guard let data = try? Data(contentsOf: jsonURL),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                let dateStr = obj["date"] as? String ?? ""
+                let date = ISO8601DateFormatter().date(from: dateStr) ?? Date(timeIntervalSince1970: 0)
+                let items = (obj["items"] as? [[String: String]] ?? []).compactMap { $0["rel"] }
+                found.append(RunRecord(id: sub.lastPathComponent, folder: sub, date: date,
+                                       rels: items, summary: obj["summary"] as? String ?? "\(items.count) items"))
+            }
+        }
+        runs = found.sorted { $0.date > $1.date }   // newest first
+    }
+
+    /// Restore a run: move each quarantined item back to its original location,
+    /// then remove the (now empty) quarantine folder. Reverses the run exactly.
+    func undo(_ run: RunRecord) {
+        guard let root else { return }
+        busy = true; status = "Undoing run…"
+        let folder = run.folder, rels = run.rels
+        Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            var restored = 0, failed = 0
+            // shallowest first so a restored parent folder exists before its children
+            for rel in rels.sorted(by: { $0.count < $1.count }) {
+                let from = folder.appendingPathComponent(rel)
+                let to = root.appendingPathComponent(rel)
+                guard fm.fileExists(atPath: from.path) else { continue }
+                do {
+                    try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    if fm.fileExists(atPath: to.path) { try? fm.removeItem(at: to) }
+                    try fm.moveItem(at: from, to: to)
+                    restored += 1
+                } catch { failed += 1 }
+            }
+            // clean up the run folder (and its parent if now empty)
+            try? fm.removeItem(at: folder)
+            let qroot = root.appendingPathComponent("Music Librarian Quarantine")
+            if let empty = try? fm.contentsOfDirectory(atPath: qroot.path), empty.isEmpty {
+                try? fm.removeItem(at: qroot)
+            }
+            await self.finishUndo(restored: restored, failed: failed)
+        }
+    }
+
+    private func finishUndo(restored: Int, failed: Int) {
+        busy = false
+        lastRunSummary = nil
+        status = "Restored \(restored) item(s)" + (failed > 0 ? ", \(failed) failed." : ".") + " Re-diagnose to see them again."
+        loadRuns()
     }
 
     // MARK: Detection helpers

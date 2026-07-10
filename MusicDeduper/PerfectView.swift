@@ -68,6 +68,7 @@ struct PerfectView: View {
                 .disabled(store.root == nil || store.busy)
             }
             Spacer()
+            history
         }
         .padding(24)
     }
@@ -102,6 +103,7 @@ struct PerfectView: View {
                     .padding(16)
                 }
             }
+            history
             Divider()
             footer
         }
@@ -201,6 +203,11 @@ struct PerfectView: View {
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
             Text(summary).font(.callout)
             Spacer()
+            if let run = store.runs.first {
+                Button("Undo this run") { store.undo(run) }
+                    .controlSize(.small)
+                    .disabled(store.busy)
+            }
             if let q = store.lastQuarantine {
                 Button("Show quarantine") { NSWorkspace.shared.activateFileViewerSelecting([q]) }
                     .controlSize(.small)
@@ -209,6 +216,33 @@ struct PerfectView: View {
         .padding(10)
         .background(Color.green.opacity(0.1))
     }
+
+    // Recent runs — restore any past run to keep testing repeatable
+    @ViewBuilder private var history: some View {
+        if !store.runs.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("RECENT RUNS").font(.caption2).fontWeight(.semibold).foregroundStyle(.secondary)
+                ForEach(store.runs) { run in
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock.arrow.circlepath").font(.caption).foregroundStyle(.secondary)
+                        Text(Self.runDate.string(from: run.date)).font(.caption).monospacedDigit()
+                        Text(run.summary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer()
+                        Button("Undo") { store.undo(run) }.controlSize(.small).disabled(store.busy)
+                        Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([run.folder]) }.controlSize(.small)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
+            .padding(.horizontal, 12).padding(.bottom, 8)
+        }
+    }
+
+    private static let runDate: DateFormatter = {
+        let f = DateFormatter(); f.dateStyle = .short; f.timeStyle = .short; return f
+    }()
 
     private func setAccepted(_ kind: FixKind, to v: Bool) {
         for i in store.findings.indices where store.findings[i].kind == kind {
