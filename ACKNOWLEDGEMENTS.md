@@ -22,6 +22,26 @@ repository (including the build configuration that produces the app) is
 public, so anyone can rebuild the app with a modified version of the
 library. The app's *own* code remains MIT.
 
+## Tag reading and writing (Perfect)
+
+The **Perfect** feature reads and writes the artist/album/title tags stored
+inside music files. This is done with:
+
+- **[SFBAudioEngine](https://github.com/sbooth/SFBAudioEngine)** — audio
+  library for macOS, © Stephen F. Booth, **MIT** licensed. It is linked as a
+  static library.
+- SFBAudioEngine bundles **[TagLib](https://taglib.org/)** (the actual tag
+  reader/writer), which is dual-licensed under **LGPL 2.1 / MPL 1.1**, and a
+  set of audio codec libraries — some of which (e.g. LAME, mpg123) are
+  **LGPL 2.1**.
+
+As with the SMB engine above, the combined binary satisfies these licenses:
+this complete source repository and its build configuration are public, so
+anyone can rebuild the app against a modified version of any bundled library.
+The app's own code remains MIT.
+
+## SMB network engine
+
 The app uses a lightly patched fork of AMSMB2, published at
 <https://github.com/peanutslab71/AMSMB2> (branch `guest-anonymous-session`).
 The single change: an empty password now produces an anonymous/guest SMB

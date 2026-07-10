@@ -19,6 +19,7 @@
 		DE0000000000000000000053 /* PerfectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE0000000000000000000051 /* PerfectView.swift */; };
 		DE0000000000000000000040 /* AMSMB2 in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000042 /* AMSMB2 */; };
 		DE0000000000000000000043 /* AMSMB2 in Embed Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000042 /* AMSMB2 */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		DE0000000000000000000060 /* SFBAudioEngine in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000062 /* SFBAudioEngine */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -41,6 +42,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				DE0000000000000000000040 /* AMSMB2 in Frameworks */,
+				DE0000000000000000000060 /* SFBAudioEngine in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -113,6 +115,7 @@
 			name = MusicDeduper;
 			packageProductDependencies = (
 				DE0000000000000000000042 /* AMSMB2 */,
+				DE0000000000000000000062 /* SFBAudioEngine */,
 			);
 			productName = MusicDeduper;
 			productReference = DE0000000000000000000006 /* MusicDeduper.app */;
@@ -144,6 +147,7 @@
 			mainGroup = DE0000000000000000000002;
 			packageReferences = (
 				DE0000000000000000000041 /* XCRemoteSwiftPackageReference "AMSMB2" */,
+				DE0000000000000000000063 /* XCRemoteSwiftPackageReference "SFBAudioEngine" */,
 			);
 			productRefGroup = DE0000000000000000000003 /* Products */;
 			projectDirPath = "";
@@ -366,6 +370,14 @@
 				branch = "guest-anonymous-session";
 			};
 		};
+		DE0000000000000000000063 /* XCRemoteSwiftPackageReference "SFBAudioEngine" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sbooth/SFBAudioEngine";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.13.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -373,6 +385,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = DE0000000000000000000041 /* XCRemoteSwiftPackageReference "AMSMB2" */;
 			productName = AMSMB2;
+		};
+		DE0000000000000000000062 /* SFBAudioEngine */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = DE0000000000000000000063 /* XCRemoteSwiftPackageReference "SFBAudioEngine" */;
+			productName = SFBAudioEngine;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
