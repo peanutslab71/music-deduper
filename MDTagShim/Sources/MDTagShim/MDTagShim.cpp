@@ -35,6 +35,10 @@ static const char *frameIdFor(const char *field) {
     if (std::strcmp(field, "albumartist") == 0) return "TPE2";
     if (std::strcmp(field, "title") == 0)       return "TIT2";
     if (std::strcmp(field, "track") == 0)       return "TRCK";
+    if (std::strcmp(field, "composer") == 0)    return "TCOM";
+    if (std::strcmp(field, "label") == 0)       return "TPUB";
+    if (std::strcmp(field, "conductor") == 0)   return "TPE3";
+    if (std::strcmp(field, "date") == 0)        return "TDRC";
     return nullptr;
 }
 

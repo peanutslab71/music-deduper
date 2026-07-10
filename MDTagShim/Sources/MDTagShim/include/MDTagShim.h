@@ -6,7 +6,8 @@ extern "C" {
 #endif
 
 /* Supported field names (case-sensitive):
-     "artist", "album", "albumartist", "title", "track"
+     "artist", "album", "albumartist", "title", "track",
+     "composer", "label", "conductor", "date"
    All edits are surgical: only the named field's frame changes; the ID3 version
    and every other frame (year, rating, cover art, custom tags) are preserved. */
 
