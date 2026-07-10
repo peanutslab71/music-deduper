@@ -13,6 +13,7 @@ struct PerfectView: View {
     @State private var expanded: Set<String> = []   // all sections collapsed initially — reads as a summary
     @State private var showSettings = false
     @State private var queueIndex = 0                // position in the step-through review queue
+    @State private var showApplyConfirm = false      // the final "confirm before commit" dialog
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,6 +27,7 @@ struct PerfectView: View {
                 review
             }
         }
+        .sheet(isPresented: $showApplyConfirm) { applyConfirmSheet }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -702,6 +704,65 @@ struct PerfectView: View {
         .padding(.vertical, 1).padding(.trailing, 4)
     }
 
+    private func applySummaryRows() -> [(text: String, color: Color)] {
+        var rows: [(String, Color)] = []
+        let acc = store.proposals.filter { $0.accepted }
+        if store.applyNames { let n = acc.filter { $0.hasChange }.count; if n > 0 { rows.append(("Correct names on \(n) track(s)", .blue)) } }
+        if store.applyArtwork { let n = acc.filter { $0.canAddArt }.count; if n > 0 { rows.append(("Add cover art to \(n) track(s)", .pink)) } }
+        if store.applyCredits { let n = acc.filter { !($0.enrichment?.isEmpty ?? true) }.count; if n > 0 { rows.append(("Fill credits on \(n) track(s)", Color(red: 0.13, green: 0.6, blue: 0.3))) } }
+        let merges = store.artists.filter { $0.accepted }.reduce(0) { $0 + $1.folderMerges }
+        if merges > 0 { rows.append(("Merge \(merges) duplicate artist folder(s)", .purple)) }
+        let tagfix = store.artists.filter { $0.accepted }.reduce(0) { $0 + $1.tagRewrites }
+        if tagfix > 0 { rows.append(("Unify \(tagfix) artist tag(s)", .teal)) }
+        let ren = store.renames.filter { $0.accepted && $0.newName != $0.oldName }.count
+        if ren > 0 { rows.append(("Tidy \(ren) folder name(s)", .orange)) }
+        let junk = store.findings.filter { $0.accepted && $0.kind == .junk }.count
+        if junk > 0 { rows.append(("Remove \(junk) junk file(s)", .gray)) }
+        let empty = store.findings.filter { $0.accepted && $0.kind == .emptyFolder }.count
+        if empty > 0 { rows.append(("Delete \(empty) empty folder(s)", .gray)) }
+        return rows
+    }
+
+    private var applyConfirmSheet: some View {
+        let rows = applySummaryRows()
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "wand.and.stars").foregroundStyle(.purple)
+                Text("Apply these changes?").font(.headline)
+                Spacer()
+            }
+            .padding(16)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 11) {
+                    if rows.isEmpty {
+                        Text("Nothing selected.").foregroundStyle(.secondary)
+                    }
+                    ForEach(rows, id: \.text) { r in
+                        HStack(spacing: 10) {
+                            Circle().fill(r.color).frame(width: 8, height: 8)
+                            Text(r.text).font(.callout)
+                        }
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Divider()
+            HStack(spacing: 12) {
+                Label("Removed items go to a recoverable quarantine — every change can be undone.",
+                      systemImage: "arrow.uturn.backward")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("Cancel") { showApplyConfirm = false }
+                Button("Confirm & apply") { showApplyConfirm = false; store.commit() }
+                    .buttonStyle(.borderedProminent).tint(.purple).disabled(rows.isEmpty)
+            }
+            .padding(16)
+        }
+        .frame(width: 480, height: 400)
+    }
+
     private var footer: some View {
         let acc = store.artists.filter { $0.accepted }
         let mergeCount = acc.reduce(0) { $0 + $1.folderMerges }
@@ -722,7 +783,7 @@ struct PerfectView: View {
             }
             Spacer()
             Button {
-                store.commit()
+                showApplyConfirm = true
             } label: {
                 Label("Apply changes", systemImage: "checkmark.circle")
             }
