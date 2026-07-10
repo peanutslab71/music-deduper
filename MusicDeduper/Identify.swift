@@ -123,7 +123,13 @@ enum IdentifyError: Error { case noKey, fingerprint(Error), network(Error), deco
 
 struct Identifier {
     let apiKey: String
-    private let session = URLSession(configuration: .ephemeral)
+    private let session: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.timeoutIntervalForRequest = 15
+        c.timeoutIntervalForResource = 30
+        c.waitsForConnectivity = false
+        return URLSession(configuration: c)
+    }()
 
     /// The AcoustID application key, injected at build time via Secrets.xcconfig.
     static var configuredKey: String {
@@ -340,7 +346,15 @@ private struct DiscogsLabel: Decodable { let name: String?; let catno: String? }
 /// so each network call waits a beat, and works/releases are cached to avoid
 /// repeat lookups (many tracks share a release).
 actor MusicBrainzClient {
-    private let session = URLSession(configuration: .ephemeral)
+    // A stalled request must fail fast and let the loop move on, never hang the
+    // whole credits pass. Without these, one slow response blocks everything.
+    private let session: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.timeoutIntervalForRequest = 15
+        c.timeoutIntervalForResource = 30
+        c.waitsForConnectivity = false
+        return URLSession(configuration: c)
+    }()
     private let userAgent = "MusicDeduper ( neil.cottyincar@gmail.com )"
     private let discogsUA = "MusicDeduper/1.4 +https://github.com/peanutslab71/music-deduper"
     private var workCache: [String: (composer: String?, lyricist: String?)] = [:]
@@ -467,7 +481,13 @@ actor MusicBrainzClient {
 /// Fetches front-cover images from the Cover Art Archive, keyed by release MBID.
 /// Caches per release so all of an album's tracks share one download.
 actor CoverArtClient {
-    private let session = URLSession(configuration: .ephemeral)
+    private let session: URLSession = {
+        let c = URLSessionConfiguration.ephemeral
+        c.timeoutIntervalForRequest = 20
+        c.timeoutIntervalForResource = 45
+        c.waitsForConnectivity = false
+        return URLSession(configuration: c)
+    }()
     private var cache: [String: Data?] = [:]
 
     func frontCover(releaseMBID: String) async -> Data? {

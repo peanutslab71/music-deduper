@@ -775,12 +775,13 @@ final class PerfectStore: ObservableObject {
         enriching = true; enrichProgress = "Looking up credits…"
         let box = cancelFlag; box.cancelled = false
         let client = MusicBrainzClient()
-        // look up every track that could gain something — missing composer, label,
-        // or cover art — not just the ones whose names changed
+        // Look up every identified track. We can't tell from the tag alone whether a
+        // track is missing performers or a lyricist (those live in frames we don't
+        // pre-read), so we check them all and let the gap-fill decide what to add —
+        // nothing complete is ever overwritten.
         let targets = proposals.compactMap { p -> (UUID, String)? in
             guard let rid = p.recordingID else { return nil }
-            let couldGain = p.curComposer.isEmpty || p.curLabel.isEmpty || !p.curHasArt
-            return couldGain ? (p.id, rid) : nil
+            return (p.id, rid)
         }
         Task.detached(priority: .userInitiated) {
             var done = 0
