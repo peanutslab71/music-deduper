@@ -306,6 +306,33 @@ dedupe and File Commander engines)*
 Everything runs against the local copy first; the existing copy-to-server step
 delivers the cleaned result.
 
+### Phase 1 screen & flow
+
+Entered from **Source** (library chosen). On entry it runs a **diagnosis pass**
+(progress view) reading structure and tags, then shows the review:
+
+- A header with the diagnosis summary, the thoroughness preset selector, and the
+  Settings gear.
+- A **"Back up files being changed first" checkbox, on by default**, and the
+  quarantine location.
+- **Safe cleanups** section (junk, empty folders, illegal-char names) —
+  pre-checked, with a single **Accept all**.
+- **Judgement calls** section (artist merges, duplicate recordings, DRM) — each
+  expands to per-item detail; a merge shows an editable dropdown defaulting to the
+  recommended canonical name.
+- **Couldn't identify** section (populated in Phase 2).
+- **Commit approved changes** backs up the affected files, applies the approved
+  changes, writes the before/after change log, and moves removed items to
+  quarantine. A post-run summary offers undo.
+
+UX decisions:
+- **Empty categories are hidden** — only sections with actual proposed changes
+  are shown, with a short "checked, none found" confirmation so the user knows a
+  category was examined. Keeps the review short and focused.
+- **Persistent run history** — every run is kept in a history list (backed by its
+  change log and backup) and can be undone later, not only immediately after.
+  Backups/logs are retained until the user clears them.
+
 ---
 
 ## 10. Settled decisions
