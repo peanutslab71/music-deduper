@@ -210,20 +210,34 @@ private struct MBWork: Decodable { let relations: [MBRelation]? }
 private struct MBRelease: Decodable {
     let date: String?
     let labelInfo: [MBLabelInfo]?
-    enum CodingKeys: String, CodingKey { case date; case labelInfo = "label-info" }
+    let relations: [MBRelation]?
+    enum CodingKeys: String, CodingKey { case date; case labelInfo = "label-info"; case relations }
 }
 private struct MBRelation: Decodable {
     let type: String
     let artist: MBRef?
     let work: MBRef?
+    let url: MBUrl?
     let attributes: [String]?
 }
+private struct MBUrl: Decodable { let resource: String? }
 private struct MBRef: Decodable { let id: String?; let name: String?; let title: String? }
 private struct MBLabelInfo: Decodable {
     let label: MBRef?
     let catalogNumber: String?
     enum CodingKeys: String, CodingKey { case label; case catalogNumber = "catalog-number" }
 }
+
+// Minimal Discogs models
+private struct DiscogsRelease: Decodable {
+    let extraartists: [DiscogsCredit]?
+    let labels: [DiscogsLabel]?
+    let genres: [String]?
+    let styles: [String]?
+    let year: Int?
+}
+private struct DiscogsCredit: Decodable { let name: String?; let role: String? }
+private struct DiscogsLabel: Decodable { let name: String?; let catno: String? }
 
 /// Looks up MusicBrainz relationships for a recording. An actor so its per-run
 /// caches are safe, and it serialises requests — MusicBrainz allows ~1 req/sec,
@@ -232,8 +246,10 @@ private struct MBLabelInfo: Decodable {
 actor MusicBrainzClient {
     private let session = URLSession(configuration: .ephemeral)
     private let userAgent = "MusicDeduper ( neil.cottyincar@gmail.com )"
+    private let discogsUA = "MusicDeduper/1.4 +https://github.com/peanutslab71/music-deduper"
     private var workCache: [String: (composer: String?, lyricist: String?)] = [:]
-    private var releaseCache: [String: (label: String?, catalog: String?, date: String?)] = [:]
+    private var releaseCache: [String: (label: String?, catalog: String?, date: String?, discogs: String?)] = [:]
+    private var discogsCache: [String: DiscogsRelease?] = [:]
 
     func enrich(recordingID: String) async -> Enrichment {
         var e = Enrichment()
@@ -252,13 +268,59 @@ actor MusicBrainzClient {
             let w = await cachedWork(workID)
             e.composer = w.composer; e.lyricist = w.lyricist
         }
-        // label / catalog / date via the first release; keep the release id for art
+        // label / catalog / date + Discogs link, via the first release
         if let releaseID = rec.releases?.first?.id {
             e.releaseMBID = releaseID
             let r = await cachedRelease(releaseID)
             e.label = r.label; e.catalogNumber = r.catalog; e.date = r.date
+            // Discogs tops up the credits MusicBrainz is thin on (CC0, embeddable)
+            if let discogsID = r.discogs, let d = await cachedDiscogs(discogsID) {
+                mergeDiscogs(&e, d)
+            }
         }
         return e
+    }
+
+    /// Merge Discogs credits into the enrichment: fill blank composer/lyricist/
+    /// label/date, and add the production + performer credits MusicBrainz lacks.
+    private func mergeDiscogs(_ e: inout Enrichment, _ d: DiscogsRelease) {
+        if e.label == nil { e.label = d.labels?.first?.name }
+        if e.catalogNumber == nil { e.catalogNumber = d.labels?.first?.catno }
+        if e.date == nil, let y = d.year, y > 0 { e.date = String(y) }
+        var have = Set(e.performers.map { "\($0.name)|\($0.role)".lowercased() })
+        for c in d.extraartists ?? [] {
+            guard let name = c.name?.trimmingCharacters(in: .whitespaces), !name.isEmpty else { continue }
+            for raw in (c.role ?? "").components(separatedBy: ",") {
+                let role = raw.replacingOccurrences(of: "\\[[^\\]]*\\]", with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespaces)
+                if role.isEmpty { continue }
+                let low = role.lowercased()
+                if e.composer == nil, low.contains("written-by") || low.contains("composed") || low == "music by" {
+                    e.composer = name
+                } else if e.lyricist == nil, low.contains("lyrics") || low.contains("words by") {
+                    e.lyricist = name
+                } else {
+                    let key = "\(name)|\(role)".lowercased()
+                    if !have.contains(key) { have.insert(key); e.performers.append(.init(name: name, role: role)) }
+                }
+            }
+        }
+    }
+
+    private func cachedDiscogs(_ id: String) async -> DiscogsRelease? {
+        if let c = discogsCache[id] { return c }
+        try? await Task.sleep(nanoseconds: 1_100_000_000)   // courtesy delay (25/min unauth)
+        var out: DiscogsRelease? = nil
+        if let url = URL(string: "https://api.discogs.com/releases/\(id)") {
+            var req = URLRequest(url: url)
+            req.setValue(discogsUA, forHTTPHeaderField: "User-Agent")
+            if let (data, resp) = try? await session.data(for: req),
+               (resp as? HTTPURLResponse)?.statusCode == 200 {
+                out = try? JSONDecoder().decode(DiscogsRelease.self, from: data)
+            }
+        }
+        discogsCache[id] = out
+        return out
     }
 
     private func cachedWork(_ id: String) async -> (composer: String?, lyricist: String?) {
@@ -274,13 +336,21 @@ actor MusicBrainzClient {
         return out
     }
 
-    private func cachedRelease(_ id: String) async -> (label: String?, catalog: String?, date: String?) {
+    private func cachedRelease(_ id: String) async -> (label: String?, catalog: String?, date: String?, discogs: String?) {
         if let c = releaseCache[id] { return c }
-        var out: (label: String?, catalog: String?, date: String?) = (nil, nil, nil)
-        if let r: MBRelease = await get("release/\(id)?inc=labels") {
+        var out: (label: String?, catalog: String?, date: String?, discogs: String?) = (nil, nil, nil, nil)
+        if let r: MBRelease = await get("release/\(id)?inc=labels+url-rels") {
             out.date = r.date
             if let li = r.labelInfo?.first {
                 out.label = li.label?.name; out.catalog = li.catalogNumber
+            }
+            // curated Discogs release link → the numeric release id
+            for rel in r.relations ?? [] where rel.type == "discogs" {
+                if let res = rel.url?.resource, res.contains("/release/"),
+                   let last = res.split(separator: "/").last {
+                    let digits = String(last).filter { $0.isNumber }
+                    if !digits.isEmpty { out.discogs = digits; break }
+                }
             }
         }
         releaseCache[id] = out
