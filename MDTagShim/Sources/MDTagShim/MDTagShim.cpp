@@ -12,6 +12,7 @@
 #include <taglib/id3v2tag.h>
 #include <taglib/id3v2header.h>
 #include <taglib/textidentificationframe.h>
+#include <taglib/tpropertymap.h>
 
 static bool hasSuffixCI(const char *p, const char *ext) {
     size_t lp = std::strlen(p), le = std::strlen(ext);
@@ -36,6 +37,7 @@ static const char *frameIdFor(const char *field) {
     if (std::strcmp(field, "title") == 0)       return "TIT2";
     if (std::strcmp(field, "track") == 0)       return "TRCK";
     if (std::strcmp(field, "composer") == 0)    return "TCOM";
+    if (std::strcmp(field, "lyricist") == 0)    return "TEXT";
     if (std::strcmp(field, "label") == 0)       return "TPUB";
     if (std::strcmp(field, "conductor") == 0)   return "TPE3";
     if (std::strcmp(field, "date") == 0)        return "TDRC";
@@ -115,6 +117,43 @@ extern "C" int md_set_field(const char *path, const char *field, const char *val
     if (f.isNull() || !f.tag()) return -1;
     genericSet(f.tag(), field, v);
     return f.save() ? 0 : -2;
+}
+
+// Add a performer credit (name + instrument/role). Uses TagLib's property map,
+// which routes "PERFORMER:role" to the TMCL musician-credits frame. Merges into
+// the existing properties so nothing else is disturbed.
+extern "C" int md_add_performer(const char *path, const char *name, const char *role) {
+    if (path == nullptr || name == nullptr || role == nullptr) return -3;
+    if (!hasSuffixCI(path, ".mp3")) return -4;   // mp3 for now
+    TagLib::MPEG::File f(path);
+    if (!f.isValid()) return -1;
+    TagLib::ID3v2::Tag *tag = f.ID3v2Tag(true);
+    unsigned int mv = tag->header()->majorVersion();
+    TagLib::ID3v2::Version ver = (mv == 3) ? TagLib::ID3v2::v3 : TagLib::ID3v2::v4;
+    TagLib::PropertyMap props = tag->properties();
+    TagLib::String key = TagLib::String("PERFORMER:") + TagLib::String(role, TagLib::String::UTF8);
+    props.insert(key, TagLib::StringList(TagLib::String(name, TagLib::String::UTF8)));
+    tag->setProperties(props);
+    bool ok = f.save(TagLib::MPEG::File::ID3v2, TagLib::File::StripNone, ver, TagLib::File::DoNotDuplicate);
+    return ok ? 0 : -2;
+}
+
+// Remove a performer credit added earlier (for undo). Erases the PERFORMER:role
+// entry (TagLib upper-cases the role in the property key).
+extern "C" int md_remove_performer(const char *path, const char *name, const char *role) {
+    if (path == nullptr || name == nullptr || role == nullptr) return -3;
+    if (!hasSuffixCI(path, ".mp3")) return -4;
+    TagLib::MPEG::File f(path);
+    if (!f.isValid()) return -1;
+    TagLib::ID3v2::Tag *tag = f.ID3v2Tag(true);
+    unsigned int mv = tag->header()->majorVersion();
+    TagLib::ID3v2::Version ver = (mv == 3) ? TagLib::ID3v2::v3 : TagLib::ID3v2::v4;
+    TagLib::PropertyMap props = tag->properties();
+    TagLib::String key = (TagLib::String("PERFORMER:") + TagLib::String(role, TagLib::String::UTF8)).upper();
+    props.erase(key);
+    tag->setProperties(props);
+    bool ok = f.save(TagLib::MPEG::File::ID3v2, TagLib::File::StripNone, ver, TagLib::File::DoNotDuplicate);
+    return ok ? 0 : -2;
 }
 
 extern "C" char *md_get_artist(const char *path) { return md_get_field(path, "artist"); }

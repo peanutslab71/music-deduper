@@ -149,6 +149,7 @@ struct RunRecord: Identifiable {
     let date: Date
     let ops: [(from: String, to: String)]   // each move, root-relative
     let tagEdits: [(rel: String, field: String, old: String)]  // each tag rewrite, for exact undo
+    let perfEdits: [(rel: String, name: String, role: String)] // each performer credit added, for undo
     let summary: String
 }
 
@@ -557,6 +558,18 @@ final class PerfectStore: ObservableObject {
                                    userInfo: [NSLocalizedDescriptionKey: "tag write failed (\(rc))"]) }
     }
 
+    /// Add a performer credit (name + instrument/role) to the musician-credits list.
+    nonisolated static func addPerformer(_ url: URL, name: String, role: String) throws {
+        let rc = md_add_performer(url.path, name, role)
+        if rc != 0 { throw NSError(domain: "MDTagShim", code: Int(rc),
+                                   userInfo: [NSLocalizedDescriptionKey: "credit write failed (\(rc))"]) }
+    }
+
+    /// Remove a performer credit (for undo).
+    nonisolated static func removePerformer(_ url: URL, name: String, role: String) {
+        _ = md_remove_performer(url.path, name, role)
+    }
+
     // MARK: Commit — apply accepted removals + merges as a log of reversible moves
 
     var hasWork: Bool {
@@ -679,9 +692,17 @@ final class PerfectStore: ObservableObject {
                 guard let e = p.enrichment, !e.isEmpty else { return nil }
                 var fields: [(String, String)] = []
                 if let c = e.composer { fields.append(("composer", c)) }
+                if let ly = e.lyricist { fields.append(("lyricist", ly)) }
                 if let l = e.label { fields.append(("label", l)) }
                 if let d = e.date { fields.append(("date", d)) }
                 return fields.isEmpty ? nil : (p.url, p.relPath, fields)
+            } : []
+        // performer credits from enrichment — added to the credits list, reversibly
+        let accPerf: [(URL, String, [(String, String)])] = tagWritingEnabled ? proposals
+            .filter { $0.accepted }
+            .compactMap { p in
+                guard let e = p.enrichment, !e.performers.isEmpty else { return nil }
+                return (p.url, p.relPath, e.performers.map { ($0.name, $0.role) })
             } : []
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
@@ -691,6 +712,7 @@ final class PerfectStore: ObservableObject {
             try? fm.createDirectory(at: quarantine, withIntermediateDirectories: true)
             var ops: [(from: String, to: String)] = []   // recorded moves (root-relative)
             var tagEdits: [(rel: String, field: String, old: String)] = []  // recorded tag rewrites
+            var perfEdits: [(rel: String, name: String, role: String)] = []  // recorded performer credits
             var log = "Music Librarian — change log \(Date())\nLibrary: \(root.path)\n\n"
 
             func move(_ fromRel: String, _ toRel: String) -> Bool {
@@ -724,6 +746,18 @@ final class PerfectStore: ObservableObject {
                         tagEdits.append((rel, field, ""))
                         log += "TAG: \(rel)  + \(field) '\(value)' (was blank)\n"
                     } catch { log += "FAILED enrich \(rel) \(field): \(error.localizedDescription)\n" }
+                }
+            }
+
+            // 0c) performer credits — added to the musician-credits list, recorded
+            //     so undo removes exactly what was added.
+            for (url, rel, people) in accPerf {
+                for (name, role) in people {
+                    do {
+                        try Self.addPerformer(url, name: name, role: role)
+                        perfEdits.append((rel, name, role))
+                        log += "CREDIT: \(rel)  + \(name) (\(role))\n"
+                    } catch { log += "FAILED credit \(rel): \(error.localizedDescription)\n" }
                 }
             }
 
@@ -768,7 +802,7 @@ final class PerfectStore: ObservableObject {
                 if move(rel, toRel) { log += "RENAMED: \(rel) → \(toRel)\n" }
             }
 
-            let total = ops.count + tagEdits.count
+            let total = ops.count + tagEdits.count + perfEdits.count
             log += "\n\(total) change(s). Restore with 'Undo this run'.\n"
             try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
 
@@ -778,6 +812,7 @@ final class PerfectStore: ObservableObject {
                 "summary": "\(total) change(s) applied",
                 "ops": ops.map { ["from": $0.from, "to": $0.to] },
                 "tagEdits": tagEdits.map { ["rel": $0.rel, "field": $0.field, "old": $0.old] },
+                "perfEdits": perfEdits.map { ["rel": $0.rel, "name": $0.name, "role": $0.role] },
             ]
             if let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) {
                 try? data.write(to: quarantine.appendingPathComponent("run.json"))
@@ -817,9 +852,12 @@ final class PerfectStore: ObservableObject {
                     guard let r = d["rel"], let o = d["old"] else { return nil }
                     return (r, d["field"] ?? "artist", o)   // default field for older runs
                 }
-                let n = ops.count + tagEdits.count
+                let perfEdits = (obj["perfEdits"] as? [[String: String]] ?? []).compactMap { d -> (String, String, String)? in
+                    guard let r = d["rel"], let n = d["name"], let ro = d["role"] else { return nil }; return (r, n, ro)
+                }
+                let n = ops.count + tagEdits.count + perfEdits.count
                 found.append(RunRecord(id: sub.lastPathComponent, folder: sub, date: date,
-                                       ops: ops, tagEdits: tagEdits,
+                                       ops: ops, tagEdits: tagEdits, perfEdits: perfEdits,
                                        summary: obj["summary"] as? String ?? "\(n) changes"))
             }
         }
@@ -831,7 +869,7 @@ final class PerfectStore: ObservableObject {
     func undo(_ run: RunRecord) {
         guard let root else { return }
         busy = true; status = "Undoing run…"
-        let folder = run.folder, ops = run.ops, tagEdits = run.tagEdits
+        let folder = run.folder, ops = run.ops, tagEdits = run.tagEdits, perfEdits = run.perfEdits
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var restored = 0, failed = 0
@@ -871,6 +909,12 @@ final class PerfectStore: ObservableObject {
                 let url = root.appendingPathComponent(edit.rel)
                 guard fm.fileExists(atPath: url.path) else { failed += 1; continue }
                 do { try Self.writeField(url, edit.field, to: edit.old); restored += 1 } catch { failed += 1 }
+            }
+            // remove any performer credits this run added
+            for edit in perfEdits {
+                let url = root.appendingPathComponent(edit.rel)
+                guard fm.fileExists(atPath: url.path) else { continue }
+                Self.removePerformer(url, name: edit.name, role: edit.role); restored += 1
             }
 
             try? fm.removeItem(at: folder)
