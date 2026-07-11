@@ -349,7 +349,7 @@ struct PerfectView: View {
         VStack(spacing: 10) {
             Spacer()
             if live {
-                Text("\(credits ? store.recentFinds.count : store.identifyMatched)")
+                Text("\(credits ? store.enrichDone : store.identifyMatched)")
                     .font(.system(size: 44, weight: .bold, design: .rounded)).foregroundStyle(.teal)
                     .contentTransition(.numericText())
                 Text(title).font(.headline)

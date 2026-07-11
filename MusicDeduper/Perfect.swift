@@ -282,6 +282,7 @@ final class PerfectStore: ObservableObject {
     @Published var identifyMatched = 0           // running count of tracks matched
     @Published var enriching = false
     @Published var enrichProgress = ""
+    @Published var enrichDone = 0                 // running count of tracks looked up
     @Published var didIdentify = false       // identify pass has completed at least once
     @Published var enriched = false          // credits pass has run (or was skipped)
     // category-level toggles (the mockup's bulk on/off buttons)
@@ -773,6 +774,7 @@ final class PerfectStore: ObservableObject {
     func enrich() {
         guard !proposals.isEmpty, !enriching else { return }
         enriching = true; enrichProgress = "Looking up credits…"
+        recentFinds = []; enrichDone = 0
         let box = cancelFlag; box.cancelled = false
         let client = MusicBrainzClient()
         // Look up every identified track. We can't tell from the tag alone whether a
@@ -790,13 +792,29 @@ final class PerfectStore: ObservableObject {
                 let e = await client.enrich(recordingID: rid)
                 await self.attachEnrichment(pid, e)
                 done += 1
-                await self.setEnrichProgress("Credits \(done)/\(targets.count)…")
+                await self.pushEnrich(pid, e, done: done, total: targets.count)
             }
             await self.finishEnrich(cancelled: box.cancelled)
         }
     }
 
     private func setEnrichProgress(_ s: String) { enrichProgress = s }
+
+    /// Advance the live credits counter/feed as each track is looked up.
+    private func pushEnrich(_ id: UUID, _ e: Enrichment, done: Int, total: Int) {
+        enrichDone = done
+        enrichProgress = "Credits \(done)/\(total)…"
+        let title = proposals.first(where: { $0.id == id })?.newTitle ?? "track"
+        var bits: [String] = []
+        if e.composer != nil { bits.append("composer") }
+        if e.lyricist != nil { bits.append("lyricist") }
+        if e.label != nil { bits.append("label") }
+        if !e.performers.isEmpty { bits.append("\(e.performers.count) performer\(e.performers.count == 1 ? "" : "s")") }
+        if e.releaseMBID != nil { bits.append("artwork") }
+        let found = bits.isEmpty ? "nothing new" : "+ " + bits.joined(separator: ", ")
+        recentFinds.insert((bits.isEmpty ? "✓ " : "✎ ") + "\(title) — \(found)", at: 0)
+        if recentFinds.count > 7 { recentFinds.removeLast() }
+    }
 
     private func attachEnrichment(_ id: UUID, _ e: Enrichment) {
         if let i = proposals.firstIndex(where: { $0.id == id }) { proposals[i].enrichment = e }
