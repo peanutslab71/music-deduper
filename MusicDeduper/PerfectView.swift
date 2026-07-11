@@ -50,6 +50,7 @@ struct PerfectView: View {
     @State private var expanded: Set<String> = []   // all sections collapsed initially — reads as a summary
     @State private var showSettings = false
     @State private var queueIndex = 0                // position in the step-through review queue
+    @State private var savedFlash = false            // brief "Saved" toast after a queue decision
     // One sheet driver. SwiftUI only honours the LAST `.sheet` modifier on a view,
     // so two stacked sheets meant Apply silently never opened — hence a single enum.
     @State private var activeSheet: PerfectSheet? = nil
@@ -100,6 +101,18 @@ struct PerfectView: View {
             }
         }
         .onChange(of: store.root) { _ in currentStep = 1 }   // new library → back to Scan
+        .overlay(alignment: .top) {
+            if savedFlash {
+                Label("Saved", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Capsule().fill(.green))
+                    .foregroundStyle(.white)
+                    .shadow(radius: 6)
+                    .padding(.top, 12)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
         .overlay { if store.committing { applyingOverlay } }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -521,7 +534,7 @@ struct PerfectView: View {
                             .foregroundStyle(keep ? .green : .orange).frame(width: 48, alignment: .leading)
                         Text(t.url.lastPathComponent).font(.system(size: 11)).lineLimit(1).truncationMode(.middle)
                         Spacer()
-                        Text(t.formatLabel).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+                        Text(bitrateLabel(t)).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
                         Text(fmtBytes(t.size)).font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
                             .frame(width: 60, alignment: .trailing)
                     }
@@ -532,6 +545,16 @@ struct PerfectView: View {
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor).opacity(0.4)))
+    }
+
+    // Codec + bitrate for the dedup rows. When the exact rate didn't read, show the
+    // effective rate (size over duration) with a ~ so you can still compare quality.
+    private func bitrateLabel(_ t: Track) -> String {
+        let codec = t.codec.uppercased()
+        if t.lossless { return "◆ \(codec)" }
+        if t.bitrate > 0 { return "\(codec) \(t.bitrate)k" }
+        let eff = Int(t.effectiveKbps.rounded())
+        return eff > 0 ? "\(codec) ~\(eff)k" : codec
     }
 
     // Rebuild the clean Album Artist / Album / ## Title tree from tags.
@@ -977,6 +1000,10 @@ struct PerfectView: View {
             store.proposals[i].accepted = accept
             store.proposals[i].reviewed = true
         }
+        withAnimation { savedFlash = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+            withAnimation { savedFlash = false }
+        }
     }
 
     // Summary of the name changes by type, with bulk on/off for the safe kinds so
@@ -1087,8 +1114,9 @@ struct PerfectView: View {
                         set: { v in if let i = store.proposals.firstIndex(where: { $0.id == p.id }) { store.proposals[i].chosenAlbum = v } }
                     )) {
                         ForEach(p.albumCandidates, id: \.self) { Text($0).tag($0) }
-                    }.labelsHidden().frame(maxWidth: 300)
+                    }.labelsHidden().frame(maxWidth: 300, alignment: .leading)
                     if p.albumChanged { Text("change").font(.caption2).foregroundStyle(.blue) }
+                    Spacer(minLength: 0)
                 }
                 creditChips(p)
             }
