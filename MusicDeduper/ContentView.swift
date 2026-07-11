@@ -10,9 +10,9 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var store = DedupStore()
-    // one Perfect session for the whole app run, so leaving and returning to the
-    // Perfect step keeps everything it found
-    @StateObject private var perfect = PerfectStore()
+    // the Perfect session is owned by the app (shared with the Library/Runs/Logs
+    // windows) and injected here
+    @EnvironmentObject private var perfect: PerfectStore
     @State private var step: WizardStep = .perfect
     @State private var reviewTab = 0            // 0 duplicates · 1 library
     @State private var destFolder: URL? = nil

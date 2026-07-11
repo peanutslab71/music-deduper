@@ -9,6 +9,10 @@ import SwiftUI
 
 @main
 struct MusicDeduperApp: App {
+    // One shared Perfect session for the whole app, so the Library / Runs / Logs
+    // windows see the same library and run history as the main window.
+    @StateObject private var perfect = PerfectStore()
+
     init() {
         // Opt the app out of App Nap entirely. App Nap throttles disk/network
         // I/O when the window is covered or minimized, and there are documented
@@ -21,12 +25,18 @@ struct MusicDeduperApp: App {
 
     var body: some Scene {
         WindowGroup("Music Library Deduper") {
-            ContentView()
+            ContentView().environmentObject(perfect)
         }
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .appInfo) {
                 AboutMenuButton()
+            }
+            // A "Library" menu for the three tool windows.
+            CommandMenu("Library") {
+                LibraryMenuButton("Library Viewer", "libraryViewer", "l")
+                LibraryMenuButton("Runs", "runs", "r")
+                LibraryMenuButton("Logs", "logs", "g")
             }
             CommandGroup(replacing: .help) {
                 Button("Music Deduper Help") {
@@ -42,6 +52,26 @@ struct MusicDeduperApp: App {
         }
         .windowResizability(.contentSize)
 
+        Window("Library Viewer", id: "libraryViewer") {
+            LibraryViewerView().environmentObject(perfect)
+        }
+        Window("Runs", id: "runs") {
+            RunsView().environmentObject(perfect)
+        }
+        Window("Logs", id: "logs") {
+            LogsView().environmentObject(perfect)
+        }
+    }
+}
+
+/// Opens one of the Library tool windows (keeps the same window if already open).
+private struct LibraryMenuButton: View {
+    @Environment(\.openWindow) private var openWindow
+    let title: String; let id: String; let key: Character
+    init(_ title: String, _ id: String, _ key: Character) { self.title = title; self.id = id; self.key = key }
+    var body: some View {
+        Button(title) { openWindow(id: id) }
+            .keyboardShortcut(KeyEquivalent(key), modifiers: [.command, .shift])
     }
 }
 
