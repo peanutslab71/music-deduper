@@ -1152,16 +1152,27 @@ final class PerfectStore: ObservableObject {
             if total > 0, let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) {
                 try? data.write(to: quarantine.appendingPathComponent("run.json"))
             } else { try? fm.removeItem(at: quarantine) }
-            await self.finishOrganiseApply(quarantine: quarantine, moved: ops.count)
+            await self.finishOrganiseApply(quarantine: quarantine, moves: ops)
         }
     }
 
-    private func finishOrganiseApply(quarantine: URL, moved: Int) {
+    private func finishOrganiseApply(quarantine: URL, moves: [(from: String, to: String)]) {
         busy = false; committing = false; cancelRequested = false
         commitPhase = ""; commitDone = 0; commitTotal = 0
         lastQuarantine = quarantine
+        // the files moved — repoint the in-memory proposals to their new paths so the
+        // grid regroups by the clean albums and the player keeps working.
+        if let root, !moves.isEmpty {
+            let map = Dictionary(moves.map { ($0.from, $0.to) }, uniquingKeysWith: { a, _ in a })
+            for i in proposals.indices {
+                if let to = map[proposals[i].relPath] {
+                    proposals[i].relPath = to
+                    proposals[i].url = root.appendingPathComponent(to)
+                }
+            }
+        }
         organisePlans.removeAll(); organised = false
-        lastRunSummary = "Reorganised \(moved) file(s)."
+        lastRunSummary = "Reorganised \(moves.count) file(s)."
         status = lastRunSummary ?? status
         loadRuns()
     }
@@ -1309,16 +1320,20 @@ final class PerfectStore: ObservableObject {
             if total > 0, let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) {
                 try? data.write(to: quarantine.appendingPathComponent("run.json"))
             } else { try? fm.removeItem(at: quarantine) }
-            await self.finishDedupApply(quarantine: quarantine, removed: ops.count)
+            await self.finishDedupApply(quarantine: quarantine, removedRels: ops.map { $0.from })
         }
     }
 
-    private func finishDedupApply(quarantine: URL, removed: Int) {
+    private func finishDedupApply(quarantine: URL, removedRels: [String]) {
         busy = false; committing = false; cancelRequested = false
         commitPhase = ""; commitDone = 0; commitTotal = 0
         lastQuarantine = quarantine
+        // the removed duplicates are gone — drop their now-dangling proposals so the
+        // grid and player don't point at quarantined files.
+        let gone = Set(removedRels)
+        proposals.removeAll { gone.contains($0.relPath) }
         dedupClusters.removeAll(); dedupTracks.removeAll(); deduped = false
-        lastRunSummary = "Removed \(removed) duplicate(s)."
+        lastRunSummary = "Removed \(removedRels.count) duplicate(s)."
         status = lastRunSummary ?? status
         loadRuns()
     }

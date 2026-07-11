@@ -43,8 +43,8 @@ private struct ACReleaseGroup: Decodable {
 /// match says they should be. Album is a chosen suggestion, editable.
 struct TrackProposal: Identifiable {
     let id = UUID()
-    let url: URL
-    let relPath: String
+    var url: URL                      // updated if Organise moves the file
+    var relPath: String
     let score: Double                 // AcoustID match score 0…1
 
     let curArtist: String
