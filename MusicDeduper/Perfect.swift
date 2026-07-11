@@ -319,6 +319,12 @@ final class PerfectStore: ObservableObject {
     @Published var didIdentify = false       // identify pass has completed at least once
     @Published var enriched = false          // credits pass has run (or was skipped)
 
+    // deduplicate (folded in from the old wizard; merge-of-best keeper)
+    @Published var dedupClusters: [Cluster] = []
+    @Published var dedupTracks: [Track] = []
+    @Published var deduped = false
+    @Published var deduping = false
+
     // organise (rebuild the clean Album Artist/Album/## Title tree from tags)
     @Published var organisePlans: [OrganisePlan] = []
     @Published var organised = false          // organise plan has been built at least once
@@ -1102,6 +1108,163 @@ final class PerfectStore: ObservableObject {
         lastQuarantine = quarantine
         organisePlans.removeAll(); organised = false
         lastRunSummary = "Reorganised \(moved) file(s)."
+        status = lastRunSummary ?? status
+        loadRuns()
+    }
+
+    // MARK: Deduplicate (folded in from the old wizard, with merge-of-best)
+
+    /// Scan the library, read tags, and cluster duplicates (best copy = keeper).
+    func dedup() {
+        guard let root else { return }
+        deduping = true; status = "Finding duplicates…"; dedupClusters = []; dedupTracks = []
+        let mode = MatchMode.balanced, tol = 2.0, cross = false
+        Task.detached(priority: .userInitiated) {
+            var urls: [URL] = []
+            if let en = FileManager.default.enumerator(at: root,
+                    includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) {
+                while let obj = en.nextObject() {
+                    guard let u = obj as? URL, Self.isAudio(u) else { continue }
+                    if Self.rel(u, root).hasPrefix("Music Librarian Quarantine") { continue }
+                    urls.append(u)
+                }
+            }
+            var built: [Track] = []
+            for u in urls {
+                let size = Int64((try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                let m = await readMetadata(url: u, size: size)
+                let rel = Self.rel(u, root)
+                built.append(Track(id: built.count, url: u, name: u.lastPathComponent,
+                    relDir: (rel as NSString).deletingLastPathComponent, size: size, ext: m.ext,
+                    title: m.title, artist: m.artist, album: m.album, albumArtist: m.albumArtist,
+                    trackNo: m.trackNo, discNo: m.discNo, duration: m.duration,
+                    lossless: m.lossless, bitrate: m.bitrate, codec: m.codec))
+            }
+            var mutable = built
+            let cl = buildClusters(&mutable, mode: mode, tol: tol, crossAlbum: cross) { s in
+                Task { await self.setDedupStatus(s) }
+            }
+            await self.finishDedup(tracks: mutable, clusters: cl)
+        }
+    }
+
+    private func setDedupStatus(_ s: String) { status = s }
+
+    private func finishDedup(tracks: [Track], clusters: [Cluster]) {
+        deduping = false; deduped = true; dedupTracks = tracks; dedupClusters = clusters
+        let dupes = clusters.reduce(0) { $0 + $1.memberIDs.count - 1 }
+        status = "Found \(clusters.count) duplicate group(s) — \(dupes) file(s) can be removed."
+    }
+
+    func setDedupKeeper(clusterID: UUID, trackID: Int) {
+        guard let i = dedupClusters.firstIndex(where: { $0.id == clusterID }) else { return }
+        dedupClusters[i].keeperID = trackID
+    }
+    func dedupTrack(_ id: Int) -> Track? { dedupTracks.first { $0.id == id } }
+    var dedupRemovableCount: Int { dedupClusters.reduce(0) { $0 + $1.memberIDs.count - 1 } }
+
+    /// Apply dedup with MERGE-OF-BEST: the keeper (best-quality copy) inherits any
+    /// blank tags and missing cover art from its duplicates, then the duplicates go
+    /// to the shared quarantine. Recorded to run.json (ops + tagEdits + artEdits) so
+    /// Undo puts the files back and reverses the backfill.
+    func applyDedup() {
+        guard let root, !dedupClusters.isEmpty else { return }
+        busy = true; committing = true; commitPhase = "Merging & removing duplicates…"; commitDone = 0
+        commitTotal = dedupClusters.reduce(0) { $0 + $1.memberIDs.count }
+        cancelRequested = false; let box = cancelFlag; box.cancelled = false
+        let byId = Dictionary(dedupTracks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        struct DJob { let keeper: URL; let keeperRel: String; let losers: [(url: URL, rel: String)] }
+        var jobs: [DJob] = []
+        for c in dedupClusters {
+            guard let k = byId[c.keeperID] else { continue }
+            let losers = c.memberIDs.filter { $0 != c.keeperID }.compactMap { byId[$0] }
+                .map { (url: $0.url, rel: Self.rel($0.url, root)) }
+            jobs.append(DJob(keeper: k.url, keeperRel: Self.rel(k.url, root), losers: losers))
+        }
+        Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
+            let qRel = "Music Librarian Quarantine/\(stamp)"
+            let quarantine = root.appendingPathComponent(qRel, isDirectory: true)
+            try? fm.createDirectory(at: quarantine, withIntermediateDirectories: true)
+            var ops: [(from: String, to: String)] = []
+            var tagEdits: [(rel: String, field: String, old: String)] = []
+            var artEdits: [String] = []
+            var log = "Music Librarian — dedup \(Date())\nLibrary: \(root.path)\n\n"
+            var done = 0
+            let backfill = ["title", "artist", "album", "albumartist", "composer", "lyricist", "label", "conductor", "date", "track"]
+            for job in jobs {
+                if box.cancelled { break }
+                // merge-of-best: fill each of the keeper's BLANK fields from a loser
+                for field in backfill where (Self.readField(job.keeper, field) ?? "").isEmpty {
+                    for l in job.losers {
+                        let v = Self.readField(l.url, field) ?? ""
+                        if !v.isEmpty {
+                            do { try Self.writeField(job.keeper, field, to: v)
+                                 tagEdits.append((job.keeperRel, field, ""))
+                                 log += "MERGE: \(job.keeperRel)  + \(field) '\(v)' (from a duplicate)\n"
+                            } catch {}
+                            break
+                        }
+                    }
+                }
+                // art backfill: if the keeper has none, take a duplicate's cover
+                if md_has_artwork(job.keeper.path) == 0 {
+                    for l in job.losers {
+                        var len: Int32 = 0, ty: Int32 = 0
+                        if let b = md_copy_artwork(l.url.path, &len, &ty) {
+                            let d = Data(bytes: b, count: Int(len)); free(b)
+                            let mime = d.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
+                            let rc = d.withUnsafeBytes { buf in
+                                md_set_artwork(job.keeper.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(d.count), mime)
+                            }
+                            if rc == 0 { artEdits.append(job.keeperRel); log += "MERGE: \(job.keeperRel)  + cover (from a duplicate)\n" }
+                            break
+                        }
+                    }
+                }
+                done += 1
+                // move the duplicates to quarantine
+                for l in job.losers {
+                    if box.cancelled { break }
+                    let src = root.appendingPathComponent(l.rel)
+                    guard fm.fileExists(atPath: src.path) else { continue }
+                    let toRel = qRel + "/" + l.rel
+                    let dst = root.appendingPathComponent(toRel)
+                    do {
+                        try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try fm.moveItem(at: src, to: dst)
+                        ops.append((l.rel, toRel))
+                        log += "DUPLICATE → quarantine: \(l.rel)\n"
+                    } catch { log += "FAILED \(l.rel): \(error.localizedDescription)\n" }
+                    done += 1
+                    if done % 5 == 0 { await self.setCommitProgress("Merging & removing duplicates", done: done) }
+                }
+            }
+            let total = ops.count + tagEdits.count + artEdits.count
+            log += "\n\(total) change(s)\(box.cancelled ? " (stopped early)" : "").\n"
+            try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
+            let record: [String: Any] = [
+                "date": ISO8601DateFormatter().string(from: Date()),
+                "root": root.path,
+                "summary": "Removed \(ops.count) duplicate(s)",
+                "ops": ops.map { ["from": $0.from, "to": $0.to] },
+                "tagEdits": tagEdits.map { ["rel": $0.rel, "field": $0.field, "old": $0.old] },
+                "perfEdits": [], "artEdits": artEdits, "artPromotions": [], "artReplacements": [],
+            ]
+            if total > 0, let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) {
+                try? data.write(to: quarantine.appendingPathComponent("run.json"))
+            } else { try? fm.removeItem(at: quarantine) }
+            await self.finishDedupApply(quarantine: quarantine, removed: ops.count)
+        }
+    }
+
+    private func finishDedupApply(quarantine: URL, removed: Int) {
+        busy = false; committing = false; cancelRequested = false
+        commitPhase = ""; commitDone = 0; commitTotal = 0
+        lastQuarantine = quarantine
+        dedupClusters.removeAll(); dedupTracks.removeAll(); deduped = false
+        lastRunSummary = "Removed \(removed) duplicate(s)."
         status = lastRunSummary ?? status
         loadRuns()
     }

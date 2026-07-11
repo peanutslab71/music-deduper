@@ -440,6 +440,7 @@ struct PerfectView: View {
                     emptyStageNote
                 }
                 if step == 4 { reviewQueueSection }   // the decision queue only on Review
+                if step == 4 { dedupSection }         // remove duplicates (merge-of-best)
                 if step == 4 { organiseSection }      // rebuild the clean tree
                 albumGrid
             }
@@ -456,6 +457,80 @@ struct PerfectView: View {
         case 3: return all.filter { $0.credits || $0.artwork }       // credits & art added
         default: return all
         }
+    }
+
+    // Remove duplicate tracks, keeping the best copy and merging in what it's missing.
+    @ViewBuilder private var dedupSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "square.on.square").foregroundStyle(.purple)
+                Text("Duplicates").fontWeight(.semibold)
+                Text("keep the best copy, merge in its missing art/tags").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }
+            if store.deduping {
+                HStack(spacing: 8) { ProgressView().controlSize(.small)
+                    Text(store.status).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+            } else if store.dedupClusters.isEmpty {
+                HStack(spacing: 10) {
+                    Button { store.dedup() } label: { Label("Find duplicates", systemImage: "magnifyingglass") }
+                        .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple).disabled(store.busy)
+                    if store.deduped { Text("No duplicates found.").font(.caption).foregroundStyle(.secondary) }
+                    else { Text("Match tracks by content and tags; you pick which copy to keep.").font(.caption).foregroundStyle(.secondary) }
+                }
+            } else {
+                Text("\(store.dedupClusters.count) group(s) · \(store.dedupRemovableCount) file(s) to remove")
+                    .font(.caption).foregroundStyle(.secondary)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(store.dedupClusters) { cluster in dedupClusterRow(cluster) }
+                    }
+                }
+                .frame(maxHeight: 300)
+                HStack {
+                    Button { store.dedup() } label: { Label("Re-scan", systemImage: "arrow.clockwise") }
+                        .controlSize(.small).disabled(store.busy)
+                    Spacer()
+                    Button { store.applyDedup() } label: {
+                        Label("Remove \(store.dedupRemovableCount) duplicate(s)", systemImage: "trash")
+                    }
+                    .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
+                    .disabled(store.busy || store.dedupRemovableCount == 0)
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.purple.opacity(0.06)))
+    }
+
+    private func dedupClusterRow(_ cluster: Cluster) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if let k = store.dedupTrack(cluster.keeperID) {
+                Text("\(k.displayArtist) — \(k.title)").font(.system(size: 12, weight: .semibold)).lineLimit(1)
+            }
+            Text("\(cluster.memberIDs.count) copies · \(cluster.reason) · click a copy to keep it")
+                .font(.caption2).foregroundStyle(.secondary)
+            ForEach(cluster.memberIDs, id: \.self) { tid in
+                if let t = store.dedupTrack(tid) {
+                    let keep = cluster.keeperID == tid
+                    HStack(spacing: 8) {
+                        Image(systemName: keep ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(keep ? .green : .secondary)
+                        Text(keep ? "KEEP" : "remove").font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(keep ? .green : .orange).frame(width: 48, alignment: .leading)
+                        Text(t.url.lastPathComponent).font(.system(size: 11)).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Text(t.formatLabel).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+                        Text(fmtBytes(t.size)).font(.system(size: 10)).monospacedDigit().foregroundStyle(.secondary)
+                            .frame(width: 60, alignment: .trailing)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture { store.setDedupKeeper(clusterID: cluster.id, trackID: tid) }
+                }
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor).opacity(0.4)))
     }
 
     // Rebuild the clean Album Artist / Album / ## Title tree from tags.
