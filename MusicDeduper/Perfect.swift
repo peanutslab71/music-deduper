@@ -331,6 +331,19 @@ final class PerfectStore: ObservableObject {
     // commit-result summary
     @Published var lastRunSummary: String?
     @Published var lastQuarantine: URL?
+    @Published var showCompletionSummary = false   // final Review→Apply finished → show the "all done" dialog
+
+    /// Reset the whole Perfect wizard back to the choose-a-library screen.
+    func resetWizard() {
+        showCompletionSummary = false
+        proposals = []; findings = []; artists = []; renames = []
+        diagnosed = false; didIdentify = false; enriched = false
+        deduped = false; dedupStageDone = false; organised = false; organiseStageDone = false
+        organisePlans = []; dedupClusters = []; dedupTracks = []
+        lastRunSummary = nil
+        root = nil                       // → PerfectView shows the intro / new-library screen
+        status = "Choose a music library to explore."
+    }
 
     // live apply progress (drives the Applying… dialog with its Cancel button)
     @Published var committing = false
@@ -1658,6 +1671,9 @@ final class PerfectStore: ObservableObject {
     private func finishCommit(count: Int, quarantine: URL, cancelled: Bool = false,
                               flagged: [ArtworkReviewItem] = []) {
         busy = false
+        // the summary dialog is set BEFORE committing flips false so the view's
+        // onChange sees it and shows the "all done" sheet (not just a dismiss).
+        showCompletionSummary = !cancelled && count > 0
         committing = false; cancelRequested = false
         artworkNeedsReview = flagged
         commitPhase = ""; commitDone = 0; commitTotal = 0

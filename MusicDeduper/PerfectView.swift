@@ -67,11 +67,13 @@ struct PerfectView: View {
         case apply                 // the final "confirm before commit" dialog
         case album(String)         // an album whose tracks are shown in a dialog
         case applying              // live progress while a commit/organise/dedup runs
+        case done                  // "all done" summary after the final Apply
         var id: String {
             switch self {
             case .apply: return "apply"
             case .album(let a): return "album:\(a)"
             case .applying: return "applying"
+            case .done: return "done"
             }
         }
     }
@@ -139,12 +141,15 @@ struct PerfectView: View {
             case .apply: applyConfirmSheet
             case .album(let id): albumSheetView(id)
             case .applying: applyingSheet
+            case .done: doneSheet
             }
         }
         .onChange(of: store.root) { _ in currentStep = 1 }   // new library → back to Scan
-        // show/hide the progress dialog as any apply (commit/organise/dedup) runs
+        // show/hide the progress dialog as any apply (commit/organise/dedup) runs;
+        // when the FINAL commit finishes, swap straight to the "all done" summary.
         .onChange(of: store.committing) { running in
             if running { activeSheet = .applying }
+            else if store.showCompletionSummary { activeSheet = .done }
             else if activeSheet == .applying { activeSheet = nil }
         }
         .overlay(alignment: .top) {
@@ -194,6 +199,48 @@ struct PerfectView: View {
         .padding(28)
         .frame(width: 380)
         .interactiveDismissDisabled()   // must use Cancel, not Escape/click-away
+    }
+
+    /// Shown after the final Review → Apply: what happened, a reminder that it's all
+    /// reversible + logged, then Close resets the wizard to the new-library screen.
+    private var doneSheet: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "checkmark.seal.fill").font(.system(size: 42)).foregroundStyle(.green)
+            Text("All done").font(.title2).fontWeight(.semibold)
+            Text(store.lastRunSummary ?? "Your changes have been applied.")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Everything is reversible — you can Undo this whole run at any time.",
+                      systemImage: "arrow.uturn.backward")
+                Label("A full change log was written beside your library (in the quarantine folder).",
+                      systemImage: "doc.text")
+            }
+            .font(.caption).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
+            HStack(spacing: 8) {
+                if let q = store.lastQuarantine {
+                    Button {
+                        NSWorkspace.shared.open(q.appendingPathComponent("changelog.txt"))
+                    } label: { Label("Change log", systemImage: "doc.text") }
+                }
+                if let run = store.runs.first {
+                    Button(role: .destructive) {
+                        activeSheet = nil; store.showCompletionSummary = false; store.undo(run)
+                    } label: { Label("Undo this run", systemImage: "arrow.uturn.backward") }
+                }
+                Spacer()
+                Button {
+                    activeSheet = nil
+                    store.resetWizard()
+                } label: { Text("Close").frame(minWidth: 80) }
+                .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(24)
+        .frame(width: 480)
+        .interactiveDismissDisabled()
     }
 
     // MARK: header
