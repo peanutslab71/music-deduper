@@ -450,13 +450,86 @@ struct PerfectView: View {
         }
     }
 
-    private var organiseMiddle: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                organiseSection
+    private var proposedTree: [FileTreeNode] {
+        FileTree.from(store.organisePlans.map { (path: $0.targetRel ?? $0.rel, planID: $0.id) })
+    }
+    private var currentTree: [FileTreeNode] {
+        FileTree.from(store.organisePlans.map { (path: $0.rel, planID: $0.id) })
+    }
+
+    @ViewBuilder private var organiseMiddle: some View {
+        let moves = store.organisePlans.filter { $0.targetRel != nil && $0.targetRel != $0.rel }
+        let flagged = store.organisePlans.filter { $0.targetRel == nil }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "folder").foregroundStyle(.purple)
+                Text("Clean tree").fontWeight(.semibold)
+                Text("Album Artist / Album / ## Title").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Toggle("Composer-first for classical", isOn: $store.composerFirstClassical)
+                    .toggleStyle(.checkbox).controlSize(.small)
+                    .onChange(of: store.composerFirstClassical) { _ in
+                        if !store.organisePlans.isEmpty { store.organise() }
+                    }
             }
-            .padding(16)
+            if store.organising {
+                HStack(spacing: 8) { ProgressView().controlSize(.small)
+                    Text(store.organiseProgress.isEmpty ? "Planning…" : store.organiseProgress)
+                        .font(.caption).foregroundStyle(.secondary) }
+                Spacer()
+            } else if store.organisePlans.isEmpty {
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "folder.badge.gearshape").font(.system(size: 40, weight: .light)).foregroundStyle(.purple)
+                    Text("Preview the clean tree").font(.title3).fontWeight(.semibold)
+                    Text("See exactly where every file would go, side by side with where it is now.\nNothing moves until you apply — or skip this stage.")
+                        .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    Button { store.organise() } label: { Label("Preview clean tree", systemImage: "eye").frame(minWidth: 160) }
+                        .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple).disabled(store.busy)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                Text("\(moves.count) file(s) to reorganise · \(flagged.count) left in place · rename folders/files on the right if you like")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 0) {
+                    treePanelColumn(title: "NOW", subtitle: "on disk",
+                                    panel: OrganiseTreePanel(nodes: currentTree, editable: false))
+                    Divider()
+                    treePanelColumn(title: "PROPOSED", subtitle: "click ✎ to rename a folder or file",
+                                    panel: OrganiseTreePanel(nodes: proposedTree, editable: true,
+                                        onRenameFolder: { store.renameOrganiseFolder($0, to: $1) },
+                                        onRenameFile: { store.renameOrganiseFile(planID: $0, to: $1) }))
+                }
+                .frame(maxHeight: .infinity)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor).opacity(0.5)))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.15)))
+                HStack {
+                    Button { store.organise() } label: { Label("Re-plan", systemImage: "arrow.clockwise") }
+                        .controlSize(.small).disabled(store.busy)
+                    Spacer()
+                    Button { store.applyOrganise() } label: {
+                        Label("Organise \(moves.count) file(s)", systemImage: "checkmark.circle.fill")
+                    }
+                    .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
+                    .disabled(store.busy || moves.isEmpty)
+                }
+            }
         }
+        .padding(16)
+    }
+
+    private func treePanelColumn(title: String, subtitle: String, panel: OrganiseTreePanel) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Text(title).font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
+                Text(subtitle).font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            Divider()
+            panel
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var scanPrompt: some View {
@@ -1482,6 +1555,124 @@ struct PerfectView: View {
     }
     private func color(_ k: FixKind) -> Color {
         switch k { case .junk: return .blue; case .emptyFolder: return .teal; case .drm: return .orange }
+    }
+}
+
+// MARK: - Organise tree (current vs proposed, editable)
+
+/// A folder/file node in the organise tree.
+struct FileTreeNode: Identifiable {
+    let id: String          // full path for folders, plan id for files
+    let name: String
+    let fullPath: String
+    let isFile: Bool
+    let planID: String
+    var children: [FileTreeNode]
+}
+
+enum FileTree {
+    /// Build a nested tree from a flat list of (path, planID).
+    static func from(_ items: [(path: String, planID: String)]) -> [FileTreeNode] {
+        build(items.map { (comps: $0.path.split(separator: "/").map(String.init), planID: $0.planID) }, prefix: "")
+    }
+
+    private static func build(_ entries: [(comps: [String], planID: String)], prefix: String) -> [FileTreeNode] {
+        var folderKids: [String: [(comps: [String], planID: String)]] = [:]
+        var folderOrder: [String] = []
+        var files: [FileTreeNode] = []
+        for e in entries {
+            if e.comps.count <= 1 {
+                let nm = e.comps.first ?? ""
+                let full = prefix.isEmpty ? nm : prefix + "/" + nm
+                files.append(FileTreeNode(id: e.planID.isEmpty ? full : e.planID, name: nm,
+                                          fullPath: full, isFile: true, planID: e.planID, children: []))
+            } else {
+                if folderKids[e.comps[0]] == nil { folderOrder.append(e.comps[0]) }
+                folderKids[e.comps[0], default: []].append((Array(e.comps.dropFirst()), e.planID))
+            }
+        }
+        var nodes: [FileTreeNode] = []
+        for folder in folderOrder.sorted() {
+            let full = prefix.isEmpty ? folder : prefix + "/" + folder
+            nodes.append(FileTreeNode(id: full, name: folder, fullPath: full, isFile: false,
+                                      planID: "", children: build(folderKids[folder]!, prefix: full)))
+        }
+        return nodes + files.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+}
+
+/// A scrollable, expandable folder/file tree. When `editable`, each folder/file has
+/// a ✎ to rename it (a folder rename cascades to everything under it).
+struct OrganiseTreePanel: View {
+    let nodes: [FileTreeNode]
+    var editable: Bool = false
+    var onRenameFolder: (String, String) -> Void = { _, _ in }
+    var onRenameFile: (String, String) -> Void = { _, _ in }
+
+    @State private var collapsed: Set<String> = []
+    @State private var editingID: String? = nil
+    @State private var editText: String = ""
+
+    private struct FRow: Identifiable { let node: FileTreeNode; let depth: Int; var id: String { node.id } }
+    private func flat() -> [FRow] {
+        var out: [FRow] = []
+        func walk(_ ns: [FileTreeNode], _ d: Int) {
+            for n in ns {
+                out.append(FRow(node: n, depth: d))
+                if !n.isFile && !collapsed.contains(n.id) { walk(n.children, d + 1) }
+            }
+        }
+        walk(nodes, 0)
+        return out
+    }
+
+    var body: some View {
+        ScrollView([.horizontal, .vertical]) {
+            LazyVStack(alignment: .leading, spacing: 1) {
+                ForEach(flat()) { row in rowView(row.node, depth: row.depth) }
+            }
+            .padding(8)
+        }
+    }
+
+    @ViewBuilder private func rowView(_ n: FileTreeNode, depth: Int) -> some View {
+        HStack(spacing: 4) {
+            Color.clear.frame(width: CGFloat(depth) * 14, height: 1)
+            if n.isFile {
+                Image(systemName: "music.note").font(.system(size: 9)).foregroundStyle(.secondary).frame(width: 12)
+            } else {
+                Button {
+                    if collapsed.contains(n.id) { collapsed.remove(n.id) } else { collapsed.insert(n.id) }
+                } label: {
+                    Image(systemName: collapsed.contains(n.id) ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary)
+                }.buttonStyle(.plain).frame(width: 12)
+                Image(systemName: "folder.fill").font(.system(size: 9)).foregroundStyle(.blue.opacity(0.7))
+            }
+            if editingID == n.id {
+                TextField("", text: $editText, onCommit: { commit(n) })
+                    .textFieldStyle(.roundedBorder).font(.system(size: 11)).frame(width: 240)
+                    .onExitCommand { editingID = nil }
+            } else {
+                Text(n.name).font(.system(size: 11, weight: n.isFile ? .regular : .semibold))
+                    .fixedSize(horizontal: true, vertical: false)
+                if editable {
+                    Button { editingID = n.id; editText = n.name } label: {
+                        Image(systemName: "pencil").font(.system(size: 8))
+                    }.buttonStyle(.plain).foregroundStyle(.secondary).opacity(0.5)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 0.5)
+    }
+
+    private func commit(_ n: FileTreeNode) {
+        let new = editText.trimmingCharacters(in: .whitespaces)
+        if !new.isEmpty && new != n.name {
+            if n.isFile { onRenameFile(n.planID, new) } else { onRenameFolder(n.fullPath, new) }
+        }
+        editingID = nil
     }
 }
 

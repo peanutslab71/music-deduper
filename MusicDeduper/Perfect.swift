@@ -1087,6 +1087,30 @@ final class PerfectStore: ObservableObject {
         }
     }
 
+    /// Rename a proposed folder (and cascade to everything under it). `oldPath` is the
+    /// full proposed folder path; only the last component is replaced with `newName`.
+    func renameOrganiseFolder(_ oldPath: String, to newName: String) {
+        let clean = Organiser.safe(newName)
+        guard !clean.isEmpty, clean != (oldPath as NSString).lastPathComponent else { return }
+        let parent = (oldPath as NSString).deletingLastPathComponent
+        let newPath = parent.isEmpty ? clean : parent + "/" + clean
+        for i in organisePlans.indices {
+            guard let t = organisePlans[i].targetRel else { continue }
+            if t == oldPath || t.hasPrefix(oldPath + "/") {
+                organisePlans[i].targetRel = newPath + String(t.dropFirst(oldPath.count))
+            }
+        }
+    }
+
+    /// Rename a single proposed file (keeps its folder).
+    func renameOrganiseFile(planID: String, to newName: String) {
+        let clean = Organiser.safe(newName)
+        guard !clean.isEmpty, let i = organisePlans.firstIndex(where: { $0.id == planID }),
+              let t = organisePlans[i].targetRel else { return }
+        let dir = (t as NSString).deletingLastPathComponent
+        organisePlans[i].targetRel = dir.isEmpty ? clean : dir + "/" + clean
+    }
+
     private func finishOrganise(_ plans: [OrganisePlan]) {
         organising = false; organiseProgress = ""; organised = true; organisePlans = plans
         let moves = plans.filter { $0.targetRel != nil && $0.targetRel != $0.rel }.count
