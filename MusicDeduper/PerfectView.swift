@@ -305,7 +305,13 @@ struct PerfectView: View {
             else if store.diagnosed { cleanupMiddle }   // Scan results
             else { scanPrompt }                          // not scanned yet
         case 2:
-            if store.identifying { workingMiddle(title: "matched by sound", sub: store.identifyProgress, live: true) }
+            if store.identifying {
+                if store.identifyListening {
+                    workingMiddle(title: "listening to your library", sub: store.identifyProgress, live: true, listening: true)
+                } else {
+                    workingMiddle(title: "matched by sound", sub: store.identifyProgress, live: true)
+                }
+            }
             else { reviewMiddle }                        // name suggestions (or prompt if not run)
         case 3:
             if store.enriching { workingMiddle(title: "looking up credits", sub: store.enrichProgress, live: true, credits: true) }
@@ -345,11 +351,12 @@ struct PerfectView: View {
         }
     }
 
-    private func workingMiddle(title: String, sub: String, live: Bool = false, credits: Bool = false) -> some View {
-        VStack(spacing: 10) {
+    private func workingMiddle(title: String, sub: String, live: Bool = false, credits: Bool = false, listening: Bool = false) -> some View {
+        let bigNumber = listening ? store.identifyListened : (credits ? store.enrichDone : store.identifyMatched)
+        return VStack(spacing: 10) {
             Spacer()
             if live {
-                Text("\(credits ? store.enrichDone : store.identifyMatched)")
+                Text("\(bigNumber)")
                     .font(.system(size: 44, weight: .bold, design: .rounded)).foregroundStyle(.teal)
                     .contentTransition(.numericText())
                 Text(title).font(.headline)

@@ -281,6 +281,8 @@ final class PerfectStore: ObservableObject {
     @Published var identifyProgress = ""
     @Published var recentFinds: [String] = []   // live feed of what identify just matched
     @Published var identifyMatched = 0           // running count of tracks matched
+    @Published var identifyListened = 0          // Phase 1: files fingerprinted so far
+    @Published var identifyListening = false     // true during Phase 1 (listening), false during Phase 2 (matching)
     @Published var enriching = false
     @Published var enrichProgress = ""
     @Published var enrichDone = 0                 // running count of tracks looked up
@@ -708,7 +710,8 @@ final class PerfectStore: ObservableObject {
     func identify() {
         guard let root, hasAcoustIDKey, !identifying else { return }
         identifying = true; proposals = []; identifyProgress = "Identifying…"
-        recentFinds = []; identifyMatched = 0; didIdentify = false; enriched = false
+        recentFinds = []; identifyMatched = 0; identifyListened = 0; identifyListening = true
+        didIdentify = false; enriched = false
         let box = cancelFlag; box.cancelled = false
         let id = Identifier(apiKey: Identifier.configuredKey)
         Task.detached(priority: .userInitiated) {
@@ -748,10 +751,11 @@ final class PerfectStore: ObservableObject {
                 while let r = await group.next() {
                     listened += 1
                     if let r { ready.append(r) }
-                    if listened % 5 == 0 { await self.setIdentifyProgress("Listening \(listened)/\(total)…") }
+                    if listened % 2 == 0 || listened == total { await self.setListened(listened, total) }
                     addNext()
                 }
             }
+            await self.beginMatching()
 
             // Phase 2 — MATCH. AcoustID lookups, paced to its 3-requests/second
             // limit. The lookup latency counts toward the gap, so we only wait the
@@ -787,6 +791,10 @@ final class PerfectStore: ObservableObject {
     }
 
     private func setIdentifyProgress(_ s: String) { identifyProgress = s }
+    private func setListened(_ done: Int, _ total: Int) {
+        identifyListened = done; identifyProgress = "Listening \(done)/\(total)…"
+    }
+    private func beginMatching() { identifyListening = false; identifyProgress = "Matching…" }
 
     private func pushFind(_ s: String, changed: Bool) {
         identifyMatched += 1
