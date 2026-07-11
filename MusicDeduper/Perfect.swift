@@ -335,6 +335,18 @@ final class PerfectStore: ObservableObject {
     @Published var applyNames = true       // identify: artist/title/album corrections
     @Published var applyArtwork = true     // add missing cover art
     @Published var applyCredits = true     // composer/label/performers gap-fills
+    // per-kind name toggles — auto-apply cosmetic tidies and bulk-accept "adds
+    // detail" without cluttering the queue; substantive changes always go through
+    // the per-track review.
+    @Published var applyCosmeticNames = true
+    @Published var applyAdditiveNames = true
+    func nameKindEnabled(_ k: ChangeKind) -> Bool {
+        switch k {
+        case .cosmetic: return applyCosmeticNames
+        case .additive: return applyAdditiveNames
+        default:        return true
+        }
+    }
     var hasAcoustIDKey: Bool { !Identifier.configuredKey.isEmpty }
 
     // Tag writing uses a surgical TagLib shim (MDTagShim) that changes only the
@@ -1289,9 +1301,9 @@ final class PerfectStore: ObservableObject {
         // identify proposals — each changed field becomes its own reversible edit
         if tagWritingEnabled && applyNames {
             for p in proposals where p.accepted && p.hasChange {
-                if p.artistChanged { accTagEdits.append((p.url, p.relPath, "artist", p.curArtist, p.newArtist)) }
-                if p.titleChanged  { accTagEdits.append((p.url, p.relPath, "title",  p.curTitle,  p.newTitle)) }
-                if p.albumChanged  { accTagEdits.append((p.url, p.relPath, "album",  p.curAlbum,  p.chosenAlbum)) }
+                if p.artistChanged && nameKindEnabled(p.artistChangeKind) { accTagEdits.append((p.url, p.relPath, "artist", p.curArtist, p.newArtist)) }
+                if p.titleChanged  && nameKindEnabled(p.titleChangeKind)  { accTagEdits.append((p.url, p.relPath, "title",  p.curTitle,  p.newTitle)) }
+                if p.albumChanged  && nameKindEnabled(p.albumChangeKind)  { accTagEdits.append((p.url, p.relPath, "album",  p.curAlbum,  p.chosenAlbum)) }
             }
         }
         // enrichment gap-fills (composer/label/date) — candidate values; only

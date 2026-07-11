@@ -79,18 +79,14 @@ struct TrackProposal: Identifiable {
     /// worth showing / applying: a name change, artwork to add, or a credit gap to fill
     var isActionable: Bool { hasChange || canAddArt || hasCreditGap }
 
-    /// Needs a deliberate look: a low-confidence match, or a genuine artist
-    /// re-attribution (a different artist — not just a spelling/case fix, which
-    /// is safe). These go to the step-through review queue, not the bulk list.
+    /// Needs a deliberate look. A genuinely different title/artist (substantive)
+    /// always does. Otherwise — a cosmetic tidy or an "adds detail" change — only
+    /// if the audio match itself is shaky. Case/punctuation and version-qualifier
+    /// changes no longer flood the queue; they're handled in bulk by kind.
     var needsReview: Bool {
-        if reviewed { return false }          // already decided → gone from the queue
-        if score < 0.9 { return true }
-        guard artistChanged else { return false }
-        func norm(_ s: String) -> String {
-            s.lowercased().replacingOccurrences(of: " & ", with: " and ")
-                .components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
-        }
-        return norm(curArtist) != norm(newArtist)
+        if reviewed { return false }              // already decided → gone from the queue
+        if dominantNameKind == .substantive { return true }   // different words → look
+        return score < 0.7                        // else only if the match is uncertain
     }
 
     var artistChanged: Bool { !newArtist.isEmpty && Self.differs(newArtist, curArtist) }
@@ -123,6 +119,8 @@ struct TrackProposal: Identifiable {
     var titleChangeKind: ChangeKind  { titleChanged  ? Self.classifyChange(curTitle,  newTitle)   : .none }
     var artistChangeKind: ChangeKind { artistChanged ? Self.classifyChange(curArtist, newArtist)  : .none }
     var albumChangeKind: ChangeKind  { albumChanged  ? Self.classifyChange(curAlbum,  chosenAlbum) : .none }
+    /// The most significant name change on this track — drives the summary grouping.
+    var dominantNameKind: ChangeKind { ChangeKind.strongest([titleChangeKind, artistChangeKind, albumChangeKind]) }
 
     /// Aggressive fold for classification: typoFold + lowercase + drop punctuation +
     /// collapse spaces. Two strings equal under this differ only cosmetically.

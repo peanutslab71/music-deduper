@@ -435,6 +435,7 @@ struct PerfectView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if let summary = store.lastRunSummary { committedBanner(summary) }
+                if step == 2 || step == 4 { nameChangeSummary }
                 if !store.artworkNeedsReview.isEmpty { artworkReviewSection }
                 if visibleAlbums.isEmpty && !store.identifying && !store.enriching {
                     emptyStageNote
@@ -975,6 +976,50 @@ struct PerfectView: View {
         if let i = store.proposals.firstIndex(where: { $0.id == p.id }) {
             store.proposals[i].accepted = accept
             store.proposals[i].reviewed = true
+        }
+    }
+
+    // Summary of the name changes by type, with bulk on/off for the safe kinds so
+    // cosmetic tidies and version-detail additions don't need per-track review.
+    @ViewBuilder private var nameChangeSummary: some View {
+        let named = store.proposals.filter { $0.hasChange }
+        let cosmetic = named.filter { $0.dominantNameKind == .cosmetic }.count
+        let additive = named.filter { $0.dominantNameKind == .additive }.count
+        let substantive = named.filter { $0.dominantNameKind == .substantive }.count
+        if cosmetic + additive + substantive > 0 {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Name changes").fontWeight(.semibold)
+                if cosmetic > 0 {
+                    nameSummaryRow(.gray, "\(cosmetic) cosmetic", "case & punctuation", toggle: $store.applyCosmeticNames)
+                }
+                if additive > 0 {
+                    nameSummaryRow(.blue, "\(additive) add detail", "e.g. (Single Version), feat.", toggle: $store.applyAdditiveNames)
+                }
+                if substantive > 0 {
+                    nameSummaryRow(.orange, "\(substantive) different", "reviewed individually", toggle: nil)
+                }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.06)))
+        }
+    }
+
+    @ViewBuilder private func nameSummaryRow(_ colour: Color, _ title: String, _ sub: String,
+                                             toggle: Binding<Bool>?) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(colour).frame(width: 9, height: 9)
+            Text(title).font(.system(size: 13, weight: .medium))
+            Text(sub).font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            if let toggle {
+                Toggle(isOn: toggle) {
+                    Text(toggle.wrappedValue ? "applying" : "keeping originals")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .toggleStyle(.switch).controlSize(.mini)
+            } else {
+                Text("↓ in the queue").font(.caption).foregroundStyle(.orange)
+            }
         }
     }
 
