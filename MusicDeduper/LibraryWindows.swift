@@ -12,18 +12,26 @@ import AppKit
 
 // MARK: - Library browser (a mini-iTunes album grid over any folder)
 
+/// One album, discovered from the folder tree — no file reads needed to list it.
+struct LibAlbum: Identifiable, Hashable {
+    let id: String        // album folder path
+    let artist: String    // from the parent folder
+    let album: String     // the album folder name
+    let dir: URL
+    let files: [URL]
+    var sampleURL: URL? { files.first }
+    static func == (a: LibAlbum, b: LibAlbum) -> Bool { a.id == b.id }
+    func hash(into h: inout Hasher) { h.combine(id) }
+}
+
 struct LibraryBrowserView: View {
     @AppStorage("libraryBrowserRoot") private var savedRoot = ""
     @State private var root: URL?
-    @State private var tracks: [Track] = []
+    @State private var albums: [LibAlbum] = []
+    @State private var fileCount = 0
     @State private var loading = false
     @State private var search = ""
-    @State private var selectedAlbum: AlbumKey?
-
-    struct AlbumKey: Identifiable, Hashable {
-        let artist: String; let album: String
-        var id: String { artist + "\u{0}" + album }
-    }
+    @State private var selectedAlbum: LibAlbum?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,18 +40,16 @@ struct LibraryBrowserView: View {
             if root == nil {
                 chooser
             } else if loading {
-                VStack(spacing: 10) { ProgressView(); Text("Reading your library…").foregroundStyle(.secondary) }
+                VStack(spacing: 10) { ProgressView(); Text("Listing your library…").foregroundStyle(.secondary) }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if tracks.isEmpty {
+            } else if albums.isEmpty {
                 Text("No audio files found here.").foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 albumGrid
             }
         }
-        .sheet(item: $selectedAlbum) { key in
-            LibraryAlbumSheet(album: key, tracks: albumTracks(key))
-        }
+        .sheet(item: $selectedAlbum) { a in LibraryAlbumSheet(album: a) }
         .onAppear { if root == nil && !savedRoot.isEmpty { open(URL(fileURLWithPath: savedRoot)) } }
     }
 
@@ -51,8 +57,8 @@ struct LibraryBrowserView: View {
         HStack(spacing: 10) {
             Image(systemName: "music.note.list").foregroundStyle(.purple)
             Text(root?.lastPathComponent ?? "Library").font(.headline)
-            if !tracks.isEmpty {
-                Text("\(albums().count) albums · \(tracks.count) tracks").font(.caption).foregroundStyle(.secondary)
+            if !albums.isEmpty {
+                Text("\(albums.count) albums · \(fileCount) tracks").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             if root != nil {
@@ -77,31 +83,36 @@ struct LibraryBrowserView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var filtered: [LibAlbum] {
+        guard !search.isEmpty else { return albums }
+        let q = search.lowercased()
+        return albums.filter { $0.album.lowercased().contains(q) || $0.artist.lowercased().contains(q) }
+    }
+
     private var albumGrid: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "square.grid.2x2").foregroundStyle(.purple)
-                    Text("\(albums().count) album(s)").fontWeight(.semibold)
+                    Text("\(filtered.count) album(s)").fontWeight(.semibold)
                     Text("click an album to see its tracks").font(.caption).foregroundStyle(.secondary)
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 176, maximum: 210), spacing: 18)],
                           alignment: .leading, spacing: 18) {
-                    ForEach(albums(), id: \.key) { entry in albumCard(entry) }
+                    ForEach(filtered) { a in albumCard(a) }
                 }
             }
             .padding(16)
         }
     }
 
-    private func albumCard(_ entry: (key: AlbumKey, tracks: [Track])) -> some View {
-        Button { selectedAlbum = entry.key } label: {
+    private func albumCard(_ a: LibAlbum) -> some View {
+        Button { selectedAlbum = a } label: {
             VStack(alignment: .leading, spacing: 8) {
-                AlbumCover(key: entry.tracks.first?.relDir ?? entry.key.id,
-                           sampleURL: entry.tracks.first?.url, foundMBID: nil, size: 176)
+                AlbumCover(key: a.id, sampleURL: a.sampleURL, foundMBID: nil, size: 176)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(entry.key.album).font(.subheadline).fontWeight(.medium).lineLimit(1)
-                    Text("\(entry.key.artist) · \(entry.tracks.count) track(s)").font(.caption)
+                    Text(a.album).font(.subheadline).fontWeight(.medium).lineLimit(1)
+                    Text("\(a.artist) · \(a.files.count) track(s)").font(.caption)
                         .foregroundStyle(.secondary).lineLimit(1)
                 }
             }
@@ -110,52 +121,43 @@ struct LibraryBrowserView: View {
         .buttonStyle(.plain)
     }
 
-    private var filtered: [Track] {
-        guard !search.isEmpty else { return tracks }
-        let q = search.lowercased()
-        return tracks.filter { $0.title.lowercased().contains(q) || $0.displayArtist.lowercased().contains(q) || $0.album.lowercased().contains(q) }
-    }
-    private func albums() -> [(key: AlbumKey, tracks: [Track])] {
-        var map: [AlbumKey: [Track]] = [:]
-        for t in filtered {
-            let key = AlbumKey(artist: t.displayArtist.isEmpty ? "Unknown Artist" : t.displayArtist,
-                               album: t.album.isEmpty ? "Unknown Album" : t.album)
-            map[key, default: []].append(t)
-        }
-        return map.map { ($0.key, $0.value) }
-            .sorted { ($0.key.artist.lowercased(), $0.key.album.lowercased()) < ($1.key.artist.lowercased(), $1.key.album.lowercased()) }
-    }
-    private func albumTracks(_ key: AlbumKey) -> [Track] {
-        albums().first { $0.key == key }?.tracks
-            .sorted { ($0.discNo, $0.trackNo, $0.title.lowercased()) < ($1.discNo, $1.trackNo, $1.title.lowercased()) } ?? []
-    }
-
     private func pick() {
         let p = NSOpenPanel(); p.canChooseDirectories = true; p.canChooseFiles = false; p.allowsMultipleSelection = false
         p.prompt = "Browse"; p.message = "Choose a music library folder"
         if p.runModal() == .OK, let u = p.url { open(u) }
     }
-    private func open(_ u: URL) { root = u; savedRoot = u.path; tracks = []; search = ""; load() }
+    private func open(_ u: URL) { root = u; savedRoot = u.path; albums = []; fileCount = 0; search = ""; load() }
+
+    /// Fast: enumerate the tree and group by folder — NO per-file reads. The album /
+    /// artist names come from the folder structure. Tags are read only when an album
+    /// is opened (see LibraryAlbumSheet), and concurrently at that.
     private func load() {
         guard let root else { return }
         loading = true
-        Task {
+        Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
-            var built: [Track] = []
-            if let en = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey]) {
-                for case let uu as URL in en {
-                    guard PerfectStore.isAudio(uu) else { continue }
-                    let rel = PerfectStore.rel(uu, root)
-                    if rel.hasPrefix("Music Librarian Quarantine") { continue }
-                    let size = Int64((try? uu.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-                    var t = await readMetadata(url: uu, size: size)
-                    t.id = built.count
-                    t.relDir = (rel as NSString).deletingLastPathComponent
-                    if t.title.isEmpty { t.title = uu.deletingPathExtension().lastPathComponent }
-                    built.append(t)
+            var byDir: [String: [URL]] = [:]
+            var order: [String] = []
+            var count = 0
+            if let en = fm.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                for case let u as URL in en {
+                    guard PerfectStore.isAudio(u) else { continue }
+                    if PerfectStore.rel(u, root).hasPrefix("Music Librarian Quarantine") { continue }
+                    let dir = u.deletingLastPathComponent().path
+                    if byDir[dir] == nil { order.append(dir) }
+                    byDir[dir, default: []].append(u); count += 1
                 }
             }
-            await MainActor.run { tracks = built; loading = false }
+            var built: [LibAlbum] = []
+            for dir in order {
+                let files = byDir[dir]!.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                let dirURL = URL(fileURLWithPath: dir)
+                built.append(LibAlbum(id: dir, artist: dirURL.deletingLastPathComponent().lastPathComponent,
+                                      album: dirURL.lastPathComponent, dir: dirURL, files: files))
+            }
+            let sorted = built.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+            let total = count
+            await MainActor.run { albums = sorted; fileCount = total; loading = false }
         }
     }
 }
@@ -164,20 +166,20 @@ struct LibraryBrowserView: View {
 /// button + scrubber per track (same AudioPreview) and the file's actual tags, for
 /// reviewing a library before/after.
 struct LibraryAlbumSheet: View {
-    let album: LibraryBrowserView.AlbumKey
-    let tracks: [Track]
+    let album: LibAlbum
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var audio = AudioPreview.shared
+    @State private var tracks: [Track] = []
+    @State private var loading = true
     @State private var extras: [Int: [(label: String, value: String)]] = [:]   // track.id → all extra tag chips
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                AlbumCover(key: tracks.first?.relDir ?? album.id, sampleURL: tracks.first?.url,
-                           foundMBID: nil, size: 52, corner: 8)
+                AlbumCover(key: album.id, sampleURL: album.sampleURL, foundMBID: nil, size: 52, corner: 8)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(album.album).font(.headline)
-                    Text("\(album.artist) · \(tracks.count) track(s)")
+                    Text("\(album.artist) · \(album.files.count) track(s)")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -185,15 +187,20 @@ struct LibraryAlbumSheet: View {
             }
             .padding(16)
             Divider()
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(tracks, id: \.id) { t in trackRow(t) }
+            if loading {
+                VStack(spacing: 10) { ProgressView(); Text("Reading tags…").foregroundStyle(.secondary) }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(tracks, id: \.id) { t in trackRow(t) }
+                    }
+                    .padding(16)
                 }
-                .padding(16)
             }
         }
         .frame(width: 620, height: 560)
-        .onAppear(perform: loadExtras)
+        .onAppear(perform: loadTracks)
         .onDisappear { audio.stop() }
     }
 
@@ -251,12 +258,41 @@ struct LibraryAlbumSheet: View {
         return String(format: "%d:%02d", Int(s) / 60, Int(s) % 60)
     }
 
-    private func loadExtras() {
-        let items = tracks
-        Task {
-            var out: [Int: [(label: String, value: String)]] = [:]
-            for t in items { out[t.id] = TagReader.chips(t.url) }
-            await MainActor.run { extras = out }
+    /// Read the album's tracks CONCURRENTLY (bounded) — the network round-trips
+    /// overlap instead of running one-by-one, which is what made loading the whole
+    /// library over SMB crawl. Only this album's handful of files are read.
+    private func loadTracks() {
+        guard tracks.isEmpty else { return }
+        let urls = album.files
+        Task.detached(priority: .userInitiated) {
+            var byIndex = [Int: (Track, [(label: String, value: String)])]()
+            await withTaskGroup(of: (Int, Track, [(label: String, value: String)]).self) { group in
+                let limit = 10
+                var next = 0
+                func launch() {
+                    let i = next; next += 1
+                    let u = urls[i]
+                    group.addTask {
+                        let size = Int64((try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                        var t = await readMetadata(url: u, size: size)
+                        t.id = i
+                        if t.title.isEmpty { t.title = u.deletingPathExtension().lastPathComponent }
+                        return (i, t, TagReader.chips(u))
+                    }
+                }
+                for _ in 0..<min(limit, urls.count) { launch() }
+                while let (i, t, ex) = await group.next() {
+                    byIndex[i] = (t, ex)
+                    if next < urls.count { launch() }
+                }
+            }
+            var built: [Track] = []
+            var ex: [Int: [(label: String, value: String)]] = [:]
+            for i in 0..<urls.count { if let (t, e) = byIndex[i] { built.append(t); ex[i] = e } }
+            let sorted = built.sorted {
+                ($0.discNo, $0.trackNo, $0.title.lowercased()) < ($1.discNo, $1.trackNo, $1.title.lowercased())
+            }
+            await MainActor.run { tracks = sorted; extras = ex; loading = false }
         }
     }
 }
