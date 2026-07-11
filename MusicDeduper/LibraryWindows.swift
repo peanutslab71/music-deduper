@@ -160,11 +160,15 @@ struct LibraryBrowserView: View {
     }
 }
 
-/// Read-only album track listing — the album "pop-up" for the Library browser.
+/// Album "pop-up" for the Library browser — matches Perfect's Review dialog: a play
+/// button + scrubber per track (same AudioPreview) and the file's actual tags, for
+/// reviewing a library before/after.
 struct LibraryAlbumSheet: View {
     let album: LibraryBrowserView.AlbumKey
     let tracks: [Track]
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var audio = AudioPreview.shared
+    @State private var extras: [Int: [String: String]] = [:]   // track.id → composer/genre/date/label/albumartist
 
     var body: some View {
         VStack(spacing: 0) {
@@ -182,25 +186,113 @@ struct LibraryAlbumSheet: View {
             .padding(16)
             Divider()
             ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(tracks, id: \.id) { t in
-                        HStack(spacing: 10) {
-                            Text(t.trackNo > 0 ? (t.discNo > 1 ? "\(t.discNo)-\(t.trackNo)" : "\(t.trackNo)") : "—")
-                                .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                                .frame(width: 34, alignment: .trailing)
-                            Text(t.title).lineLimit(1)
-                            Spacer()
-                            Text("\(fmtDur(t.duration)) · \(t.formatLabel)")
-                                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
-                        }
-                        .padding(.vertical, 5).padding(.horizontal, 4)
-                        Divider().opacity(0.4)
-                    }
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(tracks, id: \.id) { t in trackRow(t) }
                 }
-                .padding(.horizontal, 12).padding(.vertical, 6)
+                .padding(16)
             }
         }
         .frame(width: 620, height: 560)
+        .onAppear(perform: loadExtras)
+        .onDisappear { audio.stop() }
+    }
+
+    // Mirrors proposalRow: play button + info line + scrubber (when playing) + tags.
+    private func trackRow(_ t: Track) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            playButton(t.url)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(t.url.lastPathComponent).font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Text("\(fmtDur(t.duration)) · \(t.formatLabel)")
+                        .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                }
+                if audio.playingURL == t.url { scrubBar }
+                tagRow("Artist", t.displayArtist)
+                tagRow("Title", t.title)
+                tagRow("Album", t.album)
+                tagChips(t)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func tagRow(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 6) {
+            Text(label).font(.caption2).foregroundStyle(.secondary).frame(width: 42, alignment: .leading)
+            Text(value.isEmpty ? "—" : value).font(.caption2)
+                .foregroundStyle(value.isEmpty ? .tertiary : .primary).lineLimit(1)
+        }
+    }
+
+    // Small chips for the remaining tags (track/disc + composer/genre/year/label).
+    private func chipData(_ t: Track) -> [(String, String)] {
+        let e = extras[t.id] ?? [:]
+        var chips: [(String, String)] = []
+        if t.trackNo > 0 { chips.append(("Track", t.discNo > 1 ? "\(t.discNo)-\(t.trackNo)" : "\(t.trackNo)")) }
+        if !t.albumArtist.isEmpty && t.albumArtist != t.artist { chips.append(("Album artist", t.albumArtist)) }
+        for key in ["composer", "genre", "date", "label"] {
+            if let v = e[key], !v.isEmpty { chips.append((key.capitalized, v)) }
+        }
+        return chips
+    }
+
+    @ViewBuilder private func tagChips(_ t: Track) -> some View {
+        let chips = chipData(t)
+        if !chips.isEmpty {
+            HStack(spacing: 5) {
+                ForEach(Array(chips.enumerated()), id: \.offset) { _, c in
+                    HStack(spacing: 3) {
+                        Text(c.0).font(.system(size: 8, weight: .semibold)).foregroundStyle(.secondary)
+                        Text(c.1).font(.system(size: 9)).foregroundStyle(.primary).lineLimit(1)
+                    }
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                }
+            }
+            .padding(.top, 1)
+        }
+    }
+
+    private func playButton(_ url: URL) -> some View {
+        let playing = audio.playingURL == url
+        return Button { audio.toggle(url) } label: {
+            Image(systemName: playing ? "stop.circle.fill" : "play.circle")
+                .font(.system(size: 18)).foregroundStyle(playing ? .red : .teal)
+        }.buttonStyle(.plain).help(playing ? "Stop" : "Listen")
+    }
+
+    private var scrubBar: some View {
+        HStack(spacing: 8) {
+            Text(fmtTime(audio.currentTime)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+            Slider(value: Binding(get: { audio.progress }, set: { audio.seek(to: $0) }), in: 0...1)
+                .controlSize(.mini).tint(.teal)
+            Text(fmtTime(audio.duration)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func fmtTime(_ s: Double) -> String {
+        guard s.isFinite, s >= 0 else { return "0:00" }
+        return String(format: "%d:%02d", Int(s) / 60, Int(s) % 60)
+    }
+
+    private func loadExtras() {
+        let items = tracks
+        Task {
+            var out: [Int: [String: String]] = [:]
+            for t in items {
+                var m: [String: String] = [:]
+                for f in ["composer", "genre", "date", "label"] {
+                    if let v = PerfectStore.readField(t.url, f), !v.isEmpty { m[f] = v }
+                }
+                out[t.id] = m
+            }
+            await MainActor.run { extras = out }
+        }
     }
 }
 
