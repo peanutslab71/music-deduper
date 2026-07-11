@@ -178,34 +178,76 @@ struct ArtworkReviewItem: Identifiable {
 
 // MARK: - Found cover art (preview before it's embedded)
 
-/// Fetches Cover Art Archive thumbnails by release MBID so an album whose art we
-/// *found* (but haven't embedded yet) shows the real cover in the grid.
+/// Previews the cover an album will get on Apply — the SAME resolution the commit
+/// uses: Cover Art Archive by release MBID, else Apple iTunes by artist+album. So
+/// albums that'll be filled from iTunes (Aretha's Gold, Intergalactic…) show their
+/// real cover in the grid instead of a placeholder.
 @MainActor
 final class FoundArtCache: ObservableObject {
     static let shared = FoundArtCache()
     private let images: NSCache<NSString, NSImage> = { let c = NSCache<NSString, NSImage>(); c.countLimit = 400; return c }()
     private var misses = Set<String>(); private var inflight = Set<String>()
 
-    func cached(_ mbid: String) -> NSImage? { images.object(forKey: mbid as NSString) }
+    /// Stable cache key for a (mbid, artist, album) — mbid wins, else an iTunes key.
+    static func key(mbid: String?, artist: String, album: String) -> String {
+        if let m = mbid, !m.isEmpty { return "mb:\(m)" }
+        return "it:\(artist.lowercased())|\(album.lowercased())"
+    }
 
-    func request(_ mbid: String) {
-        guard images.object(forKey: mbid as NSString) == nil, !misses.contains(mbid), !inflight.contains(mbid) else { return }
-        inflight.insert(mbid)
+    func cached(_ key: String) -> NSImage? { images.object(forKey: key as NSString) }
+
+    func request(mbid: String?, artist: String, album: String) {
+        let k = Self.key(mbid: mbid, artist: artist, album: album)
+        guard images.object(forKey: k as NSString) == nil, !misses.contains(k), !inflight.contains(k) else { return }
+        inflight.insert(k)
         Task {
-            let img = await Self.fetch(mbid)
-            self.inflight.remove(mbid)
-            if let img { self.images.setObject(img, forKey: mbid as NSString) } else { self.misses.insert(mbid) }
+            let img = await Self.resolve(mbid: mbid, artist: artist, album: album)
+            self.inflight.remove(k)
+            if let img { self.images.setObject(img, forKey: k as NSString) } else { self.misses.insert(k) }
             self.objectWillChange.send()
         }
     }
 
-    nonisolated private static func fetch(_ mbid: String) async -> NSImage? {
+    nonisolated private static func resolve(mbid: String?, artist: String, album: String) async -> NSImage? {
+        if let m = mbid, !m.isEmpty, let img = await coverArtArchive(m) { return img }
+        return await itunes(artist: artist, album: album)
+    }
+
+    nonisolated private static func coverArtArchive(_ mbid: String) async -> NSImage? {
         guard let url = URL(string: "https://coverartarchive.org/release/\(mbid)/front-250") else { return nil }
         var req = URLRequest(url: url)
         req.setValue("MusicDeduper ( neil.cottyincar@gmail.com )", forHTTPHeaderField: "User-Agent")
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200, let img = NSImage(data: data) else { return nil }
         return img
+    }
+
+    nonisolated private static func itunes(artist: String, album: String) async -> NSImage? {
+        guard !album.isEmpty else { return nil }
+        let term = (artist + " " + album).trimmingCharacters(in: .whitespaces)
+            .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "https://itunes.apple.com/search?term=\(term)&entity=album&limit=6"),
+              let (data, resp) = try? await URLSession.shared.data(from: url),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let results = json["results"] as? [[String: Any]] else { return nil }
+        // Only accept a result whose album title actually matches — otherwise iTunes
+        // hands back the artist's top album (e.g. "Best of Bowie" → Ziggy Stardust),
+        // and a confidently-wrong cover is worse than a placeholder + manual review.
+        let want = album.lowercased()
+        let ranked = results.compactMap { r -> (Int, [String: Any])? in
+            let cn = (r["collectionName"] as? String ?? "").lowercased()
+            let score = cn == want ? 2 : (cn.contains(want) || want.contains(cn) ? 1 : 0)
+            return score > 0 ? (score, r) : nil
+        }.sorted { $0.0 > $1.0 }
+        for (_, r) in ranked {
+            guard let art = r["artworkUrl100"] as? String,
+                  let iu = URL(string: art.replacingOccurrences(of: "100x100bb", with: "300x300bb")),
+                  let (d, ir) = try? await URLSession.shared.data(from: iu),
+                  (ir as? HTTPURLResponse)?.statusCode == 200, let img = NSImage(data: d) else { continue }
+            return img
+        }
+        return nil
     }
 }
 
@@ -424,9 +466,9 @@ final class PerfectStore: ObservableObject {
                 sampleURL: props.first?.url,
                 trackCount: props.count,
                 names: props.contains { $0.hasChange },
-                artwork: props.contains { $0.canAddArt },
+                artwork: props.contains { !$0.curHasArt },   // any art-less track → art added on apply
                 credits: props.contains { !($0.enrichment?.isEmpty ?? true) },
-                artReleaseMBID: props.first(where: { $0.canAddArt })?.enrichment?.releaseMBID)
+                artReleaseMBID: props.first(where: { $0.enrichment?.releaseMBID != nil })?.enrichment?.releaseMBID)
         }.sorted { $0.title.lowercased() < $1.title.lowercased() }
     }
 

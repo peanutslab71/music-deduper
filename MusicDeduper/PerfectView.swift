@@ -18,12 +18,17 @@ struct AlbumCover: View {
     let key: String
     let sampleURL: URL?
     let foundMBID: String?
+    var foundArtist: String = ""
+    var foundAlbum: String = ""
+    var wantsArt: Bool = false          // this album has art-less tracks → preview the cover it'll get
     let size: CGFloat
     var corner: CGFloat = 12
 
+    private var foundKey: String { FoundArtCache.key(mbid: foundMBID, artist: foundArtist, album: foundAlbum) }
+
     var body: some View {
         Group {
-            if let img = art.cached(key) ?? foundMBID.flatMap({ found.cached($0) }) {
+            if let img = art.cached(key) ?? (wantsArt ? found.cached(foundKey) : nil) {
                 Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
             } else {
                 ZStack {
@@ -39,7 +44,10 @@ struct AlbumCover: View {
         .overlay(RoundedRectangle(cornerRadius: corner).strokeBorder(Color.black.opacity(0.08)))
         .onAppear {
             art.request(key: key, sampleURL: sampleURL)
-            if let m = foundMBID { found.request(m) }
+            // only reach out for a found cover when the file has none (art-less album)
+            if wantsArt && art.cached(key) == nil {
+                found.request(mbid: foundMBID, artist: foundArtist, album: foundAlbum)
+            }
         }
     }
 }
@@ -702,7 +710,9 @@ struct PerfectView: View {
         let a = store.albumChanges.first(where: { $0.id == id })
         return VStack(spacing: 0) {
             HStack(spacing: 12) {
-                AlbumCover(key: id, sampleURL: props.first?.url, foundMBID: a?.artReleaseMBID, size: 52, corner: 8)
+                AlbumCover(key: id, sampleURL: props.first?.url, foundMBID: a?.artReleaseMBID,
+                           foundArtist: a?.subtitle ?? "", foundAlbum: a?.title ?? "",
+                           wantsArt: a?.artwork ?? false, size: 52, corner: 8)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(a?.title ?? "Album").font(.headline)
                     Text("\(a?.subtitle ?? "") · \(props.count) track(s)").font(.caption).foregroundStyle(.secondary)
@@ -742,7 +752,11 @@ struct PerfectView: View {
                         Image(systemName: "chevron.left").frame(width: 28, height: 28)
                     }.buttonStyle(.bordered).disabled(queue.count < 2)
 
-                    AlbumCover(key: p.url.deletingLastPathComponent().path, sampleURL: p.url, foundMBID: p.enrichment?.releaseMBID, size: 96, corner: 8)
+                    AlbumCover(key: p.url.deletingLastPathComponent().path, sampleURL: p.url,
+                               foundMBID: p.enrichment?.releaseMBID,
+                               foundArtist: p.newArtist.isEmpty ? p.curArtist : p.newArtist,
+                               foundAlbum: p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum,
+                               wantsArt: !p.curHasArt, size: 96, corner: 8)
 
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 6) {
@@ -822,7 +836,8 @@ struct PerfectView: View {
         } label: {
             VStack(alignment: .leading, spacing: 8) {
                 ZStack(alignment: .bottomLeading) {
-                    AlbumCover(key: a.id, sampleURL: a.sampleURL, foundMBID: a.artReleaseMBID, size: 176)
+                    AlbumCover(key: a.id, sampleURL: a.sampleURL, foundMBID: a.artReleaseMBID,
+                               foundArtist: a.subtitle, foundAlbum: a.title, wantsArt: a.artwork, size: 176)
                     HStack(spacing: 5) {
                         if a.names { cardTag("Names", .blue) }
                         if a.artwork { cardTag("+ Art", .pink) }
