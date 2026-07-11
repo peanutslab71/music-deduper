@@ -48,10 +48,15 @@ struct PerfectView: View {
     @State private var expanded: Set<String> = []   // all sections collapsed initially — reads as a summary
     @State private var showSettings = false
     @State private var queueIndex = 0                // position in the step-through review queue
-    @State private var showApplyConfirm = false      // the final "confirm before commit" dialog
-    @State private var albumSheet: AlbumRef? = nil   // album whose tracks are shown in a dialog
+    // One sheet driver. SwiftUI only honours the LAST `.sheet` modifier on a view,
+    // so two stacked sheets meant Apply silently never opened — hence a single enum.
+    @State private var activeSheet: PerfectSheet? = nil
 
-    struct AlbumRef: Identifiable { let id: String }
+    enum PerfectSheet: Identifiable {
+        case apply                 // the final "confirm before commit" dialog
+        case album(String)         // an album whose tracks are shown in a dialog
+        var id: String { switch self { case .apply: return "apply"; case .album(let a): return "album:\(a)" } }
+    }
 
     // The step the user is on. It NEVER advances on its own — running a pass
     // (Scan/Identify/Credits) stays on its step and shows the results; the user
@@ -86,8 +91,12 @@ struct PerfectView: View {
                 perfectFooter
             }
         }
-        .sheet(isPresented: $showApplyConfirm) { applyConfirmSheet }
-        .sheet(item: $albumSheet) { ref in albumSheetView(ref.id) }
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .apply: applyConfirmSheet
+            case .album(let id): albumSheetView(id)
+            }
+        }
         .onChange(of: store.root) { _ in currentStep = 1 }   // new library → back to Scan
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -432,7 +441,7 @@ struct PerfectView: View {
                 Button("Undo last run") { store.undo(run) }.disabled(store.busy)
             }
             Button {
-                showApplyConfirm = true
+                activeSheet = .apply
             } label: { Label("Apply changes", systemImage: "checkmark.circle") }
                 .buttonStyle(.borderedProminent).tint(.purple)
                 .disabled(!canReach(4) || !store.hasWork || store.busy)
@@ -472,7 +481,7 @@ struct PerfectView: View {
                     Text("\(a?.subtitle ?? "") · \(props.count) track(s)").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Done") { albumSheet = nil }
+                Button("Done") { activeSheet = nil }
             }.padding(16)
             Divider()
             ScrollView {
@@ -582,7 +591,7 @@ struct PerfectView: View {
 
     private func albumCard(_ a: PerfectStore.AlbumChange) -> some View {
         Button {
-            albumSheet = AlbumRef(id: a.id)
+            activeSheet = .album(a.id)
         } label: {
             VStack(alignment: .leading, spacing: 8) {
                 ZStack(alignment: .bottomLeading) {
@@ -991,8 +1000,8 @@ struct PerfectView: View {
                       systemImage: "arrow.uturn.backward")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Spacer()
-                Button("Cancel") { showApplyConfirm = false }
-                Button("Confirm & apply") { showApplyConfirm = false; store.commit() }
+                Button("Cancel") { activeSheet = nil }
+                Button("Confirm & apply") { activeSheet = nil; store.commit() }
                     .buttonStyle(.borderedProminent).tint(.purple).disabled(rows.isEmpty)
             }
             .padding(16)
