@@ -148,20 +148,23 @@ struct Identifier {
         return false
     }
 
-    func identify(url: URL, relPath: String,
-                  curArtist: String, curTitle: String, curAlbum: String,
-                  curHasArt: Bool, curComposer: String, curLabel: String) async throws -> TrackProposal? {
+    /// Step 1 — decode + fingerprint (pure CPU/IO, no network). Safe to run on
+    /// many files at once. The autorelease pool frees the tens-of-MB PCM buffer
+    /// the instant we're done, so memory doesn't balloon across the library.
+    func fingerprint(_ url: URL) -> AudioFingerprint? {
+        try? autoreleasepool { try AudioFingerprint(from: url) }
+    }
+
+    /// Step 2 — the AcoustID lookup for an already-computed fingerprint. This is
+    /// the rate-limited part (3 req/sec), kept separate so fingerprinting can run
+    /// ahead of it in parallel.
+    func resolve(url: URL, relPath: String, fingerprint fp: AudioFingerprint,
+                 curArtist: String, curTitle: String, curAlbum: String,
+                 curHasArt: Bool, curComposer: String, curLabel: String) async throws -> TrackProposal? {
         guard !apiKey.isEmpty else { throw IdentifyError.noKey }
         // treat placeholder tags as blank so they get filled, not trusted
         let cleanArtist = Self.isJunkValue(curArtist) ? "" : curArtist
         let cleanAlbum = Self.isJunkValue(curAlbum) ? "" : curAlbum
-
-        // Decode + fingerprint inside an autorelease pool so the (tens-of-MB) PCM
-        // buffers are freed the instant we're done with this file, instead of
-        // accumulating across the whole library and ballooning memory.
-        let fp: AudioFingerprint
-        do { fp = try autoreleasepool { try AudioFingerprint(from: url) } }
-        catch { throw IdentifyError.fingerprint(error) }
 
         let (score, recordings) = try await lookup(fingerprint: fp.base64, duration: Int(fp.duration.rounded()))
         // Consensus pick that trusts the existing tag — never overrides a good

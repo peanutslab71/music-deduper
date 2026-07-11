@@ -15,6 +15,7 @@
 import Foundation
 import AVFoundation
 import MDTagShim
+import ChromaSwift
 import SwiftUI
 
 // MARK: - Model
@@ -717,33 +718,72 @@ final class PerfectStore: ObservableObject {
             if let en = fm.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
                 while let u = en.nextObject() as? URL { if Self.isAudio(u) { files.append(u) } }
             }
+            let total = files.count
+
+            // Phase 1 — LISTEN. Read tags and fingerprint files in parallel (pure
+            // local work, no rate limit), so the CPU/disk cost happens up front
+            // instead of stalling in front of every network call. Bounded so a
+            // handful of tens-of-MB decodes run at once, not the whole library.
+            var ready: [ReadyTrack] = []
+            let cap = max(2, min(6, ProcessInfo.processInfo.activeProcessorCount - 1))
+            var listened = 0
+            await withTaskGroup(of: ReadyTrack?.self) { group in
+                var iter = files.makeIterator()
+                func addNext() {
+                    guard !box.cancelled, let u = iter.next() else { return }
+                    group.addTask {
+                        let rel = Self.rel(u, root)
+                        let a = Self.readField(u, "artist") ?? ""
+                        let t = Self.readField(u, "title") ?? ""
+                        let al = Self.readField(u, "album") ?? ""
+                        let c = Self.readField(u, "composer") ?? ""
+                        let l = Self.readField(u, "label") ?? ""
+                        let hasArt = md_has_artwork(u.path) == 1
+                        guard let fp = id.fingerprint(u) else { return nil }
+                        return ReadyTrack(url: u, rel: rel, artist: a, title: t, album: al,
+                                          composer: c, label: l, hasArt: hasArt, fp: fp)
+                    }
+                }
+                for _ in 0..<cap { addNext() }
+                while let r = await group.next() {
+                    listened += 1
+                    if let r { ready.append(r) }
+                    if listened % 5 == 0 { await self.setIdentifyProgress("Listening \(listened)/\(total)…") }
+                    addNext()
+                }
+            }
+
+            // Phase 2 — MATCH. AcoustID lookups, paced to its 3-requests/second
+            // limit. The lookup latency counts toward the gap, so we only wait the
+            // remainder — no dead 350ms tacked on after each request.
             var found: [TrackProposal] = []
             var done = 0
-            for u in files {
+            for r in ready {
                 if box.cancelled { break }
-                let rel = Self.rel(u, root)
-                let curA = Self.readField(u, "artist") ?? ""
-                let curT = Self.readField(u, "title") ?? ""
-                let curAl = Self.readField(u, "album") ?? ""
-                let curC = Self.readField(u, "composer") ?? ""
-                let curL = Self.readField(u, "label") ?? ""
-                let hasArt = md_has_artwork(u.path) == 1
-                if let p = try? await id.identify(url: u, relPath: rel,
-                                                  curArtist: curA, curTitle: curT, curAlbum: curAl,
-                                                  curHasArt: hasArt, curComposer: curC, curLabel: curL) {
+                let start = DispatchTime.now().uptimeNanoseconds
+                if let p = try? await id.resolve(url: r.url, relPath: r.rel, fingerprint: r.fp,
+                                                 curArtist: r.artist, curTitle: r.title, curAlbum: r.album,
+                                                 curHasArt: r.hasArt, curComposer: r.composer, curLabel: r.label) {
                     await self.pushFind("\(p.newTitle) — \(p.newArtist)", changed: p.hasChange)
-                    // keep every matched track — even ones with correct names still
-                    // need album/credits/art filling. The review shows only the
-                    // actionable ones; enrichment runs across them all.
                     found.append(p)
                 }
                 done += 1
-                if done % 3 == 0 { await self.setIdentifyProgress("Listened to \(done)/\(files.count)…") }
-                // AcoustID asks for max 3 requests/second per key
-                try? await Task.sleep(nanoseconds: 350_000_000)
+                if done % 3 == 0 { await self.setIdentifyProgress("Matched \(done)/\(ready.count)…") }
+                let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+                let waitMs = 340.0 - elapsedMs
+                if waitMs > 0 { try? await Task.sleep(nanoseconds: UInt64(waitMs * 1_000_000)) }
             }
-            await self.finishIdentify(proposals: found, total: files.count, cancelled: box.cancelled)
+            await self.finishIdentify(proposals: found, total: total, cancelled: box.cancelled)
         }
+    }
+
+    /// A file that's been listened to (tags read + fingerprinted) and is ready for
+    /// the rate-limited AcoustID lookup.
+    private struct ReadyTrack {
+        let url: URL; let rel: String
+        let artist: String; let title: String; let album: String
+        let composer: String; let label: String
+        let hasArt: Bool; let fp: AudioFingerprint
     }
 
     private func setIdentifyProgress(_ s: String) { identifyProgress = s }
