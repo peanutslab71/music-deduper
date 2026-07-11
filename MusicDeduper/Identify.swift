@@ -424,17 +424,38 @@ actor MusicBrainzClient {
         return e
     }
 
+    /// A single recording lookup only (1 request): performers + composer/lyricist
+    /// + the recording's own release MBID (for artwork). No release/Discogs calls —
+    /// used for a track that missed its album batch but can borrow that album's
+    /// label/date instead of re-fetching them.
+    func recordingOnly(recordingID: String) async -> Enrichment {
+        var e = Enrichment()
+        guard let rec: MBRecording = await get(
+            "recording/\(recordingID)?inc=work-rels+work-level-rels+artist-rels+releases") else { return e }
+        readCredits(rec.relations ?? [], into: &e)
+        e.releaseMBID = rec.releases?.first?.id
+        return e
+    }
+
     /// Credits for an ENTIRE album in ~2 requests instead of one-per-track. Picks
     /// the seed track's release that matches the album tag (not just its first,
     /// which is often a single/compilation), then pulls that release's whole
     /// tracklist with every recording's performers and work's composer inline.
     /// Returns credits keyed by BOTH recording MBID and normalised title, so a
     /// track matches even when its fingerprint pointed at a different pressing.
-    struct AlbumCredits { var byRecording: [String: Enrichment] = [:]; var byTitle: [String: Enrichment] = [:] }
+    struct AlbumCredits {
+        var byRecording: [String: Enrichment] = [:]
+        var byTitle: [String: Enrichment] = [:]
+        // album-level info a fallback track can borrow instead of re-fetching
+        var releaseMBID: String? = nil
+        var label: String? = nil
+        var catalog: String? = nil
+        var date: String? = nil
+    }
 
-    func albumCredits(seedRecordingID: String, albumTitle: String) async -> AlbumCredits {
+    func albumCredits(seedRecordingID: String, albumTitle: String, groupSize: Int) async -> AlbumCredits {
         guard let rec: MBRecordingReleases = await get("recording/\(seedRecordingID)?inc=releases+media"),
-              let releaseID = bestRelease(rec.releases, matching: albumTitle),
+              let releaseID = bestRelease(rec.releases, matching: albumTitle, size: groupSize),
               let rel: MBReleaseFull = await get(
                 "release/\(releaseID)?inc=recordings+artist-rels+recording-level-rels+work-rels+work-level-rels+labels+url-rels")
         else { return AlbumCredits() }
@@ -453,6 +474,7 @@ actor MusicBrainzClient {
         }
 
         var out = AlbumCredits()
+        out.releaseMBID = releaseID; out.label = label; out.catalog = catalog; out.date = date
         for m in rel.media ?? [] {
             for t in m.tracks ?? [] {
                 guard let rc = t.recording else { continue }
@@ -470,26 +492,32 @@ actor MusicBrainzClient {
 
     /// From the releases a recording appears on, choose the one to batch. Prefer an
     /// exact album-tag match, then a fuzzy one (either title contains the other —
-    /// handles "Discovery" vs "Discovery (Deluxe)"), and as a last resort the
-    /// fullest pressing so the batch still engages. Among candidates the one with
-    /// the most tracks wins (covers the most of the album in one request). Returns
+    /// handles "Discovery" vs "Discovery (Deluxe)"). Among candidates, pick the
+    /// pressing whose track count is CLOSEST to how many tracks we actually have
+    /// for this album — the same-tracklist pressing, not a box set or a foreign
+    /// edition with different songs (which gave near-zero batch coverage). Returns
     /// nil only when the recording has no releases at all.
-    private func bestRelease(_ releases: [MBReleaseStub]?, matching album: String) -> String? {
+    private func bestRelease(_ releases: [MBReleaseStub]?, matching album: String, size: Int) -> String? {
         guard let releases, !releases.isEmpty else { return nil }
         func tracks(_ r: MBReleaseStub) -> Int { (r.media ?? []).reduce(0) { $0 + ($1.trackCount ?? 0) } }
-        func fullest(_ rs: [MBReleaseStub]) -> String? { rs.max(by: { tracks($0) < tracks($1) })?.id }
+        // closest track count to `size`; ties broken toward the fuller pressing
+        func pick(_ rs: [MBReleaseStub]) -> String? {
+            rs.min(by: { a, b in
+                let da = abs(tracks(a) - size), db = abs(tracks(b) - size)
+                return da != db ? da < db : tracks(a) > tracks(b)
+            })?.id
+        }
         let key = TrackProposal.typoFold(album).lowercased()
         if !key.isEmpty {
             let exact = releases.filter { TrackProposal.typoFold($0.title ?? "").lowercased() == key }
-            if let hit = fullest(exact) { return hit }
+            if let hit = pick(exact) { return hit }
             let fuzzy = releases.filter {
                 let t = TrackProposal.typoFold($0.title ?? "").lowercased()
                 return !t.isEmpty && (t.contains(key) || key.contains(t))
             }
-            if let hit = fullest(fuzzy) { return hit }
+            if let hit = pick(fuzzy) { return hit }
         }
-        // no usable/matching album tag → fullest release still covers the most tracks
-        return fullest(releases)
+        return pick(releases)
     }
 
     /// Pull performers and composer/lyricist out of a recording's relations.

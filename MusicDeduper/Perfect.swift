@@ -861,7 +861,7 @@ final class PerfectStore: ObservableObject {
                 let didBatch = tracks.count > 1
                 let credits: MusicBrainzClient.AlbumCredits
                 if let seed = tracks.first, didBatch {
-                    credits = await client.albumCredits(seedRecordingID: seed.rid, albumTitle: seed.album)
+                    credits = await client.albumCredits(seedRecordingID: seed.rid, albumTitle: seed.album, groupSize: tracks.count)
                     batchedGroups += 1
                 } else {
                     credits = MusicBrainzClient.AlbumCredits()
@@ -870,10 +870,20 @@ final class PerfectStore: ObservableObject {
                 for t in tracks {
                     if box.cancelled { break }
                     // matched by recording id, else by title, else a per-track lookup
-                    let e: Enrichment
+                    var e: Enrichment
                     if let hit = credits.byRecording[t.rid] { e = hit; covered += 1 }
                     else if let hit = credits.byTitle[Self.foldKey(t.title)] { e = hit; covered += 1 }
-                    else { e = await client.enrich(recordingID: t.rid); missed += 1 }
+                    else if didBatch {
+                        // missed the album batch, but borrow the album's label/date/
+                        // artwork and pay only a single recording lookup (not three)
+                        e = await client.recordingOnly(recordingID: t.rid)
+                        if e.label == nil { e.label = credits.label; e.catalogNumber = credits.catalog }
+                        if e.date == nil { e.date = credits.date }
+                        if e.releaseMBID == nil { e.releaseMBID = credits.releaseMBID }
+                        missed += 1
+                    } else {
+                        e = await client.enrich(recordingID: t.rid); missed += 1
+                    }
                     await self.attachEnrichment(t.id, e)
                     done += 1
                     await self.pushEnrich(t.id, e, done: done, total: total)
