@@ -38,12 +38,16 @@ enum Organiser {
     /// Build a placement plan for a whole library. `composerFirstForClassical`
     /// switches classical tracks to a Composer-first top folder.
     static func plan(_ inputs: [OrganiseInput], composerFirstForClassical: Bool = false) -> [OrganisePlan] {
-        // Group by SOURCE FOLDER — in practice one folder is one album, which is
-        // the reliable unit for spotting a compilation and multi-disc sets.
+        // Group by the ARTIST FOLDER + the disc-stripped album, so the two discs of a
+        // set (which live in separate "[Disc 1]"/"[Disc 2]" folders) land in ONE group
+        // — that's what lets multi-disc numbering and one shared cover work — while
+        // different albums (even same-named, different artist) stay apart.
         var groups: [String: [OrganiseInput]] = [:]
         for t in inputs {
             let dir = (t.rel as NSString).deletingLastPathComponent
-            groups[dir, default: []].append(t)
+            let parent = (dir as NSString).deletingLastPathComponent
+            let key = parent + "\u{0}" + fold(stripDiscSuffix(t.album).clean)
+            groups[key, default: []].append(t)
         }
 
         var plans: [OrganisePlan] = []
@@ -56,8 +60,12 @@ enum Organiser {
             let groupAlbumArtist = taggedAA
                 ?? (distinctArtists.count >= 2 ? "Various Artists"
                     : tracks.first(where: { !$0.artist.isEmpty })?.artist ?? "")
-            // Multi-disc if any track carries a disc number ≥ 2.
-            let multiDisc = tracks.contains { $0.discNo >= 2 }
+            // Multi-disc if any track carries a disc number ≥ 2 (tag or album-name).
+            let multiDisc = tracks.contains { t in
+                if t.discNo >= 2 { return true }
+                if let d = Organiser.stripDiscSuffix(t.album).disc, d >= 2 { return true }
+                return false
+            }
 
             for t in tracks {
                 plans.append(planOne(t, groupAlbumArtist: groupAlbumArtist,
@@ -84,6 +92,14 @@ enum Organiser {
             writes.append(("albumartist", albumArtist))
         }
 
+        // Collapse a multi-disc set into ONE album: strip a "[Disc 2]" suffix from
+        // the album name (the disc belongs in the disc tag, which we also fill). So
+        // both discs share a folder and the same cover, per the standard.
+        let (cleanAlbum, discFromName) = Organiser.stripDiscSuffix(t.album)
+        if cleanAlbum != t.album { writes.append(("album", cleanAlbum)) }
+        let discNo = t.discNo > 0 ? t.discNo : (discFromName ?? 0)
+        if t.discNo == 0, let d = discFromName { writes.append(("disc", String(d))) }
+
         // Track number: prefer the tag, else the leading number in the filename.
         var trackNo = t.trackNo
         if trackNo == 0, let n = leadingNumber(t.rel) { trackNo = n }
@@ -91,13 +107,13 @@ enum Organiser {
 
         // Top folder: Composer-first only for classical when the toggle is on.
         let top = (composerFirst && t.isClassical && !t.composer.isEmpty) ? t.composer : albumArtist
-        let folder = safe(top) + "/" + safe(t.album)
+        let folder = safe(top) + "/" + safe(cleanAlbum)
 
         // Filename: gold-standard "## Title" (multi-disc "1-02 Title"); no prefix
         // only if we genuinely couldn't find a number.
         let prefix: String
         if trackNo > 0 {
-            prefix = (multiDisc && t.discNo > 0) ? "\(t.discNo)-\(pad2(trackNo))" : pad2(trackNo)
+            prefix = (multiDisc && discNo > 0) ? "\(discNo)-\(pad2(trackNo))" : pad2(trackNo)
         } else {
             prefix = ""
         }
@@ -110,6 +126,25 @@ enum Organiser {
     // MARK: helpers
 
     static func pad2(_ n: Int) -> String { n < 100 ? String(format: "%02d", n) : String(n) }
+
+    /// Strip a trailing disc marker from an album title — "[Disc 2]", "(CD 2)",
+    /// ", Disc 2", " - Disc 2", "Disc 2" — returning the clean title and the disc
+    /// number if one was embedded. Multi-disc sets then collapse to one album.
+    static func stripDiscSuffix(_ album: String) -> (clean: String, disc: Int?) {
+        let patterns = [
+            #"\s*[\[(]\s*(?:disc|cd)\s*(\d+)\s*[\])]\s*$"#,   // [Disc 2] (CD 2)
+            #"\s*[-,]\s*(?:disc|cd)\s*(\d+)\s*$"#,            // , Disc 2  - CD 2
+            #"\s+(?:disc|cd)\s*(\d+)\s*$"#                    // Disc 2
+        ]
+        for p in patterns {
+            if let m = album.range(of: p, options: [.regularExpression, .caseInsensitive]) {
+                let clean = String(album[..<m.lowerBound]).trimmingCharacters(in: .whitespaces)
+                let digits = album[m].components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
+                if !clean.isEmpty { return (clean, Int(digits)) }
+            }
+        }
+        return (album, nil)
+    }
 
     static func fold(_ s: String) -> String {
         s.lowercased().trimmingCharacters(in: .whitespaces)

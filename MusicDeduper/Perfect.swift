@@ -1257,7 +1257,7 @@ final class PerfectStore: ObservableObject {
             var artEdits: [String] = []
             var log = "Music Librarian — dedup \(Date())\nLibrary: \(root.path)\n\n"
             var done = 0
-            let backfill = ["title", "artist", "album", "albumartist", "composer", "lyricist", "label", "conductor", "date", "track"]
+            let backfill = ["title", "artist", "album", "albumartist", "composer", "lyricist", "label", "conductor", "date", "track", "disc"]
             for job in jobs {
                 if box.cancelled { break }
                 // merge-of-best: fill each of the keeper's BLANK fields from a loser
@@ -1391,7 +1391,9 @@ final class PerfectStore: ObservableObject {
         if tagWritingEnabled && applyArtwork {
             for p in proposals where p.accepted {
                 let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
-                let album = p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum
+                let rawAlbum = p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum
+                // group by the disc-stripped album so both discs of a set share one cover
+                let album = Organiser.stripDiscSuffix(rawAlbum).clean
                 let key = Self.foldKey(artist) + "|" + (album.isEmpty ? "single:" + p.relPath : Self.foldKey(album))
                 var job = artJobs[key] ?? AlbumArtJob(artist: artist, album: album, mbids: [], files: [])
                 if let m = p.enrichment?.releaseMBID, !job.mbids.contains(m) { job.mbids.append(m) }
