@@ -7,6 +7,8 @@
 //
 
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 /// An album cover: the file's embedded art if it has one, else the cover we
 /// *found* (Cover Art Archive) if art is going to be added, else a placeholder.
@@ -98,7 +100,46 @@ struct PerfectView: View {
             }
         }
         .onChange(of: store.root) { _ in currentStep = 1 }   // new library → back to Scan
+        .overlay { if store.committing { applyingOverlay } }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// A modal-feeling progress card shown while a commit runs, so the apply is
+    /// never invisible and can always be stopped. Not a .sheet (only the last
+    /// .sheet on a view wins) — an overlay that dims the screen instead.
+    private var applyingOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.35).ignoresSafeArea()
+            VStack(spacing: 16) {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 30, weight: .light)).foregroundStyle(.purple)
+                Text("Applying your changes").font(.headline)
+                if store.commitTotal > 0 {
+                    ProgressView(value: Double(min(store.commitDone, store.commitTotal)),
+                                 total: Double(store.commitTotal))
+                        .frame(width: 300)
+                    Text("\(min(store.commitDone, store.commitTotal)) of \(store.commitTotal)")
+                        .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                } else {
+                    ProgressView().frame(width: 300)
+                }
+                Text(store.commitPhase.isEmpty ? "Working…" : store.commitPhase)
+                    .font(.callout).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle).frame(width: 320)
+                Text("Everything is written to a recoverable quarantine — you can Undo the whole run afterwards.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center).frame(width: 320)
+                Button(role: .cancel) { store.cancel() } label: {
+                    Label("Cancel", systemImage: "stop.fill").frame(minWidth: 120)
+                }
+                .controlSize(.large)
+                .disabled(store.cancelRequested)
+            }
+            .padding(28)
+            .background(RoundedRectangle(cornerRadius: 16).fill(.regularMaterial))
+            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.secondary.opacity(0.2)))
+            .shadow(radius: 30)
+        }
     }
 
     // MARK: header
@@ -394,6 +435,7 @@ struct PerfectView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if let summary = store.lastRunSummary { committedBanner(summary) }
+                if !store.artworkNeedsReview.isEmpty { artworkReviewSection }
                 if visibleAlbums.isEmpty && !store.identifying && !store.enriching {
                     emptyStageNote
                 }
@@ -413,6 +455,22 @@ struct PerfectView: View {
         case 3: return all.filter { $0.credits || $0.artwork }       // credits & art added
         default: return all
         }
+    }
+
+    // Albums whose art couldn't be resolved during Apply — pick a cover by hand.
+    private var artworkReviewSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "photo.on.rectangle.angled").foregroundStyle(.orange)
+                Text("Artwork needs your choice").fontWeight(.semibold)
+                Text("mixed or missing covers, no match found online").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(store.artworkNeedsReview) { item in
+                ArtworkReviewCard(store: store, item: item)
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.07)))
     }
 
     private var emptyStageNote: some View {
@@ -524,6 +582,7 @@ struct PerfectView: View {
                             Text(String(format: "%.0f%% by sound", p.score * 100))
                                 .font(.caption2).foregroundStyle(p.score >= 0.9 ? .green : .orange)
                         }
+                        scrubber(p.url)
                         if p.artistChanged {
                             HStack(spacing: 8) {
                                 VStack(alignment: .leading, spacing: 1) {
@@ -543,13 +602,10 @@ struct PerfectView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         HStack(spacing: 10) {
-                            Toggle("Apply this", isOn: Binding(
-                                get: { p.accepted },
-                                set: { v in if let i = store.proposals.firstIndex(where: { $0.id == p.id }) { store.proposals[i].accepted = v } }
-                            )).toggleStyle(.checkbox)
                             Spacer()
-                            Button("Skip") { queueIndex = (idx + 1) % queue.count }.controlSize(.small)
-                            Button("Keep & next →") { queueIndex = (idx + 1) % queue.count }
+                            Button("Don't apply") { resolveQueueItem(p, accept: false) }
+                                .controlSize(.small)
+                            Button("Keep change →") { resolveQueueItem(p, accept: true) }
                                 .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
                         }
                     }
@@ -742,6 +798,37 @@ struct PerfectView: View {
             Image(systemName: playing ? "stop.circle.fill" : "play.circle")
                 .font(.system(size: 18)).foregroundStyle(playing ? .red : .teal)
         }.buttonStyle(.plain).help(playing ? "Stop" : "Listen")
+    }
+
+    /// A seek bar so you can skip through the track while reviewing it. Only live
+    /// (draggable) for the track that's actually playing; otherwise a thin rail.
+    @ViewBuilder private func scrubber(_ url: URL) -> some View {
+        let playing = audio.playingURL == url
+        HStack(spacing: 8) {
+            Text(playing ? fmtTime(audio.currentTime) : "0:00")
+                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                .frame(width: 32, alignment: .trailing)
+            Slider(value: Binding(
+                get: { playing ? audio.progress : 0 },
+                set: { if playing { audio.seek(to: $0) } }
+            ), in: 0...1)
+            .controlSize(.mini)
+            .disabled(!playing)
+            Text(playing && audio.duration > 0 ? fmtTime(audio.duration) : "—:—")
+                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                .frame(width: 32, alignment: .leading)
+        }
+        .opacity(playing ? 1 : 0.5)
+    }
+
+    /// Record the review decision and drop the item from the queue (it disappears
+    /// because `needsReview` now returns false). Stops any preview that's playing.
+    private func resolveQueueItem(_ p: TrackProposal, accept: Bool) {
+        audio.stop()
+        if let i = store.proposals.firstIndex(where: { $0.id == p.id }) {
+            store.proposals[i].accepted = accept
+            store.proposals[i].reviewed = true
+        }
     }
 
     private func proposalRow(_ p: TrackProposal) -> some View {
@@ -1066,5 +1153,87 @@ struct PerfectView: View {
     }
     private func color(_ k: FixKind) -> Color {
         switch k { case .junk: return .blue; case .emptyFolder: return .teal; case .drm: return .orange }
+    }
+}
+
+/// One flagged album in the manual artwork picker: choose from the covers already
+/// on its tracks, drop in your own image, re-search online, or leave it as-is.
+struct ArtworkReviewCard: View {
+    @ObservedObject var store: PerfectStore
+    let item: ArtworkReviewItem
+    @State private var covers: [Data] = []
+    @State private var searchArtist: String
+    @State private var searchAlbum: String
+    @State private var searching = false
+    @State private var searchResult: Data?
+
+    init(store: PerfectStore, item: ArtworkReviewItem) {
+        self.store = store; self.item = item
+        _searchArtist = State(initialValue: item.artist)
+        _searchAlbum = State(initialValue: item.album)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(item.artist) — \(item.album)").fontWeight(.medium)
+                    Text("\(item.files.count) track(s)").font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Leave as-is") { store.skipArtworkReview(item) }.controlSize(.small)
+            }
+            if !covers.isEmpty {
+                Text("Use one of the covers already on these tracks:").font(.caption).foregroundStyle(.secondary)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(covers.enumerated()), id: \.offset) { _, d in
+                            if let img = NSImage(data: d) {
+                                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                                    .frame(width: 60, height: 60).clipShape(RoundedRectangle(cornerRadius: 6))
+                                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.black.opacity(0.1)))
+                                    .onTapGesture { store.applyChosenArtwork(item: item, image: d) }
+                                    .help("Put this on all \(item.files.count) tracks")
+                            }
+                        }
+                    }
+                }
+            }
+            HStack(spacing: 8) {
+                Button { chooseFile() } label: { Label("Choose image…", systemImage: "folder") }.controlSize(.small)
+                Divider().frame(height: 16)
+                TextField("Artist", text: $searchArtist).textFieldStyle(.roundedBorder).frame(width: 110).controlSize(.small)
+                TextField("Album", text: $searchAlbum).textFieldStyle(.roundedBorder).frame(width: 130).controlSize(.small)
+                Button { research() } label: { Label("Search", systemImage: "magnifyingglass") }
+                    .controlSize(.small).disabled(searching || searchAlbum.isEmpty)
+                if searching { ProgressView().controlSize(.mini) }
+                if let r = searchResult, let img = NSImage(data: r) {
+                    Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                        .frame(width: 40, height: 40).clipShape(RoundedRectangle(cornerRadius: 4))
+                        .onTapGesture { store.applyChosenArtwork(item: item, image: r) }
+                        .help("Use this search result on all tracks")
+                }
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor).opacity(0.5)))
+        .task { covers = store.existingCovers(for: item) }
+    }
+
+    private func chooseFile() {
+        let p = NSOpenPanel()
+        p.allowedContentTypes = [.image]; p.canChooseFiles = true; p.allowsMultipleSelection = false
+        p.message = "Choose a cover image for \(item.album)"
+        if p.runModal() == .OK, let u = p.url, let d = try? Data(contentsOf: u) {
+            store.applyChosenArtwork(item: item, image: d)
+        }
+    }
+
+    private func research() {
+        searching = true
+        Task {
+            let d = await store.researchCover(artist: searchArtist, album: searchAlbum)
+            await MainActor.run { searchResult = d; searching = false }
+        }
     }
 }

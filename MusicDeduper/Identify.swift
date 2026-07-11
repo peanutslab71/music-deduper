@@ -56,6 +56,7 @@ struct TrackProposal: Identifiable {
     let albumCandidates: [String]     // suggested albums, best first
     var chosenAlbum: String           // editable
     var accepted: Bool
+    var reviewed: Bool = false        // a decision was made in the review queue → leaves the queue
 
     let recordingID: String?          // MusicBrainz recording, for the relationship lookups
     let curHasArt: Bool               // does the file already have embedded cover art?
@@ -82,6 +83,7 @@ struct TrackProposal: Identifiable {
     /// re-attribution (a different artist — not just a spelling/case fix, which
     /// is safe). These go to the step-through review queue, not the bulk list.
     var needsReview: Bool {
+        if reviewed { return false }          // already decided → gone from the queue
         if score < 0.9 { return true }
         guard artistChanged else { return false }
         func norm(_ s: String) -> String {
@@ -644,6 +646,56 @@ actor CoverArtClient {
             }
         }
         cache[releaseMBID] = result
+        return result
+    }
+
+    /// Resolve ONE cover for a whole album: try each of the album's release MBIDs
+    /// against the Cover Art Archive, and if none has an image fall back to Apple's
+    /// free iTunes Search artwork (which covers well-known albums the Archive misses,
+    /// e.g. Aretha's Gold). Returns the first image found, or nil.
+    func albumCover(releaseMBIDs: [String], artist: String, album: String) async -> Data? {
+        for mbid in releaseMBIDs {
+            if let d = await frontCover(releaseMBID: mbid) { return d }
+        }
+        return await itunesCover(artist: artist, album: album)
+    }
+
+    /// Apple iTunes Search artwork (no key; ~20 req/min). Upsizes the 100px thumb
+    /// URL to 600px. Picks the album result whose title best matches.
+    func itunesCover(artist: String, album: String) async -> Data? {
+        guard !album.isEmpty else { return nil }
+        let key = "itunes|" + artist.lowercased() + "|" + album.lowercased()
+        if let c = cache[key] { return c }
+        var result: Data? = nil
+        let termRaw = (artist + " " + album).trimmingCharacters(in: .whitespaces)
+        let term = termRaw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        if let url = URL(string: "https://itunes.apple.com/search?term=\(term)&entity=album&limit=8"),
+           let (data, resp) = try? await session.data(from: url),
+           (resp as? HTTPURLResponse)?.statusCode == 200,
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let results = json["results"] as? [[String: Any]] {
+            let wantAlbum = TrackProposal.typoFold(album).lowercased()
+            // prefer a result whose collectionName matches the album, else first with art
+            let ranked = results.sorted { a, b in
+                func score(_ r: [String: Any]) -> Int {
+                    let cn = TrackProposal.typoFold((r["collectionName"] as? String ?? "")).lowercased()
+                    if cn == wantAlbum { return 2 }
+                    if cn.contains(wantAlbum) || wantAlbum.contains(cn) { return 1 }
+                    return 0
+                }
+                return score(a) > score(b)
+            }
+            for r in ranked {
+                guard let art = r["artworkUrl100"] as? String else { continue }
+                let big = art.replacingOccurrences(of: "100x100bb", with: "600x600bb")
+                if let iu = URL(string: big),
+                   let (d, ir) = try? await session.data(from: iu),
+                   (ir as? HTTPURLResponse)?.statusCode == 200, !d.isEmpty {
+                    result = d; break
+                }
+            }
+        }
+        cache[key] = result
         return result
     }
 }

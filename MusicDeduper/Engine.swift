@@ -35,10 +35,20 @@ struct Track: Identifiable, Hashable {
     var sig: String? = nil       // content signature (lazy)
 
     var displayArtist: String { albumArtist.isEmpty ? artist : albumArtist }
+
+    /// Measured bitrate when it read, else derived from size over duration.
+    /// AVFoundation's estimatedDataRate comes back 0 for a fair few MP3s (VBR,
+    /// or it just can't estimate), which used to score them at 0 and let a
+    /// genuinely smaller 128k AAC win the keeper contest against a 320k MP3.
+    var effectiveKbps: Double {
+        if bitrate > 0 { return Double(bitrate) }
+        guard duration > 0, size > 0 else { return 0 }
+        return Double(size) * 8 / duration / 1000   // bytes → bits → kbps
+    }
     var qualityScore: Double {
         var s = 0.0
         if lossless { s += 100_000 }
-        s += Double(bitrate)
+        s += effectiveKbps
         if lossless { s += min(Double(size) / 1_000_000, 2000) }
         s += duration * 0.1
         if !albumArtist.isEmpty { s += 5 }

@@ -152,7 +152,28 @@ struct RunRecord: Identifiable {
     let tagEdits: [(rel: String, field: String, old: String)]  // each tag rewrite, for exact undo
     let perfEdits: [(rel: String, name: String, role: String)] // each performer credit added, for undo
     let artEdits: [String]                                      // rels where cover art was added, for undo
+    let artPromotions: [(rel: String, oldType: Int)]            // existing art retagged to front, for undo
+    let artReplacements: [(rel: String, backup: String, oldType: Int)]  // art replaced; backup holds the old image
     let summary: String
+}
+
+/// One album's cover-art work: resolve a single image (from any of the album's
+/// releases, or iTunes) and apply it to every art-less track in `files`.
+struct AlbumArtJob {
+    let artist: String
+    let album: String
+    var mbids: [String]
+    var files: [(url: URL, rel: String)]
+}
+
+/// An album whose art is mixed/missing but no cover could be fetched — surfaced
+/// for the manual artwork picker (choose an existing cover, drop your own,
+/// re-search, or leave as-is).
+struct ArtworkReviewItem: Identifiable {
+    let id = UUID()
+    let artist: String
+    let album: String
+    let files: [String]     // root-relative paths of the album's tracks
 }
 
 // MARK: - Found cover art (preview before it's embedded)
@@ -268,6 +289,15 @@ final class PerfectStore: ObservableObject {
     // commit-result summary
     @Published var lastRunSummary: String?
     @Published var lastQuarantine: URL?
+
+    // live apply progress (drives the Applying… dialog with its Cancel button)
+    @Published var committing = false
+    @Published var cancelRequested = false     // Cancel pressed; disables the button
+    @Published var commitPhase = ""
+    @Published var commitDone = 0
+    @Published var commitTotal = 0
+    @Published var artworkNeedsReview: [ArtworkReviewItem] = []   // albums needing a manual cover choice
+    func setCommitProgress(_ phase: String, done: Int) { commitPhase = phase; commitDone = done }
 
     // persistent run history (each run's quarantine folder holds a run.json)
     @Published var runs: [RunRecord] = []
@@ -607,7 +637,7 @@ final class PerfectStore: ObservableObject {
         return s.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
     }
 
-    func cancel() { cancelFlag.cancelled = true }
+    func cancel() { cancelFlag.cancelled = true; cancelRequested = true }
 
     // MARK: Tag check (Phase 2 preview) — read artist tags, find split spellings
 
@@ -947,6 +977,8 @@ final class PerfectStore: ObservableObject {
     func commit() {
         guard let root, hasWork else { return }
         busy = true; status = "Applying changes…"
+        committing = true; commitPhase = "Preparing…"; commitDone = 0; cancelRequested = false
+        let box = cancelFlag; box.cancelled = false
         let removals = findings.filter { $0.accepted && $0.kind.safe }.map { ($0.relPath, $0.kind.rawValue) }
         // folder merges from accepted artists that have a folder split
         let accMerges = artists.filter { $0.accepted && $0.folderMerges > 0 }
@@ -987,12 +1019,36 @@ final class PerfectStore: ObservableObject {
                 guard let e = p.enrichment, !e.performers.isEmpty else { return nil }
                 return (p.url, p.relPath, e.performers.map { ($0.name, $0.role) })
             } : []
-        // cover art: accepted proposals with no art and a release to fetch from
-        let accArt: [(URL, String, String)] = (tagWritingEnabled && applyArtwork) ? proposals
-            .filter { $0.accepted && $0.canAddArt }
-            .compactMap { p in p.enrichment?.releaseMBID.map { (p.url, p.relPath, $0) } } : []
+        // cover art — grouped PER ALBUM so one image is resolved once and applied to
+        // every track in it (kills the per-track patchwork and the duplicate fetches).
+        // The album's release MBIDs are pooled for the lookup; empty-album tracks each
+        // form their own group.
+        var artJobs: [String: AlbumArtJob] = [:]
+        if tagWritingEnabled && applyArtwork {
+            for p in proposals where p.accepted {
+                let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
+                let album = p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum
+                let key = Self.foldKey(artist) + "|" + (album.isEmpty ? "single:" + p.relPath : Self.foldKey(album))
+                var job = artJobs[key] ?? AlbumArtJob(artist: artist, album: album, mbids: [], files: [])
+                if let m = p.enrichment?.releaseMBID, !job.mbids.contains(m) { job.mbids.append(m) }
+                job.files.append((p.url, p.relPath))
+                artJobs[key] = job
+            }
+        }
+        let albumArt = Array(artJobs.values)
+        // rough total for the progress bar (art files counted; merges/renames add a little)
+        commitTotal = accTagEdits.count
+            + accEnrich.reduce(0) { $0 + $1.2.count }
+            + accPerf.reduce(0) { $0 + $1.2.count }
+            + albumArt.reduce(0) { $0 + $1.files.count }
+            + removals.count + accRenames.count + accMerges.count
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
+            var done = 0
+            @Sendable func bump(_ phase: String) async {
+                done += 1
+                if done % 5 == 0 { await self.setCommitProgress(phase, done: done) }
+            }
             let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
             let qRel = "Music Librarian Quarantine/\(stamp)"
             let quarantine = root.appendingPathComponent(qRel, isDirectory: true)
@@ -1001,6 +1057,9 @@ final class PerfectStore: ObservableObject {
             var tagEdits: [(rel: String, field: String, old: String)] = []  // recorded tag rewrites
             var perfEdits: [(rel: String, name: String, role: String)] = []  // recorded performer credits
             var artEdits: [String] = []                                      // rels where art was added
+            var artPromotions: [(rel: String, oldType: Int)] = []            // rels whose art was retagged to front
+            var artReplacements: [(rel: String, backup: String, oldType: Int)] = []  // rels whose art was replaced (old art backed up)
+            var flaggedArt: [(artist: String, album: String, files: [String])] = []  // mixed albums with no cover found
             var log = "Music Librarian — change log \(Date())\nLibrary: \(root.path)\n\n"
 
             func move(_ fromRel: String, _ toRel: String) -> Bool {
@@ -1018,52 +1077,118 @@ final class PerfectStore: ObservableObject {
             //    original locations (before any merge/rename moves them). Record
             //    the original path + field + old value so undo is exact.
             for (url, rel, field, old, new) in accTagEdits {
+                if box.cancelled { break }
                 do {
                     try Self.writeField(url, field, to: new)
                     tagEdits.append((rel, field, old))
                     log += "TAG: \(rel)  \(field) '\(old)' → '\(new)'\n"
                 } catch { log += "FAILED tag \(rel) \(field): \(error.localizedDescription)\n" }
+                await bump("Writing names & tags")
             }
 
             // 0b) enrichment gap-fills — only fill a field that is actually BLANK,
             //     never overwrite. Record old = "" so undo clears it again.
             for (url, rel, fields) in accEnrich {
+                if box.cancelled { break }
                 for (field, value) in fields where (Self.readField(url, field) ?? "").isEmpty {
                     do {
                         try Self.writeField(url, field, to: value)
                         tagEdits.append((rel, field, ""))
                         log += "TAG: \(rel)  + \(field) '\(value)' (was blank)\n"
                     } catch { log += "FAILED enrich \(rel) \(field): \(error.localizedDescription)\n" }
+                    await bump("Filling in credits")
                 }
             }
 
             // 0c) performer credits — added to the musician-credits list, recorded
             //     so undo removes exactly what was added.
             for (url, rel, people) in accPerf {
+                if box.cancelled { break }
                 for (name, role) in people {
                     do {
                         try Self.addPerformer(url, name: name, role: role)
                         perfEdits.append((rel, name, role))
                         log += "CREDIT: \(rel)  + \(name) (\(role))\n"
                     } catch { log += "FAILED credit \(rel): \(error.localizedDescription)\n" }
+                    await bump("Adding performer credits")
                 }
             }
 
-            // 0d) cover art — fetch from the Cover Art Archive and embed, only where
-            //     the file still has none. Recorded so undo strips exactly this art.
+            // 0d) cover art — UNIFY WHEN MIXED. First promote any non-front art to a
+            //     Front Cover (non-destructive retag). Then, per album: if the tracks
+            //     already share one cover, leave it. If they're mixed or have gaps,
+            //     put the album's real cover (iTunes / Cover Art Archive) on every
+            //     track — backing up each replaced image so it's fully reversible. If
+            //     no cover can be found for a mixed album, flag it for manual review.
             let artClient = CoverArtClient()
-            for (url, rel, releaseMBID) in accArt where md_has_artwork(url.path) == 0 {
-                guard let data = await artClient.frontCover(releaseMBID: releaseMBID) else { continue }
-                let rc = data.withUnsafeBytes { buf in
-                    md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(data.count), "image/jpeg")
+            let artBackupDir = quarantine.appendingPathComponent("artwork-backups", isDirectory: true)
+            var artBackupIndex = 0
+            // cheap image fingerprint: byte count + a checksum of the first 64 bytes
+            func artFingerprint(_ url: URL) -> String? {
+                var len: Int32 = 0, type: Int32 = 0
+                guard let buf = md_copy_artwork(url.path, &len, &type) else { return nil }
+                let d = Data(bytes: buf, count: Int(len)); free(buf)
+                return "\(len):" + String(d.prefix(64).reduce(UInt64(0)) { $0 &+ UInt64($1) })
+            }
+            for job in albumArt {
+                if box.cancelled { break }
+                // (i) promote non-front art to front cover
+                for (url, rel) in job.files {
+                    if md_has_artwork(url.path) == 1 && md_has_front_cover(url.path) == 0 {
+                        let oldType = Int(md_artwork_type(url.path))
+                        if md_set_artwork_type(url.path, 3) == 0 {
+                            artPromotions.append((rel, oldType))
+                            log += "ART: \(rel)  promoted picture type \(oldType) → front cover\n"
+                        }
+                    }
                 }
-                if rc == 0 { artEdits.append(rel); log += "ART: \(rel)  + cover (\(data.count) bytes)\n" }
-                else { log += "FAILED art \(rel): rc \(rc)\n" }
+                // (ii) assess consistency across the album
+                await bump("Checking cover art")
+                let prints = job.files.map { (f: $0, p: artFingerprint($0.url)) }
+                let hasGap = prints.contains { $0.p == nil }
+                let distinct = Set(prints.compactMap { $0.p })
+                if !hasGap && distinct.count <= 1 { continue }   // already consistent → leave alone
+                // (iii) mixed / gaps → get the album's real cover
+                let cover = await artClient.albumCover(releaseMBIDs: job.mbids, artist: job.artist, album: job.album)
+                guard let data = cover else {
+                    flaggedArt.append((job.artist, job.album, job.files.map { $0.rel }))
+                    log += "ART: album '\(job.artist) — \(job.album)' is mixed/missing but no cover was found → flagged for manual review\n"
+                    continue
+                }
+                let mime = data.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
+                let coverPrint = "\(data.count):" + String(data.prefix(64).reduce(UInt64(0)) { $0 &+ UInt64($1) })
+                for (url, rel) in job.files {
+                    await bump("Unifying cover art")
+                    let cur = artFingerprint(url)
+                    if cur == coverPrint { continue }            // already the album cover
+                    // back up any existing art so the replace is reversible
+                    if cur != nil {
+                        var blen: Int32 = 0, btype: Int32 = 0
+                        if let bbuf = md_copy_artwork(url.path, &blen, &btype) {
+                            let bdata = Data(bytes: bbuf, count: Int(blen)); free(bbuf)
+                            try? fm.createDirectory(at: artBackupDir, withIntermediateDirectories: true)
+                            let backupName = "\(artBackupIndex).img"; artBackupIndex += 1
+                            try? bdata.write(to: artBackupDir.appendingPathComponent(backupName))
+                            artReplacements.append((rel, "artwork-backups/" + backupName, Int(btype)))
+                        }
+                    }
+                    let rc = data.withUnsafeBytes { buf in
+                        md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(data.count), mime)
+                    }
+                    if rc == 0 {
+                        if cur == nil { artEdits.append(rel) }   // was empty → undo just strips it
+                        log += "ART: \(rel)  ← album cover (\(data.count) bytes)\n"
+                    } else { log += "FAILED art \(rel): rc \(rc)\n" }
+                }
             }
 
             // 1) merges — move each non-canonical source's contents into the canonical
             //    folder, then quarantine the emptied source folder.
+            if !accMerges.isEmpty || !removals.isEmpty || !accRenames.isEmpty {
+                await self.setCommitProgress("Reorganising folders", done: done)
+            }
             for (canonical, sources) in accMerges {
+                if box.cancelled { break }
                 for src in sources where src != canonical {
                     let srcDir = root.appendingPathComponent(src)
                     let children = (try? fm.contentsOfDirectory(atPath: srcDir.path)) ?? []
@@ -1090,48 +1215,152 @@ final class PerfectStore: ObservableObject {
             }
 
             // 2) removals — junk + empty folders → quarantine (deepest first)
-            for (rel, kind) in removals.sorted(by: { $0.0.count > $1.0.count }) {
-                if move(rel, qRel + "/" + rel) { log += "QUARANTINED (\(kind)): \(rel)\n" }
+            if !box.cancelled {
+                for (rel, kind) in removals.sorted(by: { $0.0.count > $1.0.count }) {
+                    if move(rel, qRel + "/" + rel) { log += "QUARANTINED (\(kind)): \(rel)\n" }
+                }
             }
 
             // 3) rename untidy folders (deepest first; nested renames were excluded
             //    at detection so no parent-rename invalidates a child path)
-            for (rel, newName) in accRenames.sorted(by: { $0.0.count > $1.0.count }) {
-                let parent = (rel as NSString).deletingLastPathComponent
-                let toRel = parent.isEmpty ? newName : parent + "/" + newName
-                if move(rel, toRel) { log += "RENAMED: \(rel) → \(toRel)\n" }
+            if !box.cancelled {
+                for (rel, newName) in accRenames.sorted(by: { $0.0.count > $1.0.count }) {
+                    let parent = (rel as NSString).deletingLastPathComponent
+                    let toRel = parent.isEmpty ? newName : parent + "/" + newName
+                    if move(rel, toRel) { log += "RENAMED: \(rel) → \(toRel)\n" }
+                }
             }
 
             let total = ops.count + tagEdits.count + perfEdits.count + artEdits.count
-            log += "\n\(total) change(s). Restore with 'Undo this run'.\n"
+                        + artPromotions.count + artReplacements.count
+            let wasCancelled = box.cancelled
+            log += "\n\(total) change(s)\(wasCancelled ? " (stopped early — you pressed Cancel)" : ""). Restore with 'Undo this run'.\n"
             try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
 
             let record: [String: Any] = [
                 "date": ISO8601DateFormatter().string(from: Date()),
                 "root": root.path,
-                "summary": "\(total) change(s) applied",
+                "summary": "\(total) change(s) applied\(wasCancelled ? " (cancelled)" : "")",
                 "ops": ops.map { ["from": $0.from, "to": $0.to] },
                 "tagEdits": tagEdits.map { ["rel": $0.rel, "field": $0.field, "old": $0.old] },
                 "perfEdits": perfEdits.map { ["rel": $0.rel, "name": $0.name, "role": $0.role] },
                 "artEdits": artEdits,
+                "artPromotions": artPromotions.map { ["rel": $0.rel, "oldType": String($0.oldType)] },
+                "artReplacements": artReplacements.map { ["rel": $0.rel, "backup": $0.backup, "oldType": String($0.oldType)] },
             ]
-            if let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) {
+            if total > 0, let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) {
                 try? data.write(to: quarantine.appendingPathComponent("run.json"))
+            } else if total == 0 {
+                // nothing was applied (cancelled before any change) — leave no empty run
+                try? fm.removeItem(at: quarantine)
             }
-            await self.finishCommit(count: total, quarantine: quarantine)
+            await self.finishCommit(count: total, quarantine: quarantine, cancelled: wasCancelled,
+                                    flagged: flaggedArt.map { ArtworkReviewItem(artist: $0.artist, album: $0.album, files: $0.files) })
         }
     }
 
-    private func finishCommit(count: Int, quarantine: URL) {
+    private func finishCommit(count: Int, quarantine: URL, cancelled: Bool = false,
+                              flagged: [ArtworkReviewItem] = []) {
         busy = false
+        committing = false; cancelRequested = false
+        artworkNeedsReview = flagged
+        commitPhase = ""; commitDone = 0; commitTotal = 0
         lastQuarantine = quarantine
-        lastRunSummary = "Applied \(count) change(s)."
+        lastRunSummary = cancelled ? "Stopped — applied \(count) change(s) before you cancelled."
+                                   : "Applied \(count) change(s)."
         findings.removeAll { $0.accepted && $0.kind.safe }
         renames.removeAll { $0.accepted && $0.newName != $0.oldName }
         artists.removeAll { $0.accepted && artistHasApplicableWork($0) }
         proposals.removeAll { $0.accepted && $0.hasChange }
         status = lastRunSummary ?? status
         loadRuns()
+    }
+
+    // MARK: Manual artwork review (albums flagged during commit)
+
+    /// The distinct covers already embedded across a flagged album's tracks, so the
+    /// picker can offer "use one of these" as thumbnails.
+    func existingCovers(for item: ArtworkReviewItem) -> [Data] {
+        guard let root else { return [] }
+        var seen = Set<String>(); var out: [Data] = []
+        for rel in item.files {
+            let url = root.appendingPathComponent(rel)
+            var len: Int32 = 0, type: Int32 = 0
+            guard let buf = md_copy_artwork(url.path, &len, &type) else { continue }
+            let d = Data(bytes: buf, count: Int(len)); free(buf)
+            let key = "\(len):" + String(d.prefix(64).reduce(UInt64(0)) { $0 &+ UInt64($1) })
+            if seen.insert(key).inserted { out.append(d) }
+        }
+        return out
+    }
+
+    /// Re-run the online search for a flagged album (editable artist/album).
+    func researchCover(artist: String, album: String) async -> Data? {
+        await CoverArtClient().itunesCover(artist: artist, album: album)
+    }
+
+    /// Apply a chosen cover to every track of a flagged album — backing up any
+    /// existing art so it's reversible — and drop the album from the review list.
+    func applyChosenArtwork(item: ArtworkReviewItem, image: Data) {
+        guard let root else { return }
+        busy = true; status = "Setting cover for \(item.album)…"
+        let files = item.files
+        Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
+            let qRel = "Music Librarian Quarantine/\(stamp)"
+            let quarantine = root.appendingPathComponent(qRel, isDirectory: true)
+            try? fm.createDirectory(at: quarantine, withIntermediateDirectories: true)
+            let backupDir = quarantine.appendingPathComponent("artwork-backups", isDirectory: true)
+            let mime = image.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
+            var artEdits: [String] = []
+            var artReplacements: [(rel: String, backup: String, oldType: Int)] = []
+            var idx = 0
+            var log = "Music Librarian — manual artwork \(Date())\nAlbum: \(item.artist) — \(item.album)\n\n"
+            for rel in files {
+                let url = root.appendingPathComponent(rel)
+                guard fm.fileExists(atPath: url.path) else { continue }
+                var l: Int32 = 0, t: Int32 = 0
+                if let b = md_copy_artwork(url.path, &l, &t) {
+                    let bd = Data(bytes: b, count: Int(l)); free(b)
+                    try? fm.createDirectory(at: backupDir, withIntermediateDirectories: true)
+                    let name = "\(idx).img"; idx += 1
+                    try? bd.write(to: backupDir.appendingPathComponent(name))
+                    artReplacements.append((rel, "artwork-backups/" + name, Int(t)))
+                } else { artEdits.append(rel) }
+                let rc = image.withUnsafeBytes { buf in
+                    md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(image.count), mime)
+                }
+                log += rc == 0 ? "ART: \(rel)  ← chosen cover\n" : "FAILED art \(rel): rc \(rc)\n"
+            }
+            try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
+            let record: [String: Any] = [
+                "date": ISO8601DateFormatter().string(from: Date()),
+                "root": root.path,
+                "summary": "Cover set for \(item.album) (\(files.count) track(s))",
+                "ops": [], "tagEdits": [], "perfEdits": [],
+                "artEdits": artEdits,
+                "artPromotions": [],
+                "artReplacements": artReplacements.map { ["rel": $0.rel, "backup": $0.backup, "oldType": String($0.oldType)] },
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) {
+                try? data.write(to: quarantine.appendingPathComponent("run.json"))
+            }
+            await self.finishArtworkChoice(item: item, quarantine: quarantine)
+        }
+    }
+
+    private func finishArtworkChoice(item: ArtworkReviewItem, quarantine: URL) {
+        busy = false
+        lastQuarantine = quarantine
+        artworkNeedsReview.removeAll { $0.id == item.id }
+        status = "Cover set for \(item.album)."
+        loadRuns()
+    }
+
+    /// Dismiss a flagged album without touching its art ("leave as-is").
+    func skipArtworkReview(_ item: ArtworkReviewItem) {
+        artworkNeedsReview.removeAll { $0.id == item.id }
     }
 
     // MARK: Run history + undo
@@ -1157,9 +1386,16 @@ final class PerfectStore: ObservableObject {
                     guard let r = d["rel"], let n = d["name"], let ro = d["role"] else { return nil }; return (r, n, ro)
                 }
                 let artEdits = obj["artEdits"] as? [String] ?? []
-                let n = ops.count + tagEdits.count + perfEdits.count + artEdits.count
+                let artPromotions = (obj["artPromotions"] as? [[String: String]] ?? []).compactMap { d -> (String, Int)? in
+                    guard let r = d["rel"] else { return nil }; return (r, Int(d["oldType"] ?? "0") ?? 0)
+                }
+                let artReplacements = (obj["artReplacements"] as? [[String: String]] ?? []).compactMap { d -> (String, String, Int)? in
+                    guard let r = d["rel"], let b = d["backup"] else { return nil }; return (r, b, Int(d["oldType"] ?? "0") ?? 0)
+                }
+                let n = ops.count + tagEdits.count + perfEdits.count + artEdits.count + artPromotions.count + artReplacements.count
                 found.append(RunRecord(id: sub.lastPathComponent, folder: sub, date: date,
                                        ops: ops, tagEdits: tagEdits, perfEdits: perfEdits, artEdits: artEdits,
+                                       artPromotions: artPromotions, artReplacements: artReplacements,
                                        summary: obj["summary"] as? String ?? "\(n) changes"))
             }
         }
@@ -1172,6 +1408,7 @@ final class PerfectStore: ObservableObject {
         guard let root else { return }
         busy = true; status = "Undoing run…"
         let folder = run.folder, ops = run.ops, tagEdits = run.tagEdits, perfEdits = run.perfEdits, artEdits = run.artEdits
+        let artPromotions = run.artPromotions, artReplacements = run.artReplacements
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var restored = 0, failed = 0
@@ -1223,6 +1460,24 @@ final class PerfectStore: ObservableObject {
                 let url = root.appendingPathComponent(rel)
                 guard fm.fileExists(atPath: url.path) else { continue }
                 _ = md_remove_artwork(url.path); restored += 1
+            }
+            // put any promoted picture back to its original type (non-destructive)
+            for (rel, oldType) in artPromotions {
+                let url = root.appendingPathComponent(rel)
+                guard fm.fileExists(atPath: url.path) else { continue }
+                _ = md_set_artwork_type(url.path, Int32(oldType)); restored += 1
+            }
+            // restore any replaced art from its backup (read BEFORE the quarantine
+            // folder is removed below), then put the original picture type back
+            for (rel, backup, oldType) in artReplacements {
+                let url = root.appendingPathComponent(rel)
+                guard fm.fileExists(atPath: url.path),
+                      let bdata = try? Data(contentsOf: folder.appendingPathComponent(backup)) else { continue }
+                let mime = bdata.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
+                let rc = bdata.withUnsafeBytes { buf in
+                    md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(bdata.count), mime)
+                }
+                if rc == 0 { _ = md_set_artwork_type(url.path, Int32(oldType)); restored += 1 }
             }
 
             try? fm.removeItem(at: folder)
