@@ -311,7 +311,6 @@ struct Enrichment {
 
 // Minimal MusicBrainz JSON models (only the fields we read)
 private struct MBRecording: Decodable { let relations: [MBRelation]?; let releases: [MBRef]? }
-private struct MBWork: Decodable { let relations: [MBRelation]? }
 private struct MBRelease: Decodable {
     let date: String?
     let labelInfo: [MBLabelInfo]?
@@ -321,9 +320,16 @@ private struct MBRelease: Decodable {
 private struct MBRelation: Decodable {
     let type: String
     let artist: MBRef?
-    let work: MBRef?
+    let work: MBWorkRef?
     let url: MBUrl?
     let attributes: [String]?
+}
+// The work linked to a recording, with its own relations (composer/lyricist)
+// carried inline when we ask for work-level-rels — so no extra request per track.
+private struct MBWorkRef: Decodable {
+    let id: String?
+    let title: String?
+    let relations: [MBRelation]?
 }
 private struct MBUrl: Decodable { let resource: String? }
 private struct MBRef: Decodable { let id: String?; let name: String?; let title: String? }
@@ -363,14 +369,16 @@ actor MusicBrainzClient {
     // Optional Discogs personal token (from Secrets.xcconfig). Present → 60/min
     // and authenticated; blank → 25/min unauthenticated.
     private let discogsToken = (Bundle.main.object(forInfoDictionaryKey: "DISCOGS_TOKEN") as? String) ?? ""
-    private var workCache: [String: (composer: String?, lyricist: String?)] = [:]
     private var releaseCache: [String: (label: String?, catalog: String?, date: String?, discogs: String?)] = [:]
     private var discogsCache: [String: DiscogsRelease?] = [:]
 
     func enrich(recordingID: String) async -> Enrichment {
         var e = Enrichment()
+        // One request: performers, the linked work AND that work's own relations
+        // (composer/lyricist, via work-level-rels), plus the releases — so we no
+        // longer spend a second rate-limited request per track on the work.
         guard let rec: MBRecording = await get(
-            "recording/\(recordingID)?inc=work-rels+artist-rels+releases") else { return e }
+            "recording/\(recordingID)?inc=work-rels+work-level-rels+artist-rels+releases") else { return e }
 
         // performers (instrument / vocal relationships) → credits
         for r in rec.relations ?? [] where r.type == "instrument" || r.type == "vocal" {
@@ -379,10 +387,18 @@ actor MusicBrainzClient {
                 e.performers.append(.init(name: name, role: role))
             }
         }
-        // composer / lyricist via the linked work
-        if let workID = (rec.relations ?? []).first(where: { $0.type == "performance" })?.work?.id {
-            let w = await cachedWork(workID)
-            e.composer = w.composer; e.lyricist = w.lyricist
+        // composer / lyricist from the linked work, carried inline (no extra call).
+        // MusicBrainz uses a specific "composer"/"lyricist" role where known and a
+        // generic "writer" otherwise — take the specific one first, else the writer.
+        if let work = (rec.relations ?? []).first(where: { $0.type == "performance" })?.work {
+            for r in work.relations ?? [] {
+                switch r.type {
+                case "composer": if e.composer == nil { e.composer = r.artist?.name }
+                case "lyricist": if e.lyricist == nil { e.lyricist = r.artist?.name }
+                case "writer":   if e.composer == nil { e.composer = r.artist?.name }
+                default: break
+                }
+            }
         }
         // label / catalog / date + Discogs link, via the first release
         if let releaseID = rec.releases?.first?.id {
@@ -443,19 +459,6 @@ actor MusicBrainzClient {
         return out
     }
 
-    private func cachedWork(_ id: String) async -> (composer: String?, lyricist: String?) {
-        if let c = workCache[id] { return c }
-        var out: (composer: String?, lyricist: String?) = (nil, nil)
-        if let w: MBWork = await get("work/\(id)?inc=artist-rels") {
-            for r in w.relations ?? [] {
-                if r.type == "composer", out.composer == nil { out.composer = r.artist?.name }
-                if r.type == "lyricist", out.lyricist == nil { out.lyricist = r.artist?.name }
-            }
-        }
-        workCache[id] = out
-        return out
-    }
-
     private func cachedRelease(_ id: String) async -> (label: String?, catalog: String?, date: String?, discogs: String?) {
         if let c = releaseCache[id] { return c }
         var out: (label: String?, catalog: String?, date: String?, discogs: String?) = (nil, nil, nil, nil)
@@ -479,7 +482,7 @@ actor MusicBrainzClient {
 
     /// One MusicBrainz GET, JSON-decoded, after a courtesy delay for the rate limit.
     private func get<T: Decodable>(_ path: String) async -> T? {
-        try? await Task.sleep(nanoseconds: 1_100_000_000)   // ~1 req/sec
+        try? await Task.sleep(nanoseconds: 1_000_000_000)   // ~1 req/sec (request latency adds headroom)
         guard let url = URL(string: "https://musicbrainz.org/ws/2/\(path)&fmt=json") else { return nil }
         var req = URLRequest(url: url)
         req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
