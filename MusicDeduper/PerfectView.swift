@@ -60,6 +60,7 @@ struct PerfectView: View {
     @State private var queueIndex = 0                // position in the step-through review queue
     @State private var savedFlash = false            // brief "Saved" toast after a queue decision
     @State private var showResetConfirm = false      // "Start over" confirmation
+    @State private var proposalExtras: [UUID: [(label: String, value: String)]] = [:]  // current tags for the album sheet
     // One sheet driver. SwiftUI only honours the LAST `.sheet` modifier on a view,
     // so two stacked sheets meant Apply silently never opened — hence a single enum.
     @State private var activeSheet: PerfectSheet? = nil
@@ -925,7 +926,19 @@ struct PerfectView: View {
                     ForEach(props) { p in proposalRow(p) }
                 }.padding(16)
             }
-        }.frame(width: 620, height: 560)
+        }
+        .frame(width: 620, height: 560)
+        .onAppear { loadProposalExtras(props) }
+        .onDisappear { audio.stop() }
+    }
+
+    /// Read the current tags for the album's tracks so the review rows show them all.
+    private func loadProposalExtras(_ props: [TrackProposal]) {
+        Task {
+            var out: [UUID: [(label: String, value: String)]] = [:]
+            for p in props { out[p.id] = TagReader.chips(p.url) }
+            await MainActor.run { proposalExtras = out }
+        }
     }
 
     // Step-through review queue — the handful that need a decision (genuine artist
@@ -1332,7 +1345,8 @@ struct PerfectView: View {
                     if p.albumChanged { Text("change").font(.caption2).foregroundStyle(.blue) }
                     Spacer(minLength: 0)
                 }
-                creditChips(p)
+                TagChipsView(pairs: proposalExtras[p.id] ?? [])   // the file's current tags
+                creditChips(p)                                     // green "+" for what credits will add
             }
             Spacer()
         }
@@ -1374,7 +1388,7 @@ struct PerfectView: View {
                 Image(systemName: "arrow.right").font(.system(size: 8)).foregroundStyle(.tertiary)
                 Text(new).font(.caption2).fontWeight(.medium).foregroundStyle(.primary)
             } else {
-                Text(new.isEmpty ? old : new).font(.caption2).foregroundStyle(.secondary)
+                Text(new.isEmpty ? old : new).font(.caption2).foregroundStyle(.primary)
             }
         }
     }

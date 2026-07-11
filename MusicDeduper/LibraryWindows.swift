@@ -168,7 +168,7 @@ struct LibraryAlbumSheet: View {
     let tracks: [Track]
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var audio = AudioPreview.shared
-    @State private var extras: [Int: [String: String]] = [:]   // track.id → composer/genre/date/label/albumartist
+    @State private var extras: [Int: [(label: String, value: String)]] = [:]   // track.id → all extra tag chips
 
     var body: some View {
         VStack(spacing: 0) {
@@ -213,7 +213,7 @@ struct LibraryAlbumSheet: View {
                 tagRow("Artist", t.displayArtist)
                 tagRow("Title", t.title)
                 tagRow("Album", t.album)
-                tagChips(t)
+                TagChipsView(pairs: extras[t.id] ?? [])
             }
             Spacer()
         }
@@ -225,35 +225,6 @@ struct LibraryAlbumSheet: View {
             Text(label).font(.caption2).foregroundStyle(.secondary).frame(width: 42, alignment: .leading)
             Text(value.isEmpty ? "—" : value).font(.caption2)
                 .foregroundStyle(value.isEmpty ? .tertiary : .primary).lineLimit(1)
-        }
-    }
-
-    // Small chips for the remaining tags (track/disc + composer/genre/year/label).
-    private func chipData(_ t: Track) -> [(String, String)] {
-        let e = extras[t.id] ?? [:]
-        var chips: [(String, String)] = []
-        if t.trackNo > 0 { chips.append(("Track", t.discNo > 1 ? "\(t.discNo)-\(t.trackNo)" : "\(t.trackNo)")) }
-        if !t.albumArtist.isEmpty && t.albumArtist != t.artist { chips.append(("Album artist", t.albumArtist)) }
-        for key in ["composer", "genre", "date", "label"] {
-            if let v = e[key], !v.isEmpty { chips.append((key.capitalized, v)) }
-        }
-        return chips
-    }
-
-    @ViewBuilder private func tagChips(_ t: Track) -> some View {
-        let chips = chipData(t)
-        if !chips.isEmpty {
-            HStack(spacing: 5) {
-                ForEach(Array(chips.enumerated()), id: \.offset) { _, c in
-                    HStack(spacing: 3) {
-                        Text(c.0).font(.system(size: 8, weight: .semibold)).foregroundStyle(.secondary)
-                        Text(c.1).font(.system(size: 9)).foregroundStyle(.primary).lineLimit(1)
-                    }
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
-                }
-            }
-            .padding(.top, 1)
         }
     }
 
@@ -283,14 +254,8 @@ struct LibraryAlbumSheet: View {
     private func loadExtras() {
         let items = tracks
         Task {
-            var out: [Int: [String: String]] = [:]
-            for t in items {
-                var m: [String: String] = [:]
-                for f in ["composer", "genre", "date", "label"] {
-                    if let v = PerfectStore.readField(t.url, f), !v.isEmpty { m[f] = v }
-                }
-                out[t.id] = m
-            }
+            var out: [Int: [(label: String, value: String)]] = [:]
+            for t in items { out[t.id] = TagReader.chips(t.url) }
             await MainActor.run { extras = out }
         }
     }
@@ -446,5 +411,69 @@ struct LogsView: View {
         }
         logs = found
         if selected == nil { selected = found.first?.id }
+    }
+}
+
+// MARK: - Shared tag display (used by both Library and Perfect's Review)
+
+/// Reads every tag we care about off a file, as (label, value) pairs, skipping blanks.
+enum TagReader {
+    static let fields: [(field: String, label: String)] = [
+        ("albumartist", "Album artist"), ("track", "Track"), ("disc", "Disc"),
+        ("composer", "Composer"), ("lyricist", "Lyricist"), ("conductor", "Conductor"),
+        ("genre", "Genre"), ("date", "Year"), ("label", "Label")
+    ]
+    /// All non-blank tags for a file. `skipArtist`/etc. let callers drop what they already show.
+    static func chips(_ url: URL, exclude: Set<String> = []) -> [(label: String, value: String)] {
+        fields.compactMap { f in
+            if exclude.contains(f.field) { return nil }
+            guard let v = PerfectStore.readField(url, f.field), !v.isEmpty else { return nil }
+            return (f.label, v)
+        }
+    }
+}
+
+/// Neutral grey "Label value" chips, wrapping to as many rows as needed.
+struct TagChipsView: View {
+    let pairs: [(label: String, value: String)]
+    var body: some View {
+        if !pairs.isEmpty {
+            FlowLayout(spacing: 5) {
+                ForEach(Array(pairs.enumerated()), id: \.offset) { _, c in
+                    HStack(spacing: 3) {
+                        Text(c.label).font(.system(size: 8, weight: .semibold)).foregroundStyle(.secondary)
+                        Text(c.value).font(.system(size: 9)).foregroundStyle(.primary).lineLimit(1)
+                    }
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                }
+            }
+            .padding(.top, 1)
+        }
+    }
+}
+
+/// A simple wrapping layout (chips flow to new rows when they run out of width).
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 5
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxW = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, rowH: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > 0 && x + s.width > maxW { x = 0; y += rowH + spacing; rowH = 0 }
+            x += s.width + spacing; rowH = max(rowH, s.height)
+        }
+        return CGSize(width: maxW.isFinite ? maxW : x, height: y + rowH)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let maxW = bounds.width
+        var x: CGFloat = 0, y: CGFloat = 0, rowH: CGFloat = 0
+        for v in subviews {
+            let s = v.sizeThatFits(.unspecified)
+            if x > 0 && x + s.width > maxW { x = 0; y += rowH + spacing; rowH = 0 }
+            v.place(at: CGPoint(x: bounds.minX + x, y: bounds.minY + y), proposal: ProposedViewSize(s))
+            x += s.width + spacing; rowH = max(rowH, s.height)
+        }
     }
 }
