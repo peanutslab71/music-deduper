@@ -37,59 +37,77 @@ enum WizardStep: Int, CaseIterable, Identifiable {
     }
 }
 
-/// Step indicator across the top. Completed / reachable steps stay clickable.
+/// Top navigation: three areas — Perfect · Transfer · Browse — with Transfer's
+/// own Source → Copy sub-steps shown beneath when it's active. (Dedup/organise now
+/// live in Perfect, so Transfer is copy-out only.)
 struct StepBar: View {
     @Binding var step: WizardStep
     let hasScan: Bool
 
-    private func reachable(_ s: WizardStep) -> Bool {
-        // Browse and Perfect are tools, not wizard steps — always open
-        s == .source || s == .browse || s == .perfect || hasScan
-    }
+    private var inTransfer: Bool { step == .source || step == .copy || step == .review || step == .cleanup }
 
     var body: some View {
-        HStack(spacing: 0) {
-            ForEach(WizardStep.allCases) { s in
-                let current = s == step
-                Button {
-                    if reachable(s) { step = s }
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: current ? "\(s.icon).fill" : s.icon)
-                            .symbolVariant(current ? .fill : .none)
-                        Text(s.title)
-                    }
-                    .font(.system(size: 13, weight: current ? .semibold : .regular))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(
-                        Capsule().fill(current ? Color.accentColor.opacity(0.16) : .clear)
-                    )
-                    .foregroundStyle(current ? Color.accentColor : (reachable(s) ? .primary : .secondary))
+        VStack(spacing: 9) {
+            HStack(spacing: 0) {
+                topChip("Perfect", "wand.and.stars", active: step == .perfect) { step = .perfect }
+                pipe()
+                topChip("Transfer", "arrow.right.doc.on.clipboard", active: inTransfer) {
+                    step = (hasScan && step == .review) ? .copy : .source
                 }
-                .buttonStyle(.plain)
-                .disabled(!reachable(s))
-                if s == .copy {
-                    // separate the wizard from the tools (Browse, Perfect) with a pipe
-                    Text("|")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.quaternary)
-                        .padding(.horizontal, 8)
-                } else if s == .browse {
-                    Text("·")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.quaternary)
-                        .padding(.horizontal, 4)
-                } else if s != .perfect {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.quaternary)
-                        .padding(.horizontal, 2)
+                pipe()
+                topChip("Browse", "externaldrive.connected.to.line.below", active: step == .browse) { step = .browse }
+            }
+            if inTransfer {
+                HStack(spacing: 0) {
+                    subChip("Source", 1, active: step == .source, reachable: true) { step = .source }
+                    subDash()
+                    subChip("Copy", 2, active: step == .copy, reachable: hasScan) { if hasScan { step = .copy } }
                 }
             }
         }
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity)
+    }
+
+    private func topChip(_ title: String, _ icon: String, active: Bool,
+                         _ tap: @escaping () -> Void) -> some View {
+        Button(action: tap) {
+            HStack(spacing: 7) {
+                Image(systemName: active ? "\(icon).fill" : icon).symbolVariant(active ? .fill : .none)
+                Text(title)
+            }
+            .font(.system(size: 14, weight: active ? .semibold : .regular))
+            .padding(.horizontal, 18).padding(.vertical, 8)
+            .background(Capsule().fill(active ? Color.accentColor.opacity(0.16) : .clear))
+            .foregroundStyle(active ? Color.accentColor : .primary)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func pipe() -> some View {
+        Text("|").font(.system(size: 15)).foregroundStyle(.quaternary).padding(.horizontal, 10)
+    }
+
+    private func subChip(_ title: String, _ n: Int, active: Bool, reachable: Bool,
+                         _ tap: @escaping () -> Void) -> some View {
+        Button(action: tap) {
+            HStack(spacing: 6) {
+                ZStack {
+                    Circle().fill(active ? Color.accentColor : .clear)
+                        .overlay(Circle().strokeBorder(active ? .clear : Color.secondary.opacity(0.35), lineWidth: 1.5))
+                        .frame(width: 20, height: 20)
+                    Text("\(n)").font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(active ? .white : .secondary)
+                }
+                Text(title).font(.system(size: 12, weight: active ? .semibold : .regular))
+                    .foregroundStyle(active ? .primary : (reachable ? .secondary : .tertiary))
+            }
+        }
+        .buttonStyle(.plain).disabled(!reachable)
+        .help(reachable ? "" : "Choose a source folder first")
+    }
+    private func subDash() -> some View {
+        Rectangle().fill(Color.secondary.opacity(0.25)).frame(width: 22, height: 1.5).padding(.horizontal, 8)
     }
 }
 
@@ -585,7 +603,7 @@ struct CopyStepView: View {
             }
 
             numbered(3, title: "Copy",
-                     detail: "\(store.selectedKeeperTracks.count) of \(store.keeperTracks.count) keeper tracks selected (choose albums/tracks on the Review step) · any file that already exists asks Overwrite/Skip (or All) · a Roon ROCK destination is checked and Roon Server stopped first.") {
+                     detail: "\(store.keeperTracks.count) track(s) will be copied into a clean Artist/Album tree · any file that already exists asks Overwrite/Skip (or All) · a Roon ROCK destination is checked and Roon Server stopped first.") {
                 VStack(alignment: .leading, spacing: 8) {
                     Button {
                         if let d = store.effectiveDest ?? destFolder { onCopy(d) }

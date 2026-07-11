@@ -13,7 +13,7 @@ struct ContentView: View {
     // one Perfect session for the whole app run, so leaving and returning to the
     // Perfect step keeps everything it found
     @StateObject private var perfect = PerfectStore()
-    @State private var step: WizardStep = .source
+    @State private var step: WizardStep = .perfect
     @State private var reviewTab = 0            // 0 duplicates · 1 library
     @State private var destFolder: URL? = nil
 
@@ -61,12 +61,11 @@ struct ContentView: View {
             footer
         }
         .frame(minWidth: 940, minHeight: 620)
-        // when a scan finishes, land on the right Review screen automatically:
-        // duplicates if there are any, otherwise straight to the Library grid
+        // Transfer is copy-out only — when the source scan finishes, go straight to
+        // Copy (dedup/organise now happen in Perfect, not here).
         .onChange(of: store.busy) { busy in
             if !busy && step == .source && !store.tracks.isEmpty {
-                reviewTab = store.clusters.isEmpty ? 1 : 0
-                step = .review
+                step = .copy
             }
         }
     }
