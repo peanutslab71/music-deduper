@@ -832,18 +832,21 @@ final class PerfectStore: ObservableObject {
         let targets = proposals.compactMap { p -> EnrichTarget? in
             guard let rid = p.recordingID else { return nil }
             return EnrichTarget(id: p.id, rid: rid,
-                                folder: (p.relPath as NSString).deletingLastPathComponent,
                                 title: p.newTitle.isEmpty ? p.curTitle : p.newTitle,
+                                artist: p.newArtist.isEmpty ? p.curArtist : p.newArtist,
                                 album: p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum)
         }
-        // Group by album folder. One release lookup covers a whole album's tracks,
-        // so we do ~2 requests per album instead of one per track. Preserve order
-        // so the feed still moves top-to-bottom through the library.
+        // Group by album TAG (artist + album), not folder — so it batches even when
+        // an album's tracks are loose or one-per-folder. One release lookup then
+        // covers the whole album. Tracks with no album tag can't be grouped, so
+        // each gets a unique key and takes the direct per-track path. Order is
+        // preserved so the feed still moves top-to-bottom.
         var order: [String] = []
         var groups: [String: [EnrichTarget]] = [:]
-        for t in targets {
-            if groups[t.folder] == nil { order.append(t.folder) }
-            groups[t.folder, default: []].append(t)
+        for (i, t) in targets.enumerated() {
+            let key = t.album.isEmpty ? "single#\(i)" : Self.foldKey(t.artist) + "|" + Self.foldKey(t.album)
+            if groups[key] == nil { order.append(key) }
+            groups[key, default: []].append(t)
         }
         let total = targets.count
         Task.detached(priority: .userInitiated) {
@@ -875,7 +878,7 @@ final class PerfectStore: ObservableObject {
         }
     }
 
-    private struct EnrichTarget { let id: UUID; let rid: String; let folder: String; let title: String; let album: String }
+    private struct EnrichTarget { let id: UUID; let rid: String; let title: String; let artist: String; let album: String }
     private nonisolated static func foldKey(_ s: String) -> String { TrackProposal.typoFold(s).lowercased() }
 
     private func setEnrichProgress(_ s: String) { enrichProgress = s }

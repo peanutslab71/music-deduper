@@ -464,16 +464,28 @@ actor MusicBrainzClient {
         return out
     }
 
-    /// From the releases a recording appears on, choose the one that matches the
-    /// track's album tag (fullest pressing among title matches). Returns nil when
-    /// there's no usable album tag or no match — the caller then goes per-track.
+    /// From the releases a recording appears on, choose the one to batch. Prefer an
+    /// exact album-tag match, then a fuzzy one (either title contains the other —
+    /// handles "Discovery" vs "Discovery (Deluxe)"), and as a last resort the
+    /// fullest pressing so the batch still engages. Among candidates the one with
+    /// the most tracks wins (covers the most of the album in one request). Returns
+    /// nil only when the recording has no releases at all.
     private func bestRelease(_ releases: [MBReleaseStub]?, matching album: String) -> String? {
         guard let releases, !releases.isEmpty else { return nil }
-        let key = TrackProposal.typoFold(album).lowercased()
-        guard !key.isEmpty else { return nil }
         func tracks(_ r: MBReleaseStub) -> Int { (r.media ?? []).reduce(0) { $0 + ($1.trackCount ?? 0) } }
-        let matches = releases.filter { TrackProposal.typoFold($0.title ?? "").lowercased() == key }
-        return matches.max(by: { tracks($0) < tracks($1) })?.id
+        func fullest(_ rs: [MBReleaseStub]) -> String? { rs.max(by: { tracks($0) < tracks($1) })?.id }
+        let key = TrackProposal.typoFold(album).lowercased()
+        if !key.isEmpty {
+            let exact = releases.filter { TrackProposal.typoFold($0.title ?? "").lowercased() == key }
+            if let hit = fullest(exact) { return hit }
+            let fuzzy = releases.filter {
+                let t = TrackProposal.typoFold($0.title ?? "").lowercased()
+                return !t.isEmpty && (t.contains(key) || key.contains(t))
+            }
+            if let hit = fullest(fuzzy) { return hit }
+        }
+        // no usable/matching album tag → fullest release still covers the most tracks
+        return fullest(releases)
     }
 
     /// Pull performers and composer/lyricist out of a recording's relations.
