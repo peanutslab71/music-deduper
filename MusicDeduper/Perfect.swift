@@ -829,22 +829,54 @@ final class PerfectStore: ObservableObject {
         // track is missing performers or a lyricist (those live in frames we don't
         // pre-read), so we check them all and let the gap-fill decide what to add —
         // nothing complete is ever overwritten.
-        let targets = proposals.compactMap { p -> (UUID, String)? in
+        let targets = proposals.compactMap { p -> EnrichTarget? in
             guard let rid = p.recordingID else { return nil }
-            return (p.id, rid)
+            return EnrichTarget(id: p.id, rid: rid,
+                                folder: (p.relPath as NSString).deletingLastPathComponent,
+                                title: p.newTitle.isEmpty ? p.curTitle : p.newTitle,
+                                album: p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum)
         }
+        // Group by album folder. One release lookup covers a whole album's tracks,
+        // so we do ~2 requests per album instead of one per track. Preserve order
+        // so the feed still moves top-to-bottom through the library.
+        var order: [String] = []
+        var groups: [String: [EnrichTarget]] = [:]
+        for t in targets {
+            if groups[t.folder] == nil { order.append(t.folder) }
+            groups[t.folder, default: []].append(t)
+        }
+        let total = targets.count
         Task.detached(priority: .userInitiated) {
             var done = 0
-            for (pid, rid) in targets {
+            for folder in order {
                 if box.cancelled { break }
-                let e = await client.enrich(recordingID: rid)
-                await self.attachEnrichment(pid, e)
-                done += 1
-                await self.pushEnrich(pid, e, done: done, total: targets.count)
+                let tracks = groups[folder] ?? []
+                // A lone track isn't worth a batch (2 requests for 1); look it up
+                // directly. Real albums (2+ tracks) go through one release lookup.
+                let credits: MusicBrainzClient.AlbumCredits
+                if let seed = tracks.first, tracks.count > 1 {
+                    credits = await client.albumCredits(seedRecordingID: seed.rid, albumTitle: seed.album)
+                } else {
+                    credits = MusicBrainzClient.AlbumCredits()
+                }
+                for t in tracks {
+                    if box.cancelled { break }
+                    // matched by recording id, else by title, else a per-track lookup
+                    let e: Enrichment
+                    if let hit = credits.byRecording[t.rid] { e = hit }
+                    else if let hit = credits.byTitle[Self.foldKey(t.title)] { e = hit }
+                    else { e = await client.enrich(recordingID: t.rid) }
+                    await self.attachEnrichment(t.id, e)
+                    done += 1
+                    await self.pushEnrich(t.id, e, done: done, total: total)
+                }
             }
             await self.finishEnrich(cancelled: box.cancelled)
         }
     }
+
+    private struct EnrichTarget { let id: UUID; let rid: String; let folder: String; let title: String; let album: String }
+    private nonisolated static func foldKey(_ s: String) -> String { TrackProposal.typoFold(s).lowercased() }
 
     private func setEnrichProgress(_ s: String) { enrichProgress = s }
 

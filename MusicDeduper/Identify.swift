@@ -317,6 +317,30 @@ private struct MBRelease: Decodable {
     let relations: [MBRelation]?
     enum CodingKeys: String, CodingKey { case date; case labelInfo = "label-info"; case relations }
 }
+// A release with its full tracklist, each track's recording relations, and the
+// works those recordings link to — everything for one album in a single request.
+private struct MBReleaseFull: Decodable {
+    let date: String?
+    let labelInfo: [MBLabelInfo]?
+    let relations: [MBRelation]?          // url-rels (the Discogs link)
+    let media: [MBMedia]?
+    enum CodingKeys: String, CodingKey { case date; case labelInfo = "label-info"; case relations; case media }
+}
+private struct MBMedia: Decodable { let tracks: [MBTrack]? }
+private struct MBTrack: Decodable { let recording: MBTrackRecording? }
+private struct MBTrackRecording: Decodable { let id: String?; let title: String?; let relations: [MBRelation]? }
+// A recording with the releases it appears on (title + track count), used to pick
+// the album release that matches the track's album tag.
+private struct MBRecordingReleases: Decodable { let releases: [MBReleaseStub]? }
+private struct MBReleaseStub: Decodable {
+    let id: String?
+    let title: String?
+    let media: [MBMediaCount]?
+}
+private struct MBMediaCount: Decodable {
+    let trackCount: Int?
+    enum CodingKeys: String, CodingKey { case trackCount = "track-count" }
+}
 private struct MBRelation: Decodable {
     let type: String
     let artist: MBRef?
@@ -380,26 +404,9 @@ actor MusicBrainzClient {
         guard let rec: MBRecording = await get(
             "recording/\(recordingID)?inc=work-rels+work-level-rels+artist-rels+releases") else { return e }
 
-        // performers (instrument / vocal relationships) → credits
-        for r in rec.relations ?? [] where r.type == "instrument" || r.type == "vocal" {
-            if let name = r.artist?.name {
-                let role = (r.attributes?.first) ?? r.type
-                e.performers.append(.init(name: name, role: role))
-            }
-        }
-        // composer / lyricist from the linked work, carried inline (no extra call).
-        // MusicBrainz uses a specific "composer"/"lyricist" role where known and a
-        // generic "writer" otherwise — take the specific one first, else the writer.
-        if let work = (rec.relations ?? []).first(where: { $0.type == "performance" })?.work {
-            for r in work.relations ?? [] {
-                switch r.type {
-                case "composer": if e.composer == nil { e.composer = r.artist?.name }
-                case "lyricist": if e.lyricist == nil { e.lyricist = r.artist?.name }
-                case "writer":   if e.composer == nil { e.composer = r.artist?.name }
-                default: break
-                }
-            }
-        }
+        // performers + composer/lyricist (the latter from the work carried inline
+        // via work-level-rels — no extra request per track).
+        readCredits(rec.relations ?? [], into: &e)
         // label / catalog / date + Discogs link, via the first release
         if let releaseID = rec.releases?.first?.id {
             e.releaseMBID = releaseID
@@ -411,6 +418,81 @@ actor MusicBrainzClient {
             }
         }
         return e
+    }
+
+    /// Credits for an ENTIRE album in ~2 requests instead of one-per-track. Picks
+    /// the seed track's release that matches the album tag (not just its first,
+    /// which is often a single/compilation), then pulls that release's whole
+    /// tracklist with every recording's performers and work's composer inline.
+    /// Returns credits keyed by BOTH recording MBID and normalised title, so a
+    /// track matches even when its fingerprint pointed at a different pressing.
+    struct AlbumCredits { var byRecording: [String: Enrichment] = [:]; var byTitle: [String: Enrichment] = [:] }
+
+    func albumCredits(seedRecordingID: String, albumTitle: String) async -> AlbumCredits {
+        guard let rec: MBRecordingReleases = await get("recording/\(seedRecordingID)?inc=releases+media"),
+              let releaseID = bestRelease(rec.releases, matching: albumTitle),
+              let rel: MBReleaseFull = await get(
+                "release/\(releaseID)?inc=recordings+artist-rels+recording-level-rels+work-rels+work-level-rels+labels+url-rels")
+        else { return AlbumCredits() }
+
+        let label = rel.labelInfo?.first?.label?.name
+        let catalog = rel.labelInfo?.first?.catalogNumber
+        let date = rel.date
+        // curated Discogs release link → fetch once, applied to every track
+        var discogs: DiscogsRelease? = nil
+        for r in rel.relations ?? [] where r.type == "discogs" {
+            if let res = r.url?.resource, res.contains("/release/"),
+               let last = res.split(separator: "/").last {
+                let digits = String(last).filter { $0.isNumber }
+                if !digits.isEmpty { discogs = await cachedDiscogs(digits); break }
+            }
+        }
+
+        var out = AlbumCredits()
+        for m in rel.media ?? [] {
+            for t in m.tracks ?? [] {
+                guard let rc = t.recording else { continue }
+                var e = Enrichment()
+                e.releaseMBID = releaseID
+                e.label = label; e.catalogNumber = catalog; e.date = date
+                readCredits(rc.relations ?? [], into: &e)
+                if let d = discogs { mergeDiscogs(&e, d) }
+                if let rid = rc.id { out.byRecording[rid] = e }
+                if let title = rc.title { out.byTitle[TrackProposal.typoFold(title).lowercased()] = e }
+            }
+        }
+        return out
+    }
+
+    /// From the releases a recording appears on, choose the one that matches the
+    /// track's album tag (fullest pressing among title matches). Returns nil when
+    /// there's no usable album tag or no match — the caller then goes per-track.
+    private func bestRelease(_ releases: [MBReleaseStub]?, matching album: String) -> String? {
+        guard let releases, !releases.isEmpty else { return nil }
+        let key = TrackProposal.typoFold(album).lowercased()
+        guard !key.isEmpty else { return nil }
+        func tracks(_ r: MBReleaseStub) -> Int { (r.media ?? []).reduce(0) { $0 + ($1.trackCount ?? 0) } }
+        let matches = releases.filter { TrackProposal.typoFold($0.title ?? "").lowercased() == key }
+        return matches.max(by: { tracks($0) < tracks($1) })?.id
+    }
+
+    /// Pull performers and composer/lyricist out of a recording's relations.
+    private func readCredits(_ relations: [MBRelation], into e: inout Enrichment) {
+        for r in relations {
+            if r.type == "instrument" || r.type == "vocal", let name = r.artist?.name {
+                e.performers.append(.init(name: name, role: r.attributes?.first ?? r.type))
+            }
+            if let work = r.work {
+                for x in work.relations ?? [] {
+                    switch x.type {
+                    case "composer": if e.composer == nil { e.composer = x.artist?.name }
+                    case "lyricist": if e.lyricist == nil { e.lyricist = x.artist?.name }
+                    case "writer":   if e.composer == nil { e.composer = x.artist?.name }
+                    default: break
+                    }
+                }
+            }
+        }
     }
 
     /// Merge Discogs credits into the enrichment: fill blank composer/lyricist/
