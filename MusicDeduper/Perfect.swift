@@ -1179,6 +1179,27 @@ final class PerfectStore: ObservableObject {
                 done += 1
                 if done % 5 == 0 { await self.setCommitProgress("Reorganising files", done: done) }
             }
+            // prune the source folders the moves emptied (e.g. the old "AC_DC" and its
+            // "Unknown Album" once their tracks moved into "AC-DC/High Voltage"). Only
+            // genuinely-empty dirs (ignoring .DS_Store) are removed; undo re-creates
+            // them when it restores the files, so this stays reversible.
+            var checkDirs = Set<String>()
+            for op in ops {
+                var cur = (op.from as NSString).deletingLastPathComponent
+                while !cur.isEmpty && cur != "." {
+                    checkDirs.insert(cur)
+                    cur = (cur as NSString).deletingLastPathComponent
+                }
+            }
+            for rel in checkDirs.sorted(by: { $0.count > $1.count }) {   // deepest first
+                if rel.hasPrefix("Music Librarian Quarantine") { continue }
+                let dir = root.appendingPathComponent(rel)
+                guard let contents = try? fm.contentsOfDirectory(atPath: dir.path) else { continue }
+                if contents.allSatisfy({ $0 == ".DS_Store" }) {
+                    for junk in contents { try? fm.removeItem(at: dir.appendingPathComponent(junk)) }
+                    if (try? fm.removeItem(at: dir)) != nil { log += "REMOVED empty folder: \(rel)\n" }
+                }
+            }
             let total = ops.count + tagEdits.count
             log += "\n\(total) change(s)\(box.cancelled ? " (stopped early)" : "").\n"
             try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
