@@ -82,18 +82,43 @@ struct PerfectView: View {
     @State private var currentStep = 1
     private var step: Int { currentStep }
 
-    // A step is reachable once every earlier step's pass has completed.
+    // A step is reachable once every earlier step's pass has completed (or skipped).
     private func canReach(_ n: Int) -> Bool {
         switch n {
         case 1:  return true
-        case 2:  return store.diagnosed          // Scan done
-        case 3:  return store.didIdentify        // Identify done
-        case 4:  return store.enriched           // Credits done (or skipped)
+        case 2:  return store.diagnosed              // Scan done
+        case 3:  return store.didIdentify            // Identify done
+        case 4:  return store.enriched               // Credits done/skipped → Duplicates
+        case 5:  return store.dedupStageDone         // Duplicates done/skipped → Organise
+        case 6:  return store.organiseStageDone      // Organise done/skipped → Review
         default: return false
         }
     }
+    private let lastStep = 6                          // Review; Apply is the footer
     // The current step's own pass has finished (so Next may light up).
     private var stepDone: Bool { canReach(step + 1) }
+
+    /// Advance to the next step, marking the skippable stages done as we leave them
+    /// (whether or not they were applied).
+    private func advance() {
+        if step == 4 { store.dedupStageDone = true }
+        if step == 5 { store.organiseStageDone = true }
+        currentStep = min(step + 1, lastStep)
+    }
+    // Steps 1–3 need their pass done; the skippable stages (4 Duplicates, 5 Organise)
+    // can always be moved past; Review (6) uses Apply instead of Next.
+    private var showNext: Bool {
+        switch step {
+        case 1, 2, 3: return canReach(step + 1)
+        case 4, 5:    return true
+        default:      return false
+        }
+    }
+    private var nextLabel: String {
+        if step == 4 { return store.deduped ? "Next" : "Skip →" }
+        if step == 5 { return store.organised ? "Next" : "Skip →" }
+        return "Next"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -254,8 +279,10 @@ struct PerfectView: View {
                 stepChip(1, "Scan"); stepDash()
                 stepChip(2, "Identify"); stepDash()
                 stepChip(3, "Credits"); stepDash()
-                stepChip(4, "Review"); stepDash()
-                stepChip(5, "Apply")
+                stepChip(4, "Duplicates"); stepDash()
+                stepChip(5, "Organise"); stepDash()
+                stepChip(6, "Review"); stepDash()
+                stepChip(7, "Apply")
             }
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 1) {
@@ -264,21 +291,21 @@ struct PerfectView: View {
                 }
                 Spacer()
                 stepAction
-                if step < 4 && canReach(step + 1) {
-                    Button { currentStep += 1 } label: {
-                        Label("Next", systemImage: "arrow.right").frame(minWidth: 64)
+                if showNext {
+                    Button { advance() } label: {
+                        Label(nextLabel, systemImage: "arrow.right").frame(minWidth: 64)
                     }
                     .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
                 }
             }
-            if step == 4, reviewQueueCount > 0 { needsBanner }
+            if step == 6, reviewQueueCount > 0 { needsBanner }
         }
         .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 13)
     }
 
     private func stepChip(_ n: Int, _ label: String) -> some View {
         // "done" = this step's own pass has finished (its next step is reachable).
-        let done = n < 5 && canReach(n + 1) && n != step
+        let done = n < 7 && canReach(n + 1) && n != step
         let now = step == n, reachable = canReach(n)
         return Button {
             if reachable { currentStep = n }
@@ -307,7 +334,9 @@ struct PerfectView: View {
         case 1: return "Step 1 — Scan"
         case 2: return "Step 2 — Identify"
         case 3: return "Step 3 — Fill credits"
-        default: return "Step 4 — Review"
+        case 4: return "Step 4 — Duplicates"
+        case 5: return "Step 5 — Organise"
+        default: return "Step 6 — Review"
         }
     }
     private var stepSubtitle: String {
@@ -321,6 +350,8 @@ struct PerfectView: View {
             return "Reading tags and finding junk, empty folders and duplicate artists."
         case 2: return "Matching each track by its sound. Your tags are trusted; only real gaps get filled."
         case 3: return "Looking up composer, label and cover art for the tracks missing them."
+        case 4: return "Find duplicate tracks and keep the best copy — or skip if you don't need it."
+        case 5: return "Rebuild a clean Album Artist / Album / ## Title tree from the tags — or skip it."
         default:
             let act = store.proposals.filter { $0.isActionable }.count
             return "\(act) track(s) with a suggested change. \(reviewQueueCount) worth checking before you apply."
@@ -332,13 +363,15 @@ struct PerfectView: View {
             Button("Cancel") { store.cancel() }.controlSize(.large)
         } else if step == 1 {
             passButton(stepDone ? "Re-scan" : "Scan library", "magnifyingglass") { store.explore() }
-        } else if !store.hasAcoustIDKey {
+        } else if step == 2 && !store.hasAcoustIDKey {
             Text("needs an AcoustID key").font(.caption).foregroundStyle(.orange)
         } else if step == 2 {
             passButton(stepDone ? "Re-identify" : "Identify tracks", "waveform.and.magnifyingglass") { store.identify() }
         } else if step == 3 {
             passButton(stepDone ? "Re-fill credits" : "Fill credits", "text.badge.plus") { store.enrich() }
-            if !stepDone { Button("Skip to review →") { store.enriched = true }.controlSize(.large) }
+            if !stepDone { Button("Skip credits →") { store.enriched = true }.controlSize(.large) }
+        } else if step == 4 || step == 5 {
+            EmptyView()   // the stage's own controls live in the middle panel
         } else {
             Button { store.identify() } label: { Label("Re-identify", systemImage: "arrow.clockwise") }.controlSize(.large)
             if !store.proposals.isEmpty {
@@ -395,8 +428,34 @@ struct PerfectView: View {
         case 3:
             if store.enriching { workingMiddle(title: "looking up credits", sub: store.enrichProgress, live: true, credits: true) }
             else { reviewMiddle }                        // credit/artwork adds (or prompt if not run)
+        case 4:
+            dedupMiddle                                  // Duplicates stage
+        case 5:
+            organiseMiddle                               // Organise stage
         default:
-            reviewMiddle                                 // Review
+            reviewMiddle                                 // Review (step 6)
+        }
+    }
+
+    private var dedupMiddle: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                dedupSection
+                if store.deduped && store.dedupClusters.isEmpty {
+                    Text("No duplicates found — press Next to carry on.")
+                        .font(.callout).foregroundStyle(.secondary).padding(.top, 4)
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    private var organiseMiddle: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                organiseSection
+            }
+            .padding(16)
         }
     }
 
@@ -464,14 +523,12 @@ struct PerfectView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if let summary = store.lastRunSummary { committedBanner(summary) }
-                if step == 2 || step == 4 { nameChangeSummary }
+                if step == 2 || step == 6 { nameChangeSummary }
                 if !store.artworkNeedsReview.isEmpty { artworkReviewSection }
                 if visibleAlbums.isEmpty && !store.identifying && !store.enriching {
                     emptyStageNote
                 }
-                if step == 4 { reviewQueueSection }   // the decision queue only on Review
-                if step == 4 { dedupSection }         // remove duplicates (merge-of-best)
-                if step == 4 { organiseSection }      // rebuild the clean tree
+                if step == 6 { reviewQueueSection }   // the decision queue only on Review
                 albumGrid
             }
             .padding(16)
@@ -687,7 +744,7 @@ struct PerfectView: View {
                 activeSheet = .apply
             } label: { Label("Apply changes", systemImage: "checkmark.circle") }
                 .buttonStyle(.borderedProminent).tint(.purple)
-                .disabled(!canReach(4) || !store.hasWork || store.busy)
+                .disabled(!canReach(6) || !store.hasWork || store.busy)
         }
         .padding(.horizontal, 14).padding(.vertical, 9)
     }

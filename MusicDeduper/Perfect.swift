@@ -366,6 +366,8 @@ final class PerfectStore: ObservableObject {
     @Published var dedupTracks: [Track] = []
     @Published var deduped = false
     @Published var deduping = false
+    @Published var dedupStageDone = false      // stage applied or skipped → Organise reachable
+    @Published var organiseStageDone = false   // stage applied or skipped → Review reachable
 
     // organise (rebuild the clean Album Artist/Album/## Title tree from tags)
     @Published var organisePlans: [OrganisePlan] = []
@@ -487,6 +489,8 @@ final class PerfectStore: ObservableObject {
     func diagnose() {
         guard let root else { return }
         busy = true; diagnosed = false; findings = []
+        // a fresh scan resets the later stages
+        dedupStageDone = false; organiseStageDone = false
         status = "Diagnosing…"; progress = ""
         cancelFlag.cancelled = false
         let box = cancelFlag
@@ -1172,6 +1176,7 @@ final class PerfectStore: ObservableObject {
             }
         }
         organisePlans.removeAll(); organised = false
+        organiseStageDone = true
         lastRunSummary = "Reorganised \(moves.count) file(s)."
         status = lastRunSummary ?? status
         loadRuns()
@@ -1333,6 +1338,7 @@ final class PerfectStore: ObservableObject {
         let gone = Set(removedRels)
         proposals.removeAll { gone.contains($0.relPath) }
         dedupClusters.removeAll(); dedupTracks.removeAll(); deduped = false
+        dedupStageDone = true
         lastRunSummary = "Removed \(removedRels.count) duplicate(s)."
         status = lastRunSummary ?? status
         loadRuns()
