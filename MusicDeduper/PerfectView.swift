@@ -59,6 +59,7 @@ struct PerfectView: View {
     @State private var showSettings = false
     @State private var queueIndex = 0                // position in the step-through review queue
     @State private var savedFlash = false            // brief "Saved" toast after a queue decision
+    @State private var showResetConfirm = false      // "Start over" confirmation
     // One sheet driver. SwiftUI only honours the LAST `.sheet` modifier on a view,
     // so two stacked sheets meant Apply silently never opened — hence a single enum.
     @State private var activeSheet: PerfectSheet? = nil
@@ -258,11 +259,24 @@ struct PerfectView: View {
                 Button { store.explore() } label: { Label("Re-explore", systemImage: "arrow.clockwise") }
                     .disabled(store.busy || store.checkingTags)
             }
+            if store.root != nil {
+                Button(role: .cancel) { showResetConfirm = true } label: {
+                    Label("Start over", systemImage: "xmark.circle")
+                }
+                .disabled(store.busy)
+                .help("Close this library and go back to the start")
+            }
             Button { showSettings.toggle() } label: { Image(systemName: "gearshape") }
                 .help("Settings")
                 .popover(isPresented: $showSettings, arrowEdge: .bottom) { settingsPopover }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
+        .confirmationDialog("Start over?", isPresented: $showResetConfirm, titleVisibility: .visible) {
+            Button("Discard & choose another library", role: .destructive) { store.resetWizard() }
+            Button("Keep working", role: .cancel) { }
+        } message: {
+            Text("This clears the current review (nothing already applied is undone — use Runs for that) and returns to the choose-a-library screen.")
+        }
     }
 
     private var settingsPopover: some View {

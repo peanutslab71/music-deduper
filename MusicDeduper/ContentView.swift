@@ -13,7 +13,7 @@ struct ContentView: View {
     // the Perfect session is owned by the app (shared with the Library/Runs/Logs
     // windows) and injected here
     @EnvironmentObject private var perfect: PerfectStore
-    @State private var step: WizardStep = .perfect
+    @State private var step: WizardStep = .library
     @State private var reviewTab = 0            // 0 duplicates · 1 library
     @State private var destFolder: URL? = nil
 
