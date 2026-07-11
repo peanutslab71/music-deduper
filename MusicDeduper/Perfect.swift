@@ -849,32 +849,57 @@ final class PerfectStore: ObservableObject {
             groups[key, default: []].append(t)
         }
         let total = targets.count
+        Self.creditsLog("=== Credits run: \(total) tracks in \(order.count) album-group(s) ===", reset: true)
         Task.detached(priority: .userInitiated) {
             var done = 0
+            var batchCovered = 0, fellBack = 0, batchedGroups = 0
             for folder in order {
                 if box.cancelled { break }
                 let tracks = groups[folder] ?? []
                 // A lone track isn't worth a batch (2 requests for 1); look it up
                 // directly. Real albums (2+ tracks) go through one release lookup.
+                let didBatch = tracks.count > 1
                 let credits: MusicBrainzClient.AlbumCredits
-                if let seed = tracks.first, tracks.count > 1 {
+                if let seed = tracks.first, didBatch {
                     credits = await client.albumCredits(seedRecordingID: seed.rid, albumTitle: seed.album)
+                    batchedGroups += 1
                 } else {
                     credits = MusicBrainzClient.AlbumCredits()
                 }
+                var covered = 0, missed = 0
                 for t in tracks {
                     if box.cancelled { break }
                     // matched by recording id, else by title, else a per-track lookup
                     let e: Enrichment
-                    if let hit = credits.byRecording[t.rid] { e = hit }
-                    else if let hit = credits.byTitle[Self.foldKey(t.title)] { e = hit }
-                    else { e = await client.enrich(recordingID: t.rid) }
+                    if let hit = credits.byRecording[t.rid] { e = hit; covered += 1 }
+                    else if let hit = credits.byTitle[Self.foldKey(t.title)] { e = hit; covered += 1 }
+                    else { e = await client.enrich(recordingID: t.rid); missed += 1 }
                     await self.attachEnrichment(t.id, e)
                     done += 1
                     await self.pushEnrich(t.id, e, done: done, total: total)
                 }
+                batchCovered += covered; fellBack += missed
+                let batchInfo = didBatch ? "batch covered \(covered)/\(tracks.count), \(missed) fell back" : "single (per-track)"
+                Self.creditsLog("group '\(folder)' size=\(tracks.count): \(batchInfo)")
             }
+            let s = await client.stats()
+            Self.creditsLog("--- TOTAL: \(order.count) groups, \(batchedGroups) batched · tracks \(done) (batch-covered \(batchCovered), per-track \(fellBack)) · MusicBrainz requests=\(s.mb), Discogs=\(s.discogs) ---")
             await self.finishEnrich(cancelled: box.cancelled)
+        }
+    }
+
+    /// Append a line to ~/musicdeduper-credits.log (reset truncates it). Lets us
+    /// see whether album-batching is actually engaging on a real library.
+    nonisolated static func creditsLog(_ line: String, reset: Bool = false) {
+        let path = (NSHomeDirectory() as NSString).appendingPathComponent("musicdeduper-credits.log")
+        if reset {
+            try? (line + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+        } else if let h = FileHandle(forWritingAtPath: path) {
+            h.seekToEndOfFile()
+            if let d = (line + "\n").data(using: .utf8) { h.write(d) }
+            try? h.close()
+        } else {
+            try? (line + "\n").write(toFile: path, atomically: true, encoding: .utf8)
         }
     }
 

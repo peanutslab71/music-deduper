@@ -395,6 +395,10 @@ actor MusicBrainzClient {
     private let discogsToken = (Bundle.main.object(forInfoDictionaryKey: "DISCOGS_TOKEN") as? String) ?? ""
     private var releaseCache: [String: (label: String?, catalog: String?, date: String?, discogs: String?)] = [:]
     private var discogsCache: [String: DiscogsRelease?] = [:]
+    // Counters so a run can report how many network calls it actually made.
+    private(set) var mbRequests = 0
+    private(set) var discogsRequests = 0
+    func stats() -> (mb: Int, discogs: Int) { (mbRequests, discogsRequests) }
 
     func enrich(recordingID: String) async -> Enrichment {
         var e = Enrichment()
@@ -535,6 +539,7 @@ actor MusicBrainzClient {
 
     private func cachedDiscogs(_ id: String) async -> DiscogsRelease? {
         if let c = discogsCache[id] { return c }
+        discogsRequests += 1
         // 60/min with a token (~1s), 25/min without (~2.5s) — respect each limit.
         try? await Task.sleep(nanoseconds: discogsToken.isEmpty ? 2_500_000_000 : 1_050_000_000)
         var out: DiscogsRelease? = nil
@@ -576,6 +581,7 @@ actor MusicBrainzClient {
 
     /// One MusicBrainz GET, JSON-decoded, after a courtesy delay for the rate limit.
     private func get<T: Decodable>(_ path: String) async -> T? {
+        mbRequests += 1
         try? await Task.sleep(nanoseconds: 1_000_000_000)   // ~1 req/sec (request latency adds headroom)
         guard let url = URL(string: "https://musicbrainz.org/ws/2/\(path)&fmt=json") else { return nil }
         var req = URLRequest(url: url)
