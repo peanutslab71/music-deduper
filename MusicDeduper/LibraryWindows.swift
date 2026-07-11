@@ -10,102 +10,187 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Library Viewer
+// MARK: - Library browser (a mini-iTunes album grid over any folder)
 
-struct LibraryViewerView: View {
-    @EnvironmentObject private var perfect: PerfectStore
-    @ObservedObject private var audio = AudioPreview.shared
+struct LibraryBrowserView: View {
+    @AppStorage("libraryBrowserRoot") private var savedRoot = ""
+    @State private var root: URL?
     @State private var tracks: [Track] = []
     @State private var loading = false
     @State private var search = ""
+    @State private var selectedAlbum: AlbumKey?
 
-    private var filtered: [Track] {
-        guard !search.isEmpty else { return tracks }
-        let q = search.lowercased()
-        return tracks.filter {
-            $0.title.lowercased().contains(q) || $0.displayArtist.lowercased().contains(q)
-                || $0.album.lowercased().contains(q)
-        }
+    struct AlbumKey: Identifiable, Hashable {
+        let artist: String; let album: String
+        var id: String { artist + "\u{0}" + album }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "music.note.list").foregroundStyle(.purple)
-                Text(perfect.root?.lastPathComponent ?? "Library Viewer").font(.headline)
-                Text("\(tracks.count) tracks").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                TextField("Search title / artist / album", text: $search)
-                    .textFieldStyle(.roundedBorder).frame(width: 240)
-                Button { load() } label: { Image(systemName: "arrow.clockwise") }
-                    .disabled(perfect.root == nil || loading)
-            }
-            .padding(10)
+            header
             Divider()
-            if perfect.root == nil {
-                placeholder("Open a music library in the main window first.")
+            if root == nil {
+                chooser
             } else if loading {
-                VStack(spacing: 10) { ProgressView(); Text("Reading tags…").foregroundStyle(.secondary) }
+                VStack(spacing: 10) { ProgressView(); Text("Reading your library…").foregroundStyle(.secondary) }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if tracks.isEmpty {
-                placeholder("No audio files found.")
+                Text("No audio files found here.").foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                trackTable
+                albumGrid
             }
         }
-        .frame(minWidth: 720, minHeight: 460)
-        .onAppear { if tracks.isEmpty { load() } }
+        .sheet(item: $selectedAlbum) { key in
+            LibraryAlbumSheet(album: key, tracks: albumTracks(key))
+        }
+        .onAppear { if root == nil && !savedRoot.isEmpty { open(URL(fileURLWithPath: savedRoot)) } }
     }
 
-    private var trackTable: some View {
-        Table(filtered) {
-            TableColumn("") { t in
-                Button { audio.toggle(t.url) } label: {
-                    Image(systemName: audio.playingURL == t.url ? "stop.circle.fill" : "play.circle")
-                        .foregroundStyle(audio.playingURL == t.url ? .red : .teal)
-                }.buttonStyle(.plain)
-            }.width(28)
-            TableColumn("#") { t in
-                Text(t.trackNo > 0 ? (t.discNo > 1 ? "\(t.discNo)-\(t.trackNo)" : "\(t.trackNo)") : "—")
-                    .foregroundStyle(.secondary).monospacedDigit()
-            }.width(44)
-            TableColumn("Title", value: \.title)
-            TableColumn("Artist") { t in Text(t.displayArtist) }
-            TableColumn("Album", value: \.album)
-            TableColumn("Time") { t in Text(fmtDur(t.duration)).monospacedDigit().foregroundStyle(.secondary) }.width(52)
-            TableColumn("Format") { t in Text(t.formatLabel).font(.caption).monospaced().foregroundStyle(.secondary) }.width(90)
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "music.note.list").foregroundStyle(.purple)
+            Text(root?.lastPathComponent ?? "Library").font(.headline)
+            if !tracks.isEmpty {
+                Text("\(albums().count) albums · \(tracks.count) tracks").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if root != nil {
+                TextField("Search", text: $search).textFieldStyle(.roundedBorder).frame(width: 200)
+            }
+            Button { pick() } label: { Label(root == nil ? "Choose library…" : "Change…", systemImage: "folder") }
+        }
+        .padding(10)
+    }
+
+    private var chooser: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(systemName: "music.note.house").font(.system(size: 44, weight: .light)).foregroundStyle(.purple)
+            Text("Browse a music library").font(.title3).fontWeight(.medium)
+            Text("Pick a folder and see it as albums — click any album to see its tracks.")
+                .foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 380)
+            Button { pick() } label: { Label("Choose library…", systemImage: "folder").frame(minWidth: 160) }
+                .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var albumGrid: some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 190), spacing: 18)], spacing: 20) {
+                ForEach(albums(), id: \.key) { entry in
+                    VStack(alignment: .leading, spacing: 6) {
+                        AlbumCover(key: entry.tracks.first?.relDir ?? entry.key.id,
+                                   sampleURL: entry.tracks.first?.url, foundMBID: nil, size: 170, corner: 8)
+                        Text(entry.key.album).font(.callout).fontWeight(.medium).lineLimit(1)
+                        Text("\(entry.key.artist) · \(entry.tracks.count) tracks")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    .frame(width: 170, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { selectedAlbum = entry.key }
+                }
+            }
+            .padding(18)
         }
     }
 
-    private func placeholder(_ msg: String) -> some View {
-        Text(msg).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+    private var filtered: [Track] {
+        guard !search.isEmpty else { return tracks }
+        let q = search.lowercased()
+        return tracks.filter { $0.title.lowercased().contains(q) || $0.displayArtist.lowercased().contains(q) || $0.album.lowercased().contains(q) }
+    }
+    private func albums() -> [(key: AlbumKey, tracks: [Track])] {
+        var map: [AlbumKey: [Track]] = [:]
+        for t in filtered {
+            let key = AlbumKey(artist: t.displayArtist.isEmpty ? "Unknown Artist" : t.displayArtist,
+                               album: t.album.isEmpty ? "Unknown Album" : t.album)
+            map[key, default: []].append(t)
+        }
+        return map.map { ($0.key, $0.value) }
+            .sorted { ($0.key.artist.lowercased(), $0.key.album.lowercased()) < ($1.key.artist.lowercased(), $1.key.album.lowercased()) }
+    }
+    private func albumTracks(_ key: AlbumKey) -> [Track] {
+        albums().first { $0.key == key }?.tracks
+            .sorted { ($0.discNo, $0.trackNo, $0.title.lowercased()) < ($1.discNo, $1.trackNo, $1.title.lowercased()) } ?? []
     }
 
+    private func pick() {
+        let p = NSOpenPanel(); p.canChooseDirectories = true; p.canChooseFiles = false; p.allowsMultipleSelection = false
+        p.prompt = "Browse"; p.message = "Choose a music library folder"
+        if p.runModal() == .OK, let u = p.url { open(u) }
+    }
+    private func open(_ u: URL) { root = u; savedRoot = u.path; tracks = []; search = ""; load() }
     private func load() {
-        guard let root = perfect.root else { return }
+        guard let root else { return }
         loading = true
         Task {
             let fm = FileManager.default
             var built: [Track] = []
             if let en = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey]) {
-                for case let u as URL in en {
-                    guard PerfectStore.isAudio(u) else { continue }
-                    if PerfectStore.rel(u, root).hasPrefix("Music Librarian Quarantine") { continue }
-                    let size = Int64((try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-                    var t = await readMetadata(url: u, size: size)
+                for case let uu as URL in en {
+                    guard PerfectStore.isAudio(uu) else { continue }
+                    let rel = PerfectStore.rel(uu, root)
+                    if rel.hasPrefix("Music Librarian Quarantine") { continue }
+                    let size = Int64((try? uu.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                    var t = await readMetadata(url: uu, size: size)
                     t.id = built.count
-                    if t.title.isEmpty { t.title = u.deletingPathExtension().lastPathComponent }
+                    t.relDir = (rel as NSString).deletingLastPathComponent
+                    if t.title.isEmpty { t.title = uu.deletingPathExtension().lastPathComponent }
                     built.append(t)
                 }
             }
-            let sorted = built.sorted {
-                ($0.displayArtist.lowercased(), $0.album.lowercased(), $0.discNo, $0.trackNo)
-                    < ($1.displayArtist.lowercased(), $1.album.lowercased(), $1.discNo, $1.trackNo)
-            }
-            await MainActor.run { tracks = sorted; loading = false }
+            await MainActor.run { tracks = built; loading = false }
         }
     }
 }
+
+/// Read-only album track listing — the album "pop-up" for the Library browser.
+struct LibraryAlbumSheet: View {
+    let album: LibraryBrowserView.AlbumKey
+    let tracks: [Track]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                AlbumCover(key: tracks.first?.relDir ?? album.id, sampleURL: tracks.first?.url,
+                           foundMBID: nil, size: 64, corner: 8)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(album.album).font(.headline)
+                    Text("\(album.artist) · \(tracks.count) track(s) · \(fmtBytes(tracks.reduce(0) { $0 + $1.size }))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+            .padding(16)
+            Divider()
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(tracks, id: \.id) { t in
+                        HStack(spacing: 10) {
+                            Text(t.trackNo > 0 ? (t.discNo > 1 ? "\(t.discNo)-\(t.trackNo)" : "\(t.trackNo)") : "—")
+                                .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                                .frame(width: 34, alignment: .trailing)
+                            Text(t.title).lineLimit(1)
+                            Spacer()
+                            Text("\(fmtDur(t.duration)) · \(t.formatLabel)")
+                                .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                        }
+                        .padding(.vertical, 5).padding(.horizontal, 4)
+                        Divider().opacity(0.4)
+                    }
+                }
+                .padding(.horizontal, 12).padding(.vertical, 6)
+            }
+        }
+        .frame(width: 540, height: 520)
+    }
+}
+
 
 // MARK: - Runs
 

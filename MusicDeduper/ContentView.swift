@@ -47,6 +47,8 @@ struct ContentView: View {
             ServerFilesView(store: store)
         case .perfect:
             PerfectView(store: perfect)
+        case .library:
+            LibraryBrowserView()
         }
     }
 

@@ -32,9 +32,8 @@ struct MusicDeduperApp: App {
             CommandGroup(replacing: .appInfo) {
                 AboutMenuButton()
             }
-            // A "Library" menu for the three tool windows.
+            // Menu for the run/log tool windows (the Library browser is a main-window tab).
             CommandMenu("Library") {
-                LibraryMenuButton("Library Viewer", "libraryViewer", "l")
                 LibraryMenuButton("Runs", "runs", "r")
                 LibraryMenuButton("Logs", "logs", "g")
             }
@@ -52,9 +51,6 @@ struct MusicDeduperApp: App {
         }
         .windowResizability(.contentSize)
 
-        Window("Library Viewer", id: "libraryViewer") {
-            LibraryViewerView().environmentObject(perfect)
-        }
         Window("Runs", id: "runs") {
             RunsView().environmentObject(perfect)
         }

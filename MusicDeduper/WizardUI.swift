@@ -13,7 +13,7 @@ import UniformTypeIdentifiers
 // MARK: - Wizard steps
 
 enum WizardStep: Int, CaseIterable, Identifiable {
-    case source, review, cleanup, copy, browse, perfect
+    case source, review, cleanup, copy, browse, perfect, library
     var id: Int { rawValue }
     var title: String {
         switch self {
@@ -21,8 +21,9 @@ enum WizardStep: Int, CaseIterable, Identifiable {
         case .review:  return "Review"
         case .cleanup: return "Clean up"
         case .copy:    return "Copy"
-        case .browse:  return "Browse"
+        case .browse:  return "Manage"
         case .perfect: return "Perfect"
+        case .library: return "Library"
         }
     }
     var icon: String {
@@ -33,6 +34,7 @@ enum WizardStep: Int, CaseIterable, Identifiable {
         case .copy:    return "externaldrive.badge.icloud"
         case .browse:  return "externaldrive.connected.to.line.below"
         case .perfect: return "wand.and.stars"
+        case .library: return "music.note.list"
         }
     }
 }
@@ -49,13 +51,15 @@ struct StepBar: View {
     var body: some View {
         VStack(spacing: 9) {
             HStack(spacing: 0) {
+                topChip("Library", "music.note.list", active: step == .library) { step = .library }
+                pipe()
                 topChip("Perfect", "wand.and.stars", active: step == .perfect) { step = .perfect }
                 pipe()
                 topChip("Transfer", "arrow.right.doc.on.clipboard", active: inTransfer) {
                     step = (hasScan && step == .review) ? .copy : .source
                 }
                 pipe()
-                topChip("Browse", "externaldrive.connected.to.line.below", active: step == .browse) { step = .browse }
+                topChip("Manage", "externaldrive.connected.to.line.below", active: step == .browse) { step = .browse }
             }
             if inTransfer {
                 HStack(spacing: 0) {
