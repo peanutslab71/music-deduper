@@ -128,36 +128,63 @@ struct LibraryBrowserView: View {
     }
     private func open(_ u: URL) { root = u; savedRoot = u.path; albums = []; fileCount = 0; search = ""; load() }
 
-    /// Fast: enumerate the tree and group by folder — NO per-file reads. The album /
-    /// artist names come from the folder structure. Tags are read only when an album
-    /// is opened (see LibraryAlbumSheet), and concurrently at that.
+    /// List one folder: its audio files and its sub-folders (one SMB round-trip).
+    nonisolated private static func listDir(_ dir: URL) -> (files: [URL], subs: [URL]) {
+        var files: [URL] = [], subs: [URL] = []
+        guard let items = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+            return ([], [])
+        }
+        for u in items {
+            if u.lastPathComponent == "Music Librarian Quarantine" { continue }
+            let isDir = (try? u.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+            if isDir { subs.append(u) } else if PerfectStore.isAudio(u) { files.append(u) }
+        }
+        return (files, subs)
+    }
+
+    /// Build sorted albums from the discovered folders → files map.
+    nonisolated private static func buildAlbums(_ byDir: [String: [URL]]) -> [LibAlbum] {
+        byDir.map { (dir, urls) -> LibAlbum in
+            let dirURL = URL(fileURLWithPath: dir)
+            let files = urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            return LibAlbum(id: dir, artist: dirURL.deletingLastPathComponent().lastPathComponent,
+                            album: dirURL.lastPathComponent, dir: dirURL, files: files)
+        }
+        .sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+    }
+
+    /// Walk the tree with CONCURRENT folder listings (SMB round-trips overlap) and
+    /// publish albums PROGRESSIVELY as they're found — no per-file reads, so the grid
+    /// fills in at listing speed instead of waiting for a serial depth-first walk.
     private func load() {
         guard let root else { return }
-        loading = true
+        loading = true; albums = []; fileCount = 0
         Task.detached(priority: .userInitiated) {
-            let fm = FileManager.default
             var byDir: [String: [URL]] = [:]
-            var order: [String] = []
             var count = 0
-            if let en = fm.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
-                for case let u as URL in en {
-                    guard PerfectStore.isAudio(u) else { continue }
-                    if PerfectStore.rel(u, root).hasPrefix("Music Librarian Quarantine") { continue }
-                    let dir = u.deletingLastPathComponent().path
-                    if byDir[dir] == nil { order.append(dir) }
-                    byDir[dir, default: []].append(u); count += 1
+            var queue = [root]
+            var firstPublished = false
+            while !queue.isEmpty {
+                let batch = Array(queue.prefix(16)); queue.removeFirst(batch.count)
+                await withTaskGroup(of: (files: [URL], subs: [URL]).self) { g in
+                    for d in batch { g.addTask { Self.listDir(d) } }
+                    for await r in g {
+                        for f in r.files {
+                            byDir[f.deletingLastPathComponent().path, default: []].append(f); count += 1
+                        }
+                        queue.append(contentsOf: r.subs)
+                    }
                 }
+                let snapshot = Self.buildAlbums(byDir); let c = count
+                let done = queue.isEmpty
+                await MainActor.run {
+                    albums = snapshot; fileCount = c
+                    if !firstPublished || done { loading = false }
+                }
+                firstPublished = true
             }
-            var built: [LibAlbum] = []
-            for dir in order {
-                let files = byDir[dir]!.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-                let dirURL = URL(fileURLWithPath: dir)
-                built.append(LibAlbum(id: dir, artist: dirURL.deletingLastPathComponent().lastPathComponent,
-                                      album: dirURL.lastPathComponent, dir: dirURL, files: files))
-            }
-            let sorted = built.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
-            let total = count
-            await MainActor.run { albums = sorted; fileCount = total; loading = false }
+            await MainActor.run { loading = false }
         }
     }
 }
