@@ -117,6 +117,59 @@ struct TrackProposal: Identifiable {
         t = t.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
         return t
     }
+
+    // What KIND of change each proposed field is — so the review UI can label it and
+    // quiet the trivial ones instead of treating a case fix like a real re-title.
+    var titleChangeKind: ChangeKind  { titleChanged  ? Self.classifyChange(curTitle,  newTitle)   : .none }
+    var artistChangeKind: ChangeKind { artistChanged ? Self.classifyChange(curArtist, newArtist)  : .none }
+    var albumChangeKind: ChangeKind  { albumChanged  ? Self.classifyChange(curAlbum,  chosenAlbum) : .none }
+
+    /// Aggressive fold for classification: typoFold + lowercase + drop punctuation +
+    /// collapse spaces. Two strings equal under this differ only cosmetically.
+    static func hardFold(_ s: String) -> String {
+        let t = typoFold(s).lowercased()
+        let scalars = t.unicodeScalars.map { sc -> Character in
+            (CharacterSet.alphanumerics.contains(sc) || sc == " ") ? Character(sc) : " "
+        }
+        return String(scalars).components(separatedBy: " ").filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    /// Classify how different `to` is from `from`.
+    static func classifyChange(_ from: String, _ to: String) -> ChangeKind {
+        if from == to { return .none }
+        let a = hardFold(from), b = hardFold(to)
+        if a == b { return .cosmetic }
+        if a.isEmpty || b.isEmpty { return .substantive }
+        if a.contains(b) || b.contains(a) { return .additive }        // one adds words/qualifiers
+        let ta = Set(a.split(separator: " ")), tb = Set(b.split(separator: " "))
+        let shared = ta.intersection(tb).count
+        let smaller = max(1, min(ta.count, tb.count))
+        return Double(shared) / Double(smaller) >= 0.6 ? .additive : .substantive
+    }
+}
+
+/// How different a proposed value is from the current one.
+enum ChangeKind: Equatable {
+    case none          // identical
+    case cosmetic      // same once case / punctuation / spacing are ignored
+    case additive      // one contains the other, or only qualifiers differ (adds detail)
+    case substantive   // genuinely different words
+
+    var label: String {
+        switch self {
+        case .none:        return ""
+        case .cosmetic:    return "case & punctuation"
+        case .additive:    return "adds detail"
+        case .substantive: return "different"
+        }
+    }
+    /// The most significant of several changes, for a one-line row summary.
+    static func strongest(_ kinds: [ChangeKind]) -> ChangeKind {
+        if kinds.contains(.substantive) { return .substantive }
+        if kinds.contains(.additive)    { return .additive }
+        if kinds.contains(.cosmetic)    { return .cosmetic }
+        return .none
+    }
 }
 
 // MARK: - Identifier

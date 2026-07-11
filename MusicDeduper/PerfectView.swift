@@ -726,6 +726,8 @@ struct PerfectView: View {
                             Text(p.newTitle.isEmpty ? p.curTitle : p.newTitle).font(.headline)
                             Text(String(format: "%.0f%% by sound", p.score * 100))
                                 .font(.caption2).foregroundStyle(p.score >= 0.9 ? .green : .orange)
+                            Spacer()
+                            changeKindTags(p)
                         }
                         scrubber(p.url)
                         if p.artistChanged {
@@ -976,6 +978,34 @@ struct PerfectView: View {
         }
     }
 
+    // Coloured labels telling you WHAT kind of change each field is, so you can
+    // scan an album and only stop on the ones that matter.
+    @ViewBuilder private func changeKindTags(_ p: TrackProposal) -> some View {
+        HStack(spacing: 4) {
+            if p.titleChanged  { changeKindTag("Title",  p.titleChangeKind) }
+            if p.artistChanged { changeKindTag("Artist", p.artistChangeKind) }
+            if p.albumChanged  { changeKindTag("Album",  p.albumChangeKind) }
+        }
+    }
+
+    @ViewBuilder private func changeKindTag(_ field: String, _ kind: ChangeKind) -> some View {
+        if kind != .none {
+            let colour: Color = {
+                switch kind {
+                case .cosmetic:    return .gray
+                case .additive:    return .blue
+                case .substantive: return .orange
+                case .none:        return .clear
+                }
+            }()
+            Text("\(field): \(kind.label)")
+                .font(.system(size: 9, weight: .semibold))
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(Capsule().fill(colour.opacity(0.16)))
+                .foregroundStyle(colour)
+        }
+    }
+
     private func proposalRow(_ p: TrackProposal) -> some View {
         HStack(alignment: .top, spacing: 8) {
             playButton(p.url)
@@ -985,6 +1015,7 @@ struct PerfectView: View {
                         .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
                     Text(String(format: "%.0f%%", p.score * 100)).font(.caption2)
                         .foregroundStyle(p.score >= 0.9 ? .green : .orange)
+                    changeKindTags(p)
                     if let rid = p.recordingID, let url = URL(string: "https://musicbrainz.org/recording/\(rid)") {
                         Link(destination: url) {
                             HStack(spacing: 2) { Text("source"); Image(systemName: "arrow.up.forward.square") }
