@@ -79,22 +79,35 @@ struct LibraryBrowserView: View {
 
     private var albumGrid: some View {
         ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 190), spacing: 18)], spacing: 20) {
-                ForEach(albums(), id: \.key) { entry in
-                    VStack(alignment: .leading, spacing: 6) {
-                        AlbumCover(key: entry.tracks.first?.relDir ?? entry.key.id,
-                                   sampleURL: entry.tracks.first?.url, foundMBID: nil, size: 170, corner: 8)
-                        Text(entry.key.album).font(.callout).fontWeight(.medium).lineLimit(1)
-                        Text("\(entry.key.artist) · \(entry.tracks.count) tracks")
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    .frame(width: 170, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture { selectedAlbum = entry.key }
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.grid.2x2").foregroundStyle(.purple)
+                    Text("\(albums().count) album(s)").fontWeight(.semibold)
+                    Text("click an album to see its tracks").font(.caption).foregroundStyle(.secondary)
+                }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 176, maximum: 210), spacing: 18)],
+                          alignment: .leading, spacing: 18) {
+                    ForEach(albums(), id: \.key) { entry in albumCard(entry) }
                 }
             }
-            .padding(18)
+            .padding(16)
         }
+    }
+
+    private func albumCard(_ entry: (key: AlbumKey, tracks: [Track])) -> some View {
+        Button { selectedAlbum = entry.key } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                AlbumCover(key: entry.tracks.first?.relDir ?? entry.key.id,
+                           sampleURL: entry.tracks.first?.url, foundMBID: nil, size: 176)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(entry.key.album).font(.subheadline).fontWeight(.medium).lineLimit(1)
+                    Text("\(entry.key.artist) · \(entry.tracks.count) track(s)").font(.caption)
+                        .foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            .frame(width: 176)
+        }
+        .buttonStyle(.plain)
     }
 
     private var filtered: [Track] {
@@ -157,10 +170,10 @@ struct LibraryAlbumSheet: View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 AlbumCover(key: tracks.first?.relDir ?? album.id, sampleURL: tracks.first?.url,
-                           foundMBID: nil, size: 64, corner: 8)
-                VStack(alignment: .leading, spacing: 2) {
+                           foundMBID: nil, size: 52, corner: 8)
+                VStack(alignment: .leading, spacing: 1) {
                     Text(album.album).font(.headline)
-                    Text("\(album.artist) · \(tracks.count) track(s) · \(fmtBytes(tracks.reduce(0) { $0 + $1.size }))")
+                    Text("\(album.artist) · \(tracks.count) track(s)")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -187,7 +200,7 @@ struct LibraryAlbumSheet: View {
                 .padding(.horizontal, 12).padding(.vertical, 6)
             }
         }
-        .frame(width: 540, height: 520)
+        .frame(width: 620, height: 560)
     }
 }
 
