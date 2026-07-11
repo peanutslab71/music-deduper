@@ -360,6 +360,9 @@ actor MusicBrainzClient {
     }()
     private let userAgent = "MusicDeduper ( neil.cottyincar@gmail.com )"
     private let discogsUA = "MusicDeduper/1.4 +https://github.com/peanutslab71/music-deduper"
+    // Optional Discogs personal token (from Secrets.xcconfig). Present → 60/min
+    // and authenticated; blank → 25/min unauthenticated.
+    private let discogsToken = (Bundle.main.object(forInfoDictionaryKey: "DISCOGS_TOKEN") as? String) ?? ""
     private var workCache: [String: (composer: String?, lyricist: String?)] = [:]
     private var releaseCache: [String: (label: String?, catalog: String?, date: String?, discogs: String?)] = [:]
     private var discogsCache: [String: DiscogsRelease?] = [:]
@@ -422,11 +425,15 @@ actor MusicBrainzClient {
 
     private func cachedDiscogs(_ id: String) async -> DiscogsRelease? {
         if let c = discogsCache[id] { return c }
-        try? await Task.sleep(nanoseconds: 1_100_000_000)   // courtesy delay (25/min unauth)
+        // 60/min with a token (~1s), 25/min without (~2.5s) — respect each limit.
+        try? await Task.sleep(nanoseconds: discogsToken.isEmpty ? 2_500_000_000 : 1_050_000_000)
         var out: DiscogsRelease? = nil
         if let url = URL(string: "https://api.discogs.com/releases/\(id)") {
             var req = URLRequest(url: url)
             req.setValue(discogsUA, forHTTPHeaderField: "User-Agent")
+            if !discogsToken.isEmpty {
+                req.setValue("Discogs token=\(discogsToken)", forHTTPHeaderField: "Authorization")
+            }
             if let (data, resp) = try? await session.data(for: req),
                (resp as? HTTPURLResponse)?.statusCode == 200 {
                 out = try? JSONDecoder().decode(DiscogsRelease.self, from: data)

@@ -14,5 +14,8 @@
 	<!-- AcoustID key for Perfect's identify feature, injected from Secrets.xcconfig -->
 	<key>ACOUSTID_API_KEY</key>
 	<string>$(ACOUSTID_API_KEY)</string>
+	<!-- Optional Discogs token for faster credit lookups, injected from Secrets.xcconfig -->
+	<key>DISCOGS_TOKEN</key>
+	<string>$(DISCOGS_TOKEN)</string>
 </dict>
 </plist>
