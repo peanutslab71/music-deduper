@@ -318,6 +318,13 @@ final class PerfectStore: ObservableObject {
     @Published var enrichDone = 0                 // running count of tracks looked up
     @Published var didIdentify = false       // identify pass has completed at least once
     @Published var enriched = false          // credits pass has run (or was skipped)
+
+    // organise (rebuild the clean Album Artist/Album/## Title tree from tags)
+    @Published var organisePlans: [OrganisePlan] = []
+    @Published var organised = false          // organise plan has been built at least once
+    @Published var organising = false
+    @Published var organiseProgress = ""
+    @Published var composerFirstClassical = false   // classical → Composer-first folders
     // category-level toggles (the mockup's bulk on/off buttons)
     @Published var applyNames = true       // identify: artist/title/album corrections
     @Published var applyArtwork = true     // add missing cover art
@@ -972,6 +979,131 @@ final class PerfectStore: ObservableObject {
         enriching = false; enrichProgress = ""; enriched = true
         let filled = proposals.filter { !($0.enrichment?.isEmpty ?? true) }.count
         if !cancelled { status = "Looked up credits — \(filled) track(s) enriched." }
+    }
+
+    // MARK: Organise (rebuild the clean tree from tags)
+
+    /// Build the placement plan — read each track's tags (overlaying any accepted
+    /// identify/credits corrections that aren't written to disk yet) and ask
+    /// Organiser where each file should live. Preview only; nothing moves.
+    func organise() {
+        guard let root else { return }
+        organising = true; organiseProgress = "Reading tags…"; status = "Planning the clean tree…"
+        // in-memory corrections not yet on disk, keyed by root-relative path
+        let corrections: [String: (artist: String, album: String, title: String)] =
+            Dictionary(proposals.filter { $0.accepted }.map { p in
+                (p.relPath, (p.newArtist.isEmpty ? p.curArtist : p.newArtist,
+                             p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum,
+                             p.newTitle.isEmpty ? p.curTitle : p.newTitle))
+            }, uniquingKeysWith: { a, _ in a })
+        let composerFirst = composerFirstClassical
+        Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            var inputs: [OrganiseInput] = []
+            if let en = fm.enumerator(at: root, includingPropertiesForKeys: nil) {
+                for case let url as URL in en {
+                    guard Self.isAudio(url) else { continue }
+                    let rel = Self.rel(url, root)
+                    if rel.hasPrefix("Music Librarian Quarantine") { continue }
+                    let c = corrections[rel]
+                    let artist = c?.artist ?? (Self.readField(url, "artist") ?? "")
+                    let album  = c?.album  ?? (Self.readField(url, "album")  ?? "")
+                    let title  = c?.title  ?? (Self.readField(url, "title")  ?? "")
+                    let aa     = Self.readField(url, "albumartist") ?? ""
+                    let track  = Int((Self.readField(url, "track") ?? "").prefix(while: { $0.isNumber })) ?? 0
+                    let disc   = Int((Self.readField(url, "disc")  ?? "").prefix(while: { $0.isNumber })) ?? 0
+                    let composer = Self.readField(url, "composer") ?? ""
+                    inputs.append(OrganiseInput(rel: rel, ext: url.pathExtension.lowercased(),
+                        artist: artist, albumArtist: aa, album: album, title: title,
+                        trackNo: track, discNo: disc, isClassical: false, composer: composer))
+                }
+            }
+            let plans = Organiser.plan(inputs, composerFirstForClassical: composerFirst)
+            await self.finishOrganise(plans)
+        }
+    }
+
+    private func finishOrganise(_ plans: [OrganisePlan]) {
+        organising = false; organiseProgress = ""; organised = true; organisePlans = plans
+        let moves = plans.filter { $0.targetRel != nil && $0.targetRel != $0.rel }.count
+        let flagged = plans.filter { $0.targetRel == nil }.count
+        status = "Clean tree planned — \(moves) file(s) to reorganise, \(flagged) flagged."
+    }
+
+    /// Apply the organise plan: write the guaranteed tags, then move each file to
+    /// its clean path. Recorded to run.json (ops + tagEdits) so Undo reverses it.
+    func applyOrganise() {
+        guard let root else { return }
+        let plans = organisePlans.filter { $0.targetRel != nil && $0.targetRel != $0.rel }
+        guard !plans.isEmpty else { return }
+        busy = true; committing = true; commitPhase = "Reorganising files…"; commitDone = 0
+        commitTotal = plans.count; cancelRequested = false
+        let box = cancelFlag; box.cancelled = false
+        Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
+            let qRel = "Music Librarian Quarantine/\(stamp)"
+            let quarantine = root.appendingPathComponent(qRel, isDirectory: true)
+            try? fm.createDirectory(at: quarantine, withIntermediateDirectories: true)
+            var ops: [(from: String, to: String)] = []
+            var tagEdits: [(rel: String, field: String, old: String)] = []
+            var log = "Music Librarian — organise \(Date())\nLibrary: \(root.path)\n\n"
+            var done = 0
+            for p in plans {
+                if box.cancelled { break }
+                guard let target = p.targetRel else { continue }
+                let src = root.appendingPathComponent(p.rel)
+                guard fm.fileExists(atPath: src.path) else { continue }
+                // guaranteed tags (track#, album-artist) — write while at the source
+                for (field, value) in p.tagWrites {
+                    let old = Self.readField(src, field) ?? ""
+                    if old == value { continue }
+                    do { try Self.writeField(src, field, to: value)
+                         tagEdits.append((p.rel, field, old))
+                         log += "TAG: \(p.rel)  \(field) '\(old)' → '\(value)'\n"
+                    } catch { log += "FAILED tag \(p.rel) \(field): \(error.localizedDescription)\n" }
+                }
+                // move to the clean path (never overwrite an existing target)
+                let dst = root.appendingPathComponent(target)
+                if fm.fileExists(atPath: dst.path) {
+                    log += "SKIP (target exists): \(target)\n"
+                } else {
+                    do {
+                        try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try fm.moveItem(at: src, to: dst)
+                        ops.append((p.rel, target))
+                        log += "MOVED: \(p.rel) → \(target)\n"
+                    } catch { log += "FAILED move \(p.rel): \(error.localizedDescription)\n" }
+                }
+                done += 1
+                if done % 5 == 0 { await self.setCommitProgress("Reorganising files", done: done) }
+            }
+            let total = ops.count + tagEdits.count
+            log += "\n\(total) change(s)\(box.cancelled ? " (stopped early)" : "").\n"
+            try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
+            let record: [String: Any] = [
+                "date": ISO8601DateFormatter().string(from: Date()),
+                "root": root.path,
+                "summary": "Reorganised \(ops.count) file(s)",
+                "ops": ops.map { ["from": $0.from, "to": $0.to] },
+                "tagEdits": tagEdits.map { ["rel": $0.rel, "field": $0.field, "old": $0.old] },
+                "perfEdits": [], "artEdits": [], "artPromotions": [], "artReplacements": [],
+            ]
+            if total > 0, let data = try? JSONSerialization.data(withJSONObject: record, options: .prettyPrinted) {
+                try? data.write(to: quarantine.appendingPathComponent("run.json"))
+            } else { try? fm.removeItem(at: quarantine) }
+            await self.finishOrganiseApply(quarantine: quarantine, moved: ops.count)
+        }
+    }
+
+    private func finishOrganiseApply(quarantine: URL, moved: Int) {
+        busy = false; committing = false; cancelRequested = false
+        commitPhase = ""; commitDone = 0; commitTotal = 0
+        lastQuarantine = quarantine
+        organisePlans.removeAll(); organised = false
+        lastRunSummary = "Reorganised \(moved) file(s)."
+        status = lastRunSummary ?? status
+        loadRuns()
     }
 
     func commit() {

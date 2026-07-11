@@ -440,6 +440,7 @@ struct PerfectView: View {
                     emptyStageNote
                 }
                 if step == 4 { reviewQueueSection }   // the decision queue only on Review
+                if step == 4 { organiseSection }      // rebuild the clean tree
                 albumGrid
             }
             .padding(16)
@@ -455,6 +456,75 @@ struct PerfectView: View {
         case 3: return all.filter { $0.credits || $0.artwork }       // credits & art added
         default: return all
         }
+    }
+
+    // Rebuild the clean Album Artist / Album / ## Title tree from tags.
+    @ViewBuilder private var organiseSection: some View {
+        let moves = store.organisePlans.filter { $0.targetRel != nil && $0.targetRel != $0.rel }
+        let flagged = store.organisePlans.filter { $0.targetRel == nil }
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "folder").foregroundStyle(.purple)
+                Text("Organise into a clean tree").fontWeight(.semibold)
+                Text("Album Artist / Album / ## Title").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Toggle("Composer-first for classical", isOn: $store.composerFirstClassical)
+                    .toggleStyle(.checkbox).controlSize(.small)
+                    .onChange(of: store.composerFirstClassical) { _ in
+                        if !store.organisePlans.isEmpty { store.organise() }   // re-plan on toggle
+                    }
+            }
+            if store.organising {
+                HStack(spacing: 8) { ProgressView().controlSize(.small)
+                    Text(store.organiseProgress.isEmpty ? "Planning…" : store.organiseProgress)
+                        .font(.caption).foregroundStyle(.secondary) }
+            } else if store.organisePlans.isEmpty {
+                HStack(spacing: 10) {
+                    Button { store.organise() } label: { Label("Preview clean tree", systemImage: "eye") }
+                        .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple).disabled(store.busy)
+                    Text("See exactly where every file would go — nothing moves until you apply.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                Text("\(moves.count) file(s) to reorganise · \(flagged.count) left in place (couldn't place from tags)")
+                    .font(.caption).foregroundStyle(.secondary)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(moves.prefix(60)) { p in
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(p.rel).font(.system(size: 11)).foregroundStyle(.secondary)
+                                    .lineLimit(1).truncationMode(.middle)
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.turn.down.right").font(.system(size: 9)).foregroundStyle(.tertiary)
+                                    Text(p.targetRel ?? "").font(.system(size: 11, weight: .medium))
+                                        .lineLimit(1).truncationMode(.middle)
+                                    if !p.tagWrites.isEmpty {
+                                        Text("+\(p.tagWrites.map { $0.field }.joined(separator: ","))")
+                                            .font(.system(size: 9, design: .monospaced)).foregroundStyle(.purple)
+                                    }
+                                }
+                            }
+                        }
+                        if moves.count > 60 {
+                            Text("…and \(moves.count - 60) more").font(.caption2).foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+                .frame(maxHeight: 240)
+                HStack {
+                    Button { store.organise() } label: { Label("Re-plan", systemImage: "arrow.clockwise") }
+                        .controlSize(.small).disabled(store.busy)
+                    Spacer()
+                    Button { store.applyOrganise() } label: {
+                        Label("Organise \(moves.count) file(s)", systemImage: "checkmark.circle.fill")
+                    }
+                    .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
+                    .disabled(store.busy || moves.isEmpty)
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.purple.opacity(0.06)))
     }
 
     // Albums whose art couldn't be resolved during Apply — pick a cover by hand.
