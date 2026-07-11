@@ -37,7 +37,8 @@ enum Organiser {
 
     /// Build a placement plan for a whole library. `composerFirstForClassical`
     /// switches classical tracks to a Composer-first top folder.
-    static func plan(_ inputs: [OrganiseInput], composerFirstForClassical: Bool = false) -> [OrganisePlan] {
+    static func plan(_ inputs: [OrganiseInput], composerFirstForClassical: Bool = false,
+                     renumber: Bool = false) -> [OrganisePlan] {
         // Group by the ARTIST FOLDER + the disc-stripped album, so the two discs of a
         // set (which live in separate "[Disc 1]"/"[Disc 2]" folders) land in ONE group
         // — that's what lets multi-disc numbering and one shared cover work — while
@@ -67,17 +68,44 @@ enum Organiser {
                 return false
             }
 
+            // Renumber: within each disc, assign a clean sequential 1…N by the tracks'
+            // current order (existing number → leading filename number → name). Preview
+            // shows the result before it's applied, and it's reversible.
+            var forced: [String: Int] = [:]
+            if renumber {
+                var byDisc: [Int: [OrganiseInput]] = [:]
+                for t in tracks { byDisc[effectiveDisc(t), default: []].append(t) }
+                for (_, discTracks) in byDisc {
+                    let sorted = discTracks.sorted { orderKey($0) < orderKey($1) }
+                    for (i, t) in sorted.enumerated() { forced[t.rel] = i + 1 }
+                }
+            }
+
             for t in tracks {
                 plans.append(planOne(t, groupAlbumArtist: groupAlbumArtist,
                                      multiDisc: multiDisc,
-                                     composerFirst: composerFirstForClassical))
+                                     composerFirst: composerFirstForClassical,
+                                     forcedTrackNo: forced[t.rel]))
             }
         }
         return plans.sorted { $0.rel < $1.rel }
     }
 
+    /// The disc a track belongs to (tag → album-name suffix → 1).
+    private static func effectiveDisc(_ t: OrganiseInput) -> Int {
+        if t.discNo > 0 { return t.discNo }
+        if let d = stripDiscSuffix(t.album).disc { return d }
+        return 1
+    }
+    /// Sort key for renumbering: numbered tracks first in number order, then by name.
+    private static func orderKey(_ t: OrganiseInput) -> (Int, String) {
+        let n = t.trackNo > 0 ? t.trackNo : (leadingNumber(t.rel) ?? Int.max)
+        return (n, (t.rel as NSString).lastPathComponent.lowercased())
+    }
+
     private static func planOne(_ t: OrganiseInput, groupAlbumArtist: String,
-                                multiDisc: Bool, composerFirst: Bool) -> OrganisePlan {
+                                multiDisc: Bool, composerFirst: Bool,
+                                forcedTrackNo: Int? = nil) -> OrganisePlan {
         var writes: [(String, String)] = []
 
         // Can't place a file with no album or no artist of any kind — flag, leave put.
@@ -100,10 +128,13 @@ enum Organiser {
         let discNo = t.discNo > 0 ? t.discNo : (discFromName ?? 0)
         if t.discNo == 0, let d = discFromName { writes.append(("disc", String(d))) }
 
-        // Track number: prefer the tag, else the leading number in the filename.
+        // Track number: a forced (renumber) value wins; else the tag; else the leading
+        // number in the filename. Write the tag whenever the final number differs from
+        // what's on the file (guarantees the tag AND applies a renumber).
         var trackNo = t.trackNo
         if trackNo == 0, let n = leadingNumber(t.rel) { trackNo = n }
-        if t.trackNo == 0 && trackNo > 0 { writes.append(("track", String(trackNo))) }   // guarantee the tag
+        if let forced = forcedTrackNo { trackNo = forced }
+        if trackNo > 0 && trackNo != t.trackNo { writes.append(("track", String(trackNo))) }
 
         // Top folder: Composer-first only for classical when the toggle is on.
         let top = (composerFirst && t.isClassical && !t.composer.isEmpty) ? t.composer : albumArtist

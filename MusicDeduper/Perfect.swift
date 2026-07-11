@@ -388,6 +388,7 @@ final class PerfectStore: ObservableObject {
     @Published var organising = false
     @Published var organiseProgress = ""
     @Published var composerFirstClassical = false   // classical → Composer-first folders
+    @Published var renumberTracks = false           // assign a clean 1…N per album/disc
     // category-level toggles (the mockup's bulk on/off buttons)
     @Published var applyNames = true       // identify: artist/title/album corrections
     @Published var applyArtwork = true     // add missing cover art
@@ -1074,6 +1075,7 @@ final class PerfectStore: ObservableObject {
                              p.newTitle.isEmpty ? p.curTitle : p.newTitle))
             }, uniquingKeysWith: { a, _ in a })
         let composerFirst = composerFirstClassical
+        let renumber = renumberTracks
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var inputs: [OrganiseInput] = []
@@ -1095,7 +1097,7 @@ final class PerfectStore: ObservableObject {
                         trackNo: track, discNo: disc, isClassical: false, composer: composer))
                 }
             }
-            let plans = Organiser.plan(inputs, composerFirstForClassical: composerFirst)
+            let plans = Organiser.plan(inputs, composerFirstForClassical: composerFirst, renumber: renumber)
             await self.finishOrganise(plans)
         }
     }

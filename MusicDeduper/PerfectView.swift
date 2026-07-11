@@ -528,6 +528,12 @@ struct PerfectView: View {
                 Text("Clean tree").fontWeight(.semibold)
                 Text("Album Artist / Album / ## Title").font(.caption).foregroundStyle(.secondary)
                 Spacer()
+                Toggle("Renumber 1…N per album", isOn: $store.renumberTracks)
+                    .toggleStyle(.checkbox).controlSize(.small)
+                    .help("Assign clean sequential track numbers within each album/disc. Best on complete albums; preview shows the result and it's reversible.")
+                    .onChange(of: store.renumberTracks) { _ in
+                        if !store.organisePlans.isEmpty { store.organise() }
+                    }
                 Toggle("Composer-first for classical", isOn: $store.composerFirstClassical)
                     .toggleStyle(.checkbox).controlSize(.small)
                     .onChange(of: store.composerFirstClassical) { _ in
