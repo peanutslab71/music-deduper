@@ -63,10 +63,17 @@ struct PerfectView: View {
     // so two stacked sheets meant Apply silently never opened — hence a single enum.
     @State private var activeSheet: PerfectSheet? = nil
 
-    enum PerfectSheet: Identifiable {
+    enum PerfectSheet: Identifiable, Equatable {
         case apply                 // the final "confirm before commit" dialog
         case album(String)         // an album whose tracks are shown in a dialog
-        var id: String { switch self { case .apply: return "apply"; case .album(let a): return "album:\(a)" } }
+        case applying              // live progress while a commit/organise/dedup runs
+        var id: String {
+            switch self {
+            case .apply: return "apply"
+            case .album(let a): return "album:\(a)"
+            case .applying: return "applying"
+            }
+        }
     }
 
     // The step the user is on. It NEVER advances on its own — running a pass
@@ -106,9 +113,15 @@ struct PerfectView: View {
             switch sheet {
             case .apply: applyConfirmSheet
             case .album(let id): albumSheetView(id)
+            case .applying: applyingSheet
             }
         }
         .onChange(of: store.root) { _ in currentStep = 1 }   // new library → back to Scan
+        // show/hide the progress dialog as any apply (commit/organise/dedup) runs
+        .onChange(of: store.committing) { running in
+            if running { activeSheet = .applying }
+            else if activeSheet == .applying { activeSheet = nil }
+        }
         .overlay(alignment: .top) {
             if savedFlash {
                 Label("Saved", systemImage: "checkmark.circle.fill")
@@ -121,46 +134,41 @@ struct PerfectView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .overlay { if store.committing { applyingOverlay } }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// A modal-feeling progress card shown while a commit runs, so the apply is
-    /// never invisible and can always be stopped. Not a .sheet (only the last
-    /// .sheet on a view wins) — an overlay that dims the screen instead.
-    private var applyingOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.35).ignoresSafeArea()
-            VStack(spacing: 16) {
-                Image(systemName: "wand.and.stars")
-                    .font(.system(size: 30, weight: .light)).foregroundStyle(.purple)
-                Text("Applying your changes").font(.headline)
-                if store.commitTotal > 0 {
-                    ProgressView(value: Double(min(store.commitDone, store.commitTotal)),
-                                 total: Double(store.commitTotal))
-                        .frame(width: 300)
-                    Text("\(min(store.commitDone, store.commitTotal)) of \(store.commitTotal)")
-                        .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-                } else {
-                    ProgressView().frame(width: 300)
-                }
-                Text(store.commitPhase.isEmpty ? "Working…" : store.commitPhase)
-                    .font(.callout).foregroundStyle(.secondary)
-                    .lineLimit(1).truncationMode(.middle).frame(width: 320)
-                Text("Everything is written to a recoverable quarantine — you can Undo the whole run afterwards.")
-                    .font(.caption2).foregroundStyle(.tertiary)
-                    .multilineTextAlignment(.center).frame(width: 320)
-                Button(role: .cancel) { store.cancel() } label: {
-                    Label("Cancel", systemImage: "stop.fill").frame(minWidth: 120)
-                }
-                .controlSize(.large)
-                .disabled(store.cancelRequested)
+    /// A normal progress dialog shown while a commit/organise/dedup runs, so the
+    /// apply is never invisible and can always be stopped. A proper sheet (not a
+    /// screen-dimming overlay).
+    private var applyingSheet: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 30, weight: .light)).foregroundStyle(.purple)
+            Text("Applying your changes").font(.headline)
+            if store.commitTotal > 0 {
+                ProgressView(value: Double(min(store.commitDone, store.commitTotal)),
+                             total: Double(store.commitTotal))
+                    .frame(width: 300)
+                Text("\(min(store.commitDone, store.commitTotal)) of \(store.commitTotal)")
+                    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+            } else {
+                ProgressView().frame(width: 300)
             }
-            .padding(28)
-            .background(RoundedRectangle(cornerRadius: 16).fill(.regularMaterial))
-            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.secondary.opacity(0.2)))
-            .shadow(radius: 30)
+            Text(store.commitPhase.isEmpty ? "Working…" : store.commitPhase)
+                .font(.callout).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.middle).frame(width: 320)
+            Text("Everything is written to a recoverable quarantine — you can Undo the whole run afterwards.")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center).frame(width: 320)
+            Button(role: .cancel) { store.cancel() } label: {
+                Label("Cancel", systemImage: "stop.fill").frame(minWidth: 120)
+            }
+            .controlSize(.large)
+            .disabled(store.cancelRequested)
         }
+        .padding(28)
+        .frame(width: 380)
+        .interactiveDismissDisabled()   // must use Cancel, not Escape/click-away
     }
 
     // MARK: header
