@@ -1024,21 +1024,20 @@ struct PerfectView: View {
                             changeKindTags(p)
                         }
                         scrubber(p.url)
+                        // who/what this track is — so a decision is possible even with no cover
+                        Text("\(p.newArtist.isEmpty ? p.curArtist : p.newArtist) · \(p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum)")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        // before → after for every field that actually changes
+                        VStack(alignment: .leading, spacing: 5) {
+                            if p.titleChanged  { changeRow("Title",  p.curTitle,  p.newTitle) }
+                            if p.artistChanged { changeRow("Artist", p.curArtist, p.newArtist) }
+                            if p.albumChanged  { changeRow("Album",  p.curAlbum,  p.chosenAlbum) }
+                        }
+                        .padding(.vertical, 2)
                         if p.artistChanged {
-                            HStack(spacing: 8) {
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text("YOUR TAG").font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
-                                    Text(p.curArtist).font(.callout).foregroundStyle(.secondary)
-                                }
-                                Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.tertiary)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text("PROPOSED").font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
-                                    Text(p.newArtist).font(.callout).fontWeight(.medium)
-                                }
-                            }
                             Text("A genuine artist change — check it's the same act, not a different one, before accepting.")
                                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                        } else {
+                        } else if !p.titleChanged && !p.albumChanged {
                             Text("Low-confidence match (\(String(format: "%.0f%%", p.score * 100))) — worth a glance before applying.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
@@ -1323,6 +1322,20 @@ struct PerfectView: View {
 
     // Coloured labels telling you WHAT kind of change each field is, so you can
     // scan an album and only stop on the ones that matter.
+    /// One "FIELD  old → new" row for the review card, so the exact before/after
+    /// is visible (not just that "something" changed).
+    private func changeRow(_ label: String, _ old: String, _ new: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label.uppercased()).font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
+                .frame(width: 44, alignment: .leading)
+            Text(old.isEmpty ? "(blank)" : old).font(.callout).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.middle)
+            Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.tertiary)
+            Text(new).font(.callout).fontWeight(.medium)
+                .lineLimit(1).truncationMode(.middle)
+        }
+    }
+
     @ViewBuilder private func changeKindTags(_ p: TrackProposal) -> some View {
         HStack(spacing: 4) {
             if p.titleChanged  { changeKindTag("Title",  p.titleChangeKind) }
