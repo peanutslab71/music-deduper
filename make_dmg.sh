@@ -1,16 +1,16 @@
 #!/bin/bash
-# Package MusicDeduper.app into a clean, drag-to-Applications DMG.
-# Usage:  ./make_dmg.sh "/path/to/MusicDeduper.app"
+# Package MusicLibrarian.app into a clean, drag-to-Applications DMG.
+# Usage:  ./make_dmg.sh "/path/to/MusicLibrarian.app"
 set -euo pipefail
 
 APP="${1:-}"
 if [ -z "$APP" ] || [ ! -d "$APP" ]; then
-  echo "Usage: $0 /path/to/MusicDeduper.app"
+  echo "Usage: $0 /path/to/MusicLibrarian.app"
   echo "  (export the notarized .app from Xcode first — see DISTRIBUTION.md)"
   exit 1
 fi
 
-NAME="Music Deduper"
+NAME="Music Librarian"
 DMG="$NAME.dmg"
 STAGE="$(mktemp -d)"
 

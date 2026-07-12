@@ -1,6 +1,6 @@
 //
 //  PerfectView.swift
-//  MusicDeduper
+//  MusicLibrarian
 //
 //  The Perfect screen: choose a library → diagnose → review → commit.
 //  Phase 1 slice: junk, empty folders, DRM. Review-gated, quarantine on commit.

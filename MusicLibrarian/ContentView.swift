@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  MusicDeduper
+//  MusicLibrarian
 //
 //  Wizard shell: Source → Review → Clean up → Copy.
 //  Step views live in WizardUI.swift; scanning/copy logic in DedupStore.

@@ -1,6 +1,6 @@
 //
 //  Identify.swift
-//  MusicDeduper
+//  MusicLibrarian
 //
 //  Perfect — identify tracks acoustically and propose the correct names.
 //  Pipeline: Chromaprint fingerprint (ChromaSwift) → AcoustID lookup → the
@@ -258,7 +258,7 @@ struct Identifier {
             "client=\(apiKey)&duration=\(duration)&meta=recordings+releasegroups"
             + "&fingerprint=\(fingerprint.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? fingerprint)"
         var req = URLRequest(url: comps.url!)
-        req.setValue("MusicDeduper ( neil.cottyincar@gmail.com )", forHTTPHeaderField: "User-Agent")
+        req.setValue("MusicLibrarian ( neil.cottyincar@gmail.com )", forHTTPHeaderField: "User-Agent")
 
         let data: Data
         do { (data, _) = try await session.data(for: req) }
@@ -441,8 +441,8 @@ actor MusicBrainzClient {
         c.waitsForConnectivity = false
         return URLSession(configuration: c)
     }()
-    private let userAgent = "MusicDeduper ( neil.cottyincar@gmail.com )"
-    private let discogsUA = "MusicDeduper/1.4 +https://github.com/peanutslab71/music-deduper"
+    private let userAgent = "MusicLibrarian ( neil.cottyincar@gmail.com )"
+    private let discogsUA = "MusicLibrarian/1.4 +https://github.com/peanutslab71/music-deduper"
     // Optional Discogs personal token (from Secrets.xcconfig). Present → 60/min
     // and authenticated; blank → 25/min unauthenticated.
     private let discogsToken = (Bundle.main.object(forInfoDictionaryKey: "DISCOGS_TOKEN") as? String) ?? ""
@@ -690,7 +690,7 @@ actor CoverArtClient {
         // 500px front cover; the archive redirects to storage, URLSession follows it
         if let url = URL(string: "https://coverartarchive.org/release/\(releaseMBID)/front-1200") {
             var req = URLRequest(url: url)
-            req.setValue("MusicDeduper ( neil.cottyincar@gmail.com )", forHTTPHeaderField: "User-Agent")
+            req.setValue("MusicLibrarian ( neil.cottyincar@gmail.com )", forHTTPHeaderField: "User-Agent")
             if let (data, resp) = try? await session.data(for: req),
                (resp as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty {
                 result = data

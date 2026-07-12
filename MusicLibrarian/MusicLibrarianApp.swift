@@ -1,6 +1,6 @@
 //
-//  MusicDeduperApp.swift
-//  MusicDeduper
+//  MusicLibrarianApp.swift
+//  MusicLibrarian
 //
 //  App entry point + custom About window.
 //
@@ -8,12 +8,19 @@
 import SwiftUI
 
 @main
-struct MusicDeduperApp: App {
+struct MusicLibrarianApp: App {
     // One shared Perfect session for the whole app, so the Library / Runs / Logs
     // windows see the same library and run history as the main window.
     @StateObject private var perfect = PerfectStore()
 
     init() {
+        // One-time carry-over of saved state from the app's previous bundle id
+        // (com.local.musicdeduper). We changed the id to com.local.musiclibrarian,
+        // which gives the app a fresh preferences store — without this the
+        // remembered libraries and the Runs list would come up empty after the
+        // rename. Copies only the keys that matter; window frames etc. reset.
+        migrateLegacyDefaults()
+
         // Opt the app out of App Nap entirely. App Nap throttles disk/network
         // I/O when the window is covered or minimized, and there are documented
         // cases (Apple dev forums #679178) of it engaging despite a held
@@ -24,7 +31,7 @@ struct MusicDeduperApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Music Library Deduper") {
+        WindowGroup("Music Librarian") {
             ContentView().environmentObject(perfect)
         }
         .windowResizability(.contentMinSize)
@@ -38,7 +45,7 @@ struct MusicDeduperApp: App {
                 LibraryMenuButton("Logs", "logs", "g")
             }
             CommandGroup(replacing: .help) {
-                Button("Music Deduper Help") {
+                Button("Music Librarian Help") {
                     NSWorkspace.shared.open(
                         URL(string: "https://github.com/peanutslab71/music-deduper/blob/main/HELP.md")!)
                 }
@@ -46,7 +53,7 @@ struct MusicDeduperApp: App {
             }
         }
 
-        Window("About Music Deduper", id: "about") {
+        Window("About Music Librarian", id: "about") {
             AboutView()
         }
         .windowResizability(.contentSize)
@@ -75,7 +82,31 @@ private struct LibraryMenuButton: View {
 private struct AboutMenuButton: View {
     @Environment(\.openWindow) private var openWindow
     var body: some View {
-        Button("About Music Deduper") { openWindow(id: "about") }
+        Button("About Music Librarian") { openWindow(id: "about") }
+    }
+}
+
+// MARK: - Legacy defaults migration (bundle id rename)
+
+/// Copy the still-relevant preferences from the app's old bundle id the first
+/// time this build runs, so the rename from "Music Deduper" doesn't lose the
+/// list of libraries the Runs/Logs windows scan. Runs a single time, then marks
+/// itself done. Purely additive — never overwrites anything already set.
+private func migrateLegacyDefaults() {
+    let ud = UserDefaults.standard
+    guard !ud.bool(forKey: "didMigrateFromMusicDeduper") else { return }
+    ud.set(true, forKey: "didMigrateFromMusicDeduper")
+    guard let legacy = UserDefaults(suiteName: "com.local.musicdeduper") else { return }
+
+    // The list of library roots the global Runs/Logs loader scans.
+    if ud.stringArray(forKey: PerfectStore.rootsKey) == nil,
+       let roots = legacy.stringArray(forKey: PerfectStore.rootsKey) {
+        ud.set(roots, forKey: PerfectStore.rootsKey)
+    }
+    // Last folder opened in the Manage/Library browser (also seeds Runs).
+    if ud.string(forKey: "libraryBrowserRoot") == nil,
+       let b = legacy.string(forKey: "libraryBrowserRoot") {
+        ud.set(b, forKey: "libraryBrowserRoot")
     }
 }
 
@@ -94,7 +125,7 @@ struct AboutView: View {
                 .resizable()
                 .frame(width: 76, height: 76)
 
-            Text("Music Deduper").font(.title2).fontWeight(.semibold)
+            Text("Music Librarian").font(.title2).fontWeight(.semibold)
             Text(version).font(.caption).foregroundStyle(.secondary)
 
             Text("by Neil Cotty")

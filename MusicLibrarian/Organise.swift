@@ -1,6 +1,6 @@
 //
 //  Organise.swift
-//  MusicDeduper
+//  MusicLibrarian
 //
 //  The Organise stage's brain: turn each track's TAGS into the gold-standard
 //  clean tree — Album Artist / Album / ## Title.ext — deriving Album Artist,

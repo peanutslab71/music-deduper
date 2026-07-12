@@ -1,6 +1,6 @@
 //
 //  Engine.swift
-//  MusicDeduper
+//  MusicLibrarian
 //
 //  Scanning, metadata (AVFoundation), duplicate clustering, keeper selection,
 //  and file operations (copy, Trash, permanent delete). No third-party deps.

@@ -1,6 +1,6 @@
 //
 //  WizardUI.swift
-//  MusicDeduper
+//  MusicLibrarian
 //
 //  The wizard chrome + step views: Source → Review → Clean up → Copy.
 //  Also the album-artwork cache and the copy-conflict panel.

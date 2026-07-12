@@ -1,6 +1,6 @@
 //
 //  ServerFiles.swift
-//  MusicDeduper
+//  MusicLibrarian
 //
 //  Two-pane file manager (v1.4). Each pane is a location — this Mac or an
 //  SMB server via the app's own network engine — so files can move
@@ -227,10 +227,10 @@ final class PaneModel: ObservableObject {
     }
 
     /// Everything File Commander changes gets a line in
-    /// ~/Library/Logs/MusicDeduper/commander.log — deletions especially.
+    /// ~/Library/Logs/MusicLibrarian/commander.log — deletions especially.
     static func log(_ s: String) {
         let dir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Logs/MusicDeduper", isDirectory: true)
+            .appendingPathComponent("Logs/MusicLibrarian", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("commander.log")
         if !FileManager.default.fileExists(atPath: url.path) {

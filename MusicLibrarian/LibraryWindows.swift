@@ -1,6 +1,6 @@
 //
 //  LibraryWindows.swift
-//  MusicDeduper
+//  MusicLibrarian
 //
 //  The "Library" menu's three tool windows: Library Viewer (browse the library
 //  with tags + the built-in player), Runs (every applied run, revert any), and

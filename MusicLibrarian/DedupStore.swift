@@ -1,6 +1,6 @@
 //
 //  DedupStore.swift
-//  MusicDeduper
+//  MusicLibrarian
 //
 //  Observable state + orchestration (scan / cluster / copy / delete).
 //
@@ -105,7 +105,7 @@ final class DedupStore: ObservableObject {
     }
 
     // MARK: Run log on disk — every dialog line (plus per-attempt retry detail)
-    // lands in ~/Library/Logs/MusicDeduper/run-<stamp>.log, one file per run.
+    // lands in ~/Library/Logs/MusicLibrarian/run-<stamp>.log, one file per run.
 
     @Published var lastRunLogURL: URL?
     private var logHandle: FileHandle?
@@ -116,7 +116,7 @@ final class DedupStore: ObservableObject {
     private func openRunLog(title: String) {
         closeRunLog()
         let dir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Logs/MusicDeduper", isDirectory: true)
+            .appendingPathComponent("Logs/MusicLibrarian", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
         let url = dir.appendingPathComponent("run-\(stamp).log")
@@ -124,7 +124,7 @@ final class DedupStore: ObservableObject {
         logHandle = try? FileHandle(forWritingTo: url)
         lastRunLogURL = url
         let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-        fileLog("=== Music Deduper \(v) · \(Date()) === \(title)")
+        fileLog("=== Music Librarian \(v) · \(Date()) === \(title)")
         // keep the 20 newest run logs
         if let all = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
             let runs = all.filter { $0.lastPathComponent.hasPrefix("run-") }.sorted { $0.path > $1.path }
@@ -706,7 +706,7 @@ final class DedupStore: ObservableObject {
                     // verify the whole file landed — a mid-copy stall can leave a truncated file
                     let landed = ((try? fm.attributesOfItem(atPath: tmp.path))?[.size] as? NSNumber)?.int64Value
                     guard landed == wantSize else {
-                        throw NSError(domain: "MusicDeduper", code: 1, userInfo: [
+                        throw NSError(domain: "MusicLibrarian", code: 1, userInfo: [
                             NSLocalizedDescriptionKey:
                                 "incomplete copy (\(landed ?? 0) of \(wantSize) bytes landed)"])
                     }
@@ -716,7 +716,7 @@ final class DedupStore: ObservableObject {
                     catch let e as NSError {
                         if !(e.domain == NSCocoaErrorDomain && e.code == NSFileNoSuchFileError)
                             && fm.fileExists(atPath: target.path) {
-                            throw NSError(domain: "MusicDeduper", code: 3, userInfo: [
+                            throw NSError(domain: "MusicLibrarian", code: 3, userInfo: [
                                 NSLocalizedDescriptionKey:
                                     "couldn't replace the existing file: \(e.localizedDescription)"])
                         }

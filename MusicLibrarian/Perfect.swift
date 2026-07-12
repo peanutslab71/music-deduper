@@ -1,6 +1,6 @@
 //
 //  Perfect.swift
-//  MusicDeduper
+//  MusicLibrarian
 //
 //  "Perfect" — library restoration. Phase 1 (Tidy): scan a library, diagnose
 //  fixable problems, review them, and commit the approved ones — removing
@@ -217,7 +217,7 @@ final class FoundArtCache: ObservableObject {
     nonisolated private static func coverArtArchive(_ mbid: String) async -> NSImage? {
         guard let url = URL(string: "https://coverartarchive.org/release/\(mbid)/front-250") else { return nil }
         var req = URLRequest(url: url)
-        req.setValue("MusicDeduper ( neil.cottyincar@gmail.com )", forHTTPHeaderField: "User-Agent")
+        req.setValue("MusicLibrarian ( neil.cottyincar@gmail.com )", forHTTPHeaderField: "User-Agent")
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200, let img = NSImage(data: data) else { return nil }
         return img

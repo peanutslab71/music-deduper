@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		DE000000000000000000001E /* MusicDeduperApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE0000000000000000000014 /* MusicDeduperApp.swift */; };
+		DE000000000000000000001E /* MusicLibrarianApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE0000000000000000000014 /* MusicLibrarianApp.swift */; };
 		DE000000000000000000001F /* Engine.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE0000000000000000000015 /* Engine.swift */; };
 		DE0000000000000000000020 /* DedupStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE0000000000000000000016 /* DedupStore.swift */; };
 		DE0000000000000000000021 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE0000000000000000000017 /* ContentView.swift */; };
@@ -27,9 +27,9 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		DE0000000000000000000006 /* MusicDeduper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MusicDeduper.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DE0000000000000000000006 /* MusicLibrarian.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MusicLibrarian.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DE0000000000000000000080 /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = "<group>"; };
-		DE0000000000000000000014 /* MusicDeduperApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicDeduperApp.swift; sourceTree = "<group>"; };
+		DE0000000000000000000014 /* MusicLibrarianApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicLibrarianApp.swift; sourceTree = "<group>"; };
 		DE0000000000000000000015 /* Engine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Engine.swift; sourceTree = "<group>"; };
 		DE0000000000000000000016 /* DedupStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DedupStore.swift; sourceTree = "<group>"; };
 		DE0000000000000000000017 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -75,7 +75,7 @@
 		DE0000000000000000000002 = {
 			isa = PBXGroup;
 			children = (
-				DE0000000000000000000004 /* MusicDeduper */,
+				DE0000000000000000000004 /* MusicLibrarian */,
 				DE0000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -83,15 +83,15 @@
 		DE0000000000000000000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				DE0000000000000000000006 /* MusicDeduper.app */,
+				DE0000000000000000000006 /* MusicLibrarian.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
 		};
-		DE0000000000000000000004 /* MusicDeduper */ = {
+		DE0000000000000000000004 /* MusicLibrarian */ = {
 			isa = PBXGroup;
 			children = (
-				DE0000000000000000000014 /* MusicDeduperApp.swift */,
+				DE0000000000000000000014 /* MusicLibrarianApp.swift */,
 				DE0000000000000000000015 /* Engine.swift */,
 				DE0000000000000000000016 /* DedupStore.swift */,
 				DE0000000000000000000017 /* ContentView.swift */,
@@ -105,15 +105,15 @@
 				DE0000000000000000000051 /* PerfectView.swift */,
 				DE0000000000000000000028 /* Assets.xcassets */,
 			);
-			path = MusicDeduper;
+			path = MusicLibrarian;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		DE0000000000000000000005 /* MusicDeduper */ = {
+		DE0000000000000000000005 /* MusicLibrarian */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = DE0000000000000000000008 /* Build configuration list for PBXNativeTarget "MusicDeduper" */;
+			buildConfigurationList = DE0000000000000000000008 /* Build configuration list for PBXNativeTarget "MusicLibrarian" */;
 			buildPhases = (
 				DE000000000000000000000D /* Sources */,
 				DE000000000000000000000E /* Frameworks */,
@@ -124,14 +124,14 @@
 			);
 			dependencies = (
 			);
-			name = MusicDeduper;
+			name = MusicLibrarian;
 			packageProductDependencies = (
 				DE0000000000000000000042 /* AMSMB2 */,
 				DE0000000000000000000071 /* MDTagShim */,
 				DE0000000000000000000091 /* ChromaSwift */,
 			);
-			productName = MusicDeduper;
-			productReference = DE0000000000000000000006 /* MusicDeduper.app */;
+			productName = MusicLibrarian;
+			productReference = DE0000000000000000000006 /* MusicLibrarian.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -149,7 +149,7 @@
 					};
 				};
 			};
-			buildConfigurationList = DE0000000000000000000007 /* Build configuration list for PBXProject "MusicDeduper" */;
+			buildConfigurationList = DE0000000000000000000007 /* Build configuration list for PBXProject "MusicLibrarian" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -167,7 +167,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				DE0000000000000000000005 /* MusicDeduper */,
+				DE0000000000000000000005 /* MusicLibrarian */,
 			);
 		};
 /* End PBXProject section */
@@ -188,7 +188,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				DE000000000000000000001E /* MusicDeduperApp.swift in Sources */,
+				DE000000000000000000001E /* MusicLibrarianApp.swift in Sources */,
 				DE000000000000000000001F /* Engine.swift in Sources */,
 				DE0000000000000000000020 /* DedupStore.swift in Sources */,
 				DE0000000000000000000021 /* ContentView.swift in Sources */,
@@ -310,7 +310,8 @@
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = MusicDeduper/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Music Librarian";
+				INFOPLIST_FILE = MusicLibrarian/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -318,7 +319,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.4;
-				PRODUCT_BUNDLE_IDENTIFIER = com.local.musicdeduper;
+				PRODUCT_BUNDLE_IDENTIFIER = com.local.musiclibrarian;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -341,7 +342,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = MusicDeduper/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Music Librarian";
+				INFOPLIST_FILE = MusicLibrarian/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -349,7 +351,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.4;
-				PRODUCT_BUNDLE_IDENTIFIER = com.local.musicdeduper;
+				PRODUCT_BUNDLE_IDENTIFIER = com.local.musiclibrarian;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
@@ -360,7 +362,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		DE0000000000000000000007 /* Build configuration list for PBXProject "MusicDeduper" */ = {
+		DE0000000000000000000007 /* Build configuration list for PBXProject "MusicLibrarian" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				DE0000000000000000000009 /* Debug */,
@@ -369,7 +371,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		DE0000000000000000000008 /* Build configuration list for PBXNativeTarget "MusicDeduper" */ = {
+		DE0000000000000000000008 /* Build configuration list for PBXNativeTarget "MusicLibrarian" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				DE000000000000000000000B /* Debug */,

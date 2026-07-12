@@ -1,6 +1,6 @@
 //
 //  DirectSMB.swift
-//  MusicDeduper
+//  MusicLibrarian
 //
 //  The app's own network layer: an in-process SMB2 client (libsmb2 via the
 //  AMSMB2 wrapper) that talks directly to the server over TCP. No kernel
