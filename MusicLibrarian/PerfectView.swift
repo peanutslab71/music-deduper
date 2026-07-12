@@ -1837,12 +1837,21 @@ struct PerfectView: View {
         .background(Color.green.opacity(0.1))
     }
 
-    // Recent runs — restore any past run to keep testing repeatable
+    // Recent runs — the most recent few (capped so a long history can't overflow
+    // the window and hide the controls); the full list lives in Library ▸ Runs.
     @ViewBuilder private var history: some View {
-        if !store.runs.isEmpty {
+        let recent = Array(store.runs.prefix(6))
+        if !recent.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
-                Text("RECENT RUNS").font(.caption2).fontWeight(.semibold).foregroundStyle(.secondary)
-                ForEach(store.runs) { run in
+                HStack {
+                    Text("RECENT RUNS").font(.caption2).fontWeight(.semibold).foregroundStyle(.secondary)
+                    Spacer()
+                    if store.runs.count > recent.count {
+                        Text("+\(store.runs.count - recent.count) more · see Library ▸ Runs")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+                ForEach(recent) { run in
                     HStack(spacing: 8) {
                         Image(systemName: "clock.arrow.circlepath").font(.caption).foregroundStyle(.secondary)
                         Text(Self.runDate.string(from: run.date)).font(.caption).monospacedDigit()
@@ -1854,6 +1863,7 @@ struct PerfectView: View {
                     .padding(.vertical, 2)
                 }
             }
+            .frame(maxWidth: 760)
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
             .padding(.horizontal, 12).padding(.bottom, 8)
