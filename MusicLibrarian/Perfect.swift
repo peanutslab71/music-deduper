@@ -346,6 +346,7 @@ final class PerfectStore: ObservableObject {
         showCompletionSummary = false
         proposals = []; findings = []; artists = []; renames = []
         diagnosed = false; didIdentify = false; enriched = false
+        artworkStagePlanned = false; artworkStageDone = false; artworkNeedsReview = []
         deduped = false; dedupStageDone = false; organised = false; organiseStageDone = false
         organisePlans = []; dedupClusters = []; dedupTracks = []
         lastRunSummary = nil
@@ -389,8 +390,38 @@ final class PerfectStore: ObservableObject {
     @Published var dedupTracks: [Track] = []
     @Published var deduped = false
     @Published var deduping = false
+    @Published var artworkStagePlanned = false // the Artwork step's planning pass has run
+    @Published var artworkStageDone = false     // Artwork step passed (reviewed or skipped) → Duplicates reachable
     @Published var dedupStageDone = false      // stage applied or skipped → Organise reachable
     @Published var organiseStageDone = false   // stage applied or skipped → Review reachable
+
+    /// Plan the Artwork step cheaply from what the scan already knows: any album
+    /// with an art-less track needs a cover choice (fill from the album's own
+    /// covers, choose a file, or search). Albums whose tracks all have art are
+    /// left untouched — keep-existing is the default. Uses curHasArt (no I/O).
+    func planArtworkStage() {
+        var byAlbum: [String: (artist: String, album: String, files: [String], anyBlank: Bool)] = [:]
+        for p in proposals {
+            let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
+            let album = p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum
+            let key = "\(artist.lowercased())|\(album.lowercased())"
+            var e = byAlbum[key] ?? (artist, album, [], false)
+            e.files.append(p.relPath)
+            if !p.curHasArt { e.anyBlank = true }
+            byAlbum[key] = e
+        }
+        artworkNeedsReview = byAlbum.values.filter { $0.anyBlank }
+            .map { ArtworkReviewItem(artist: $0.artist, album: $0.album, files: $0.files) }
+            .sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+        artworkStagePlanned = true
+    }
+
+    /// Add an album to the artwork review list on demand — so the user can change
+    /// a cover they don't like even on an album that wasn't auto-flagged.
+    func reviewAlbumArt(artist: String, album: String, files: [String]) {
+        guard !artworkNeedsReview.contains(where: { $0.artist == artist && $0.album == album }) else { return }
+        artworkNeedsReview.append(ArtworkReviewItem(artist: artist, album: album, files: files))
+    }
 
     // organise (rebuild the clean Album Artist/Album/## Title tree from tags)
     @Published var organisePlans: [OrganisePlan] = []
@@ -1827,6 +1858,7 @@ final class PerfectStore: ObservableObject {
         lastQuarantine = quarantine
         artworkNeedsReview.removeAll { $0.id == item.id }
         status = "Cover set for \(item.album)."
+        ArtworkCache.shared.clear(); FoundArtCache.shared.clear()   // show the chosen cover immediately
         loadRuns()
     }
 

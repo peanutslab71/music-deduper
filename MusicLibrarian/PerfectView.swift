@@ -98,36 +98,40 @@ struct PerfectView: View {
         switch n {
         case 1:  return true
         case 2:  return store.diagnosed              // Scan done
-        case 3:  return store.didIdentify            // Identify done
-        case 4:  return store.enriched               // Credits done/skipped → Duplicates
-        case 5:  return store.dedupStageDone         // Duplicates done/skipped → Organise
-        case 6:  return store.organiseStageDone      // Organise done/skipped → Review
+        case 3:  return store.didIdentify            // Identify done/skipped
+        case 4:  return store.enriched               // Details done/skipped → Artwork
+        case 5:  return store.artworkStageDone       // Artwork done/skipped → Duplicates
+        case 6:  return store.dedupStageDone         // Duplicates done/skipped → Organise
+        case 7:  return store.organiseStageDone      // Organise done/skipped → Review
         default: return false
         }
     }
-    private let lastStep = 6                          // Review; Apply is the footer
+    private let lastStep = 7                          // Review; Apply is the footer
     // The current step's own pass has finished (so Next may light up).
     private var stepDone: Bool { canReach(step + 1) }
 
     /// Advance to the next step, marking the skippable stages done as we leave them
     /// (whether or not they were applied).
     private func advance() {
-        if step == 4 { store.dedupStageDone = true }
-        if step == 5 { store.organiseStageDone = true }
+        if step == 4 { store.artworkStageDone = true }
+        if step == 5 { store.dedupStageDone = true }
+        if step == 6 { store.organiseStageDone = true }
         currentStep = min(step + 1, lastStep)
     }
-    // Steps 1–3 need their pass done; the skippable stages (4 Duplicates, 5 Organise)
-    // can always be moved past; Review (6) uses Apply instead of Next.
+    // Steps 1–3 need their pass done (Identify/Details are skippable via their own
+    // Skip button); the skippable stages (4 Artwork, 5 Duplicates, 6 Organise) can
+    // always be moved past; Review (7) uses Apply instead of Next.
     private var showNext: Bool {
         switch step {
         case 1, 2, 3: return canReach(step + 1)
-        case 4, 5:    return true
+        case 4, 5, 6: return true
         default:      return false
         }
     }
     private var nextLabel: String {
-        if step == 4 { return store.deduped ? "Next" : "Skip →" }
-        if step == 5 { return store.organised ? "Next" : "Skip →" }
+        if step == 4 { return store.artworkStagePlanned ? "Next" : "Skip →" }
+        if step == 5 { return store.deduped ? "Next" : "Skip →" }
+        if step == 6 { return store.organised ? "Next" : "Skip →" }
         return "Next"
     }
 
@@ -377,10 +381,11 @@ struct PerfectView: View {
                 stepChip(1, "Scan"); stepDash()
                 stepChip(2, "Identify"); stepDash()
                 stepChip(3, "Details"); stepDash()
-                stepChip(4, "Duplicates"); stepDash()
-                stepChip(5, "Organise"); stepDash()
-                stepChip(6, "Review"); stepDash()
-                stepChip(7, "Apply")
+                stepChip(4, "Artwork"); stepDash()
+                stepChip(5, "Duplicates"); stepDash()
+                stepChip(6, "Organise"); stepDash()
+                stepChip(7, "Review"); stepDash()
+                stepChip(8, "Apply")
             }
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 1) {
@@ -396,7 +401,7 @@ struct PerfectView: View {
                     .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
                 }
             }
-            if step == 6, reviewQueueCount > 0 { needsBanner }
+            if step == 7, reviewQueueCount > 0 { needsBanner }
         }
         .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 13)
     }
@@ -432,9 +437,10 @@ struct PerfectView: View {
         case 1: return "Step 1 — Scan"
         case 2: return "Step 2 — Identify"
         case 3: return "Step 3 — Details"
-        case 4: return "Step 4 — Duplicates"
-        case 5: return "Step 5 — Organise"
-        default: return "Step 6 — Review"
+        case 4: return "Step 4 — Artwork"
+        case 5: return "Step 5 — Duplicates"
+        case 6: return "Step 6 — Organise"
+        default: return "Step 7 — Review"
         }
     }
     private var stepSubtitle: String {
@@ -448,8 +454,9 @@ struct PerfectView: View {
             return "Reading tags and finding junk, empty folders and duplicate artists."
         case 2: return "Matching each track by its sound. Your tags are trusted; only real gaps get filled."
         case 3: return "Filling in missing details — composer, label and other credits — for tracks that lack them."
-        case 4: return "Find duplicate tracks and keep the best copy — or skip if you don't need it."
-        case 5: return "Rebuild a clean Album Artist / Album / ## Title tree from the tags — or skip it."
+        case 4: return "Your existing covers are kept. Choose art only for albums that are missing or mixed — or skip."
+        case 5: return "Find duplicate tracks and keep the best copy — or skip if you don't need it."
+        case 6: return "Rebuild a clean Album Artist / Album / ## Title tree from the tags — or skip it."
         default:
             let act = store.proposals.filter { $0.isActionable }.count
             return "\(act) track(s) with a suggested change. \(reviewQueueCount) worth checking before you apply."
@@ -465,12 +472,16 @@ struct PerfectView: View {
             Button("Add AcoustID key…") { openAppSettings() }
                 .controlSize(.large)
                 .help("Identification needs a free AcoustID key — add it in Settings, then re-scan.")
+            Button("Skip →") { store.didIdentify = true }.controlSize(.large)
         } else if step == 2 {
             passButton(stepDone ? "Re-identify" : "Identify tracks", "waveform.and.magnifyingglass") { store.identify() }
+            if !stepDone { Button("Skip →") { store.didIdentify = true }.controlSize(.large) }
         } else if step == 3 {
             passButton(stepDone ? "Re-fill credits" : "Fill credits", "text.badge.plus") { store.enrich() }
             if !stepDone { Button("Skip credits →") { store.enriched = true }.controlSize(.large) }
-        } else if step == 4 || step == 5 {
+        } else if step == 4 {
+            passButton(store.artworkStagePlanned ? "Re-check artwork" : "Review artwork", "photo.on.rectangle.angled") { store.planArtworkStage() }
+        } else if step == 5 || step == 6 {
             EmptyView()   // the stage's own controls live in the middle panel
         } else {
             Button { store.identify() } label: { Label("Re-identify", systemImage: "arrow.clockwise") }.controlSize(.large)
@@ -527,13 +538,15 @@ struct PerfectView: View {
             else { reviewMiddle }                        // name suggestions (or prompt if not run)
         case 3:
             if store.enriching { workingMiddle(title: "looking up credits", sub: store.enrichProgress, live: true, credits: true) }
-            else { reviewMiddle }                        // credit/artwork adds (or prompt if not run)
+            else { reviewMiddle }                        // credit adds (or prompt if not run)
         case 4:
-            dedupMiddle                                  // Duplicates stage
+            artworkMiddle                                // Artwork stage
         case 5:
+            dedupMiddle                                  // Duplicates stage
+        case 6:
             organiseMiddle                               // Organise stage
         default:
-            reviewMiddle                                 // Review (step 6)
+            reviewMiddle                                 // Review (step 7)
         }
     }
 
@@ -702,12 +715,12 @@ struct PerfectView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if let summary = store.lastRunSummary { committedBanner(summary) }
-                if step == 2 || step == 6 { nameChangeSummary }
-                if !store.artworkNeedsReview.isEmpty { artworkReviewSection }
+                if step == 2 || step == 7 { nameChangeSummary }
+                if step == 7 && !store.artworkNeedsReview.isEmpty { artworkReviewSection }
                 if visibleAlbums.isEmpty && !store.identifying && !store.enriching {
                     emptyStageNote
                 }
-                if step == 6 { reviewQueueSection }   // the decision queue only on Review
+                if step == 7 { reviewQueueSection }   // the decision queue only on Review
                 albumGrid
             }
             .padding(16)
@@ -722,6 +735,76 @@ struct PerfectView: View {
         case 2: return all.filter { $0.names }                       // name/album fixes
         case 3: return all.filter { $0.credits || $0.artwork }       // credits & art added
         default: return all
+        }
+    }
+
+    // ── Artwork step (step 4) ──
+    // Keep-existing is the default; this step only surfaces albums that are
+    // missing a cover or carry different covers, and lets you pick one (from the
+    // album's own covers, a file, or an online search). Every choice is applied
+    // reversibly as its own run.
+    private var artworkMiddle: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Your existing covers are kept as they are. This step is only for albums that are missing a cover or have different covers on different tracks — pick one and it goes on every track (reversible).")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+
+                if !store.artworkStagePlanned {
+                    Text("Press “Review artwork” above to find the albums that need a cover.")
+                        .foregroundStyle(.secondary).padding(.top, 6)
+                } else if store.artworkNeedsReview.isEmpty {
+                    Label("Every album already has a cover — nothing to choose here. Press Next.", systemImage: "checkmark.circle")
+                        .foregroundStyle(.green).padding(.top, 6)
+                } else {
+                    artworkReviewSection
+                }
+
+                if store.artworkStagePlanned {
+                    Divider().padding(.vertical, 4)
+                    Text("Want to change a cover that's already there? Pick its album to review it:")
+                        .font(.caption).foregroundStyle(.secondary)
+                    artworkAllAlbumsGrid
+                }
+            }
+            .padding(16)
+        }
+    }
+
+    // All albums (from the current proposals), so any one can be opened for a
+    // cover change — not just the auto-flagged ones.
+    private var artAlbumGroups: [(artist: String, album: String, files: [String])] {
+        var byAlbum: [String: (artist: String, album: String, files: [String])] = [:]
+        for p in store.proposals {
+            let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
+            let album = p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum
+            let key = "\(artist.lowercased())|\(album.lowercased())"
+            var e = byAlbum[key] ?? (artist, album, [])
+            e.files.append(p.relPath)
+            byAlbum[key] = e
+        }
+        return byAlbum.values.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+    }
+
+    private var artworkAllAlbumsGrid: some View {
+        let groups = artAlbumGroups
+        return LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 8)], alignment: .leading, spacing: 8) {
+            ForEach(groups.indices, id: \.self) { i in
+                let g = groups[i]
+                let inReview = store.artworkNeedsReview.contains { $0.artist == g.artist && $0.album == g.album }
+                Button { store.reviewAlbumArt(artist: g.artist, album: g.album, files: g.files) } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: inReview ? "photo.badge.checkmark" : "photo").foregroundStyle(inReview ? .orange : .secondary)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(g.album.isEmpty ? "Unknown Album" : g.album).font(.callout).lineLimit(1)
+                            Text(g.artist.isEmpty ? "Unknown Artist" : g.artist).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer()
+                    }
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.06)))
+                }
+                .buttonStyle(.plain).disabled(inReview)
+            }
         }
     }
 
@@ -923,7 +1006,7 @@ struct PerfectView: View {
                 activeSheet = .apply
             } label: { Label("Apply changes", systemImage: "checkmark.circle") }
                 .buttonStyle(.borderedProminent).tint(.purple)
-                .disabled(!canReach(6) || !store.hasWork || store.busy)
+                .disabled(!canReach(7) || !store.hasWork || store.busy)
         }
         .padding(.horizontal, 14).padding(.vertical, 9)
     }
