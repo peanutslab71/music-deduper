@@ -145,8 +145,9 @@ struct RenameProposal: Identifiable {
 /// can be listed and undone. Every change is one move (from → to), both paths
 /// relative to the library root; undo reverses them.
 struct RunRecord: Identifiable {
-    let id: String          // quarantine subfolder name (timestamp)
+    let id: String          // full quarantine subfolder path (unique across libraries)
     let folder: URL         // the run's quarantine folder
+    let root: URL           // the library it belongs to — DERIVED from the folder's location
     let date: Date
     let ops: [(from: String, to: String)]   // each move, root-relative
     let tagEdits: [(rel: String, field: String, old: String)]  // each tag rewrite, for exact undo
@@ -354,8 +355,10 @@ final class PerfectStore: ObservableObject {
     @Published var artworkNeedsReview: [ArtworkReviewItem] = []   // albums needing a manual cover choice
     func setCommitProgress(_ phase: String, done: Int) { commitPhase = phase; commitDone = done }
 
-    // persistent run history (each run's quarantine folder holds a run.json)
+    // persistent run history across ALL libraries (each run's quarantine holds run.json)
     @Published var runs: [RunRecord] = []
+    // runs belonging to the currently-open library (for the Perfect footer / done dialog)
+    var currentRuns: [RunRecord] { guard let r = root else { return [] }; return runs.filter { $0.root.path == r.path } }
 
     @Published var checkingTags = false
     @Published var tagProgress = ""
@@ -427,6 +430,7 @@ final class PerfectStore: ObservableObject {
 
     func setRoot(_ url: URL) {
         root = url
+        Self.rememberRoot(url)
         findings = []; renames = []; artists = []; folderGroups = []; tagGroups = []; proposals = []; didIdentify = false; enriched = false
         diagnosed = false
         lastRunSummary = nil
@@ -1804,50 +1808,74 @@ final class PerfectStore: ObservableObject {
 
     // MARK: Run history + undo
 
+    // Every library the app has opened, so Runs/Logs can list runs across all of
+    // them without a library being selected.
+    static let rootsKey = "perfectLibraryRoots"
+    static func rememberRoot(_ url: URL) {
+        var roots = UserDefaults.standard.stringArray(forKey: rootsKey) ?? []
+        if !roots.contains(url.path) { roots.append(url.path); UserDefaults.standard.set(roots, forKey: rootsKey) }
+    }
+
+    /// Load runs from EVERY remembered library (plus the current one), not just the
+    /// selected one — so the Runs window works with no library open. Each run's
+    /// library is derived from where its quarantine physically sits, so undo targets
+    /// the right folder even if the library was copied elsewhere.
     func loadRuns() {
-        guard let root else { runs = []; return }
-        let qroot = root.appendingPathComponent("Music Librarian Quarantine", isDirectory: true)
+        var roots = Set(UserDefaults.standard.stringArray(forKey: Self.rootsKey) ?? [])
+        if let r = root { roots.insert(r.path) }
+        // Seed from the folders the user has opened elsewhere (Manage/Library browser,
+        // last main-window library) so Runs is populated on first launch of a build
+        // even before any root has been formally remembered.
+        if let bp = UserDefaults.standard.string(forKey: "libraryBrowserRoot") { roots.insert(bp) }
         let fm = FileManager.default
         var found: [RunRecord] = []
-        if let subs = try? fm.contentsOfDirectory(at: qroot, includingPropertiesForKeys: nil) {
-            for sub in subs {
-                guard let data = try? Data(contentsOf: sub.appendingPathComponent("run.json")),
-                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-                let date = ISO8601DateFormatter().date(from: obj["date"] as? String ?? "") ?? Date(timeIntervalSince1970: 0)
-                let ops = (obj["ops"] as? [[String: String]] ?? []).compactMap { d -> (String, String)? in
-                    guard let f = d["from"], let t = d["to"] else { return nil }; return (f, t)
-                }
-                let tagEdits = (obj["tagEdits"] as? [[String: String]] ?? []).compactMap { d -> (String, String, String)? in
-                    guard let r = d["rel"], let o = d["old"] else { return nil }
-                    return (r, d["field"] ?? "artist", o)   // default field for older runs
-                }
-                let perfEdits = (obj["perfEdits"] as? [[String: String]] ?? []).compactMap { d -> (String, String, String)? in
-                    guard let r = d["rel"], let n = d["name"], let ro = d["role"] else { return nil }; return (r, n, ro)
-                }
-                let artEdits = obj["artEdits"] as? [String] ?? []
-                let artPromotions = (obj["artPromotions"] as? [[String: String]] ?? []).compactMap { d -> (String, Int)? in
-                    guard let r = d["rel"] else { return nil }; return (r, Int(d["oldType"] ?? "0") ?? 0)
-                }
-                let artReplacements = (obj["artReplacements"] as? [[String: String]] ?? []).compactMap { d -> (String, String, Int)? in
-                    guard let r = d["rel"], let b = d["backup"] else { return nil }; return (r, b, Int(d["oldType"] ?? "0") ?? 0)
-                }
-                let n = ops.count + tagEdits.count + perfEdits.count + artEdits.count + artPromotions.count + artReplacements.count
-                found.append(RunRecord(id: sub.lastPathComponent, folder: sub, date: date,
-                                       ops: ops, tagEdits: tagEdits, perfEdits: perfEdits, artEdits: artEdits,
-                                       artPromotions: artPromotions, artReplacements: artReplacements,
-                                       summary: obj["summary"] as? String ?? "\(n) changes"))
-            }
+        for rp in roots {
+            let qroot = URL(fileURLWithPath: rp).appendingPathComponent("Music Librarian Quarantine", isDirectory: true)
+            guard let subs = try? fm.contentsOfDirectory(at: qroot, includingPropertiesForKeys: nil) else { continue }
+            for sub in subs { if let rec = Self.loadRunRecord(sub) { found.append(rec) } }
         }
         runs = found.sorted { $0.date > $1.date }
+    }
+
+    /// Parse one quarantine folder's run.json into a RunRecord, deriving the library
+    /// root from the folder's own location (…/<root>/Music Librarian Quarantine/<ts>).
+    static func loadRunRecord(_ folder: URL) -> RunRecord? {
+        guard let data = try? Data(contentsOf: folder.appendingPathComponent("run.json")),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let root = folder.deletingLastPathComponent().deletingLastPathComponent()
+        let date = ISO8601DateFormatter().date(from: obj["date"] as? String ?? "") ?? Date(timeIntervalSince1970: 0)
+        let ops = (obj["ops"] as? [[String: String]] ?? []).compactMap { d -> (String, String)? in
+            guard let f = d["from"], let t = d["to"] else { return nil }; return (f, t)
+        }
+        let tagEdits = (obj["tagEdits"] as? [[String: String]] ?? []).compactMap { d -> (String, String, String)? in
+            guard let r = d["rel"], let o = d["old"] else { return nil }
+            return (r, d["field"] ?? "artist", o)
+        }
+        let perfEdits = (obj["perfEdits"] as? [[String: String]] ?? []).compactMap { d -> (String, String, String)? in
+            guard let r = d["rel"], let n = d["name"], let ro = d["role"] else { return nil }; return (r, n, ro)
+        }
+        let artEdits = obj["artEdits"] as? [String] ?? []
+        let artPromotions = (obj["artPromotions"] as? [[String: String]] ?? []).compactMap { d -> (String, Int)? in
+            guard let r = d["rel"] else { return nil }; return (r, Int(d["oldType"] ?? "0") ?? 0)
+        }
+        let artReplacements = (obj["artReplacements"] as? [[String: String]] ?? []).compactMap { d -> (String, String, Int)? in
+            guard let r = d["rel"], let b = d["backup"] else { return nil }; return (r, b, Int(d["oldType"] ?? "0") ?? 0)
+        }
+        let n = ops.count + tagEdits.count + perfEdits.count + artEdits.count + artPromotions.count + artReplacements.count
+        return RunRecord(id: folder.path, folder: folder, root: root, date: date,
+                         ops: ops, tagEdits: tagEdits, perfEdits: perfEdits, artEdits: artEdits,
+                         artPromotions: artPromotions, artReplacements: artReplacements,
+                         summary: obj["summary"] as? String ?? "\(n) changes")
     }
 
     /// Reverse a run: move each recorded change back (to → from), newest moves
     /// first, then remove the emptied quarantine folder.
     func undo(_ run: RunRecord) {
-        guard let root else { return }
-        busy = true; status = "Undoing run…"
+        let root = run.root      // the library this run physically belongs to
+        busy = true; status = "Undoing run in \(root.lastPathComponent)…"
         let folder = run.folder, ops = run.ops, tagEdits = run.tagEdits, perfEdits = run.perfEdits, artEdits = run.artEdits
         let artPromotions = run.artPromotions, artReplacements = run.artReplacements
+        let isCurrentLibrary = (self.root?.path == root.path)
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var restored = 0, failed = 0
@@ -1924,18 +1952,17 @@ final class PerfectStore: ObservableObject {
             if let empty = try? fm.contentsOfDirectory(atPath: qroot.path), empty.isEmpty {
                 try? fm.removeItem(at: qroot)
             }
-            await self.finishUndo(restored: restored, failed: failed)
+            await self.finishUndo(restored: restored, failed: failed, current: isCurrentLibrary)
         }
     }
 
-    private func finishUndo(restored: Int, failed: Int) {
+    private func finishUndo(restored: Int, failed: Int, current: Bool) {
         busy = false
         lastRunSummary = nil
-        status = "Restored \(restored) change(s)" + (failed > 0 ? ", \(failed) failed." : ".") + " Re-diagnosing…"
+        status = "Restored \(restored) change(s)" + (failed > 0 ? ", \(failed) failed." : ".")
         loadRuns()
-        // the library changed back — re-scan so the review reflects the restored
-        // state accurately (works for undoing any run, recent or from history)
-        if diagnosed { diagnose() }
+        // only re-scan when the undone run belongs to the library that's open
+        if current && diagnosed { diagnose() }
     }
 
     // MARK: Detection helpers

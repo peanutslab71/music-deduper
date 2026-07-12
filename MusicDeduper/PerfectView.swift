@@ -227,7 +227,7 @@ struct PerfectView: View {
                         NSWorkspace.shared.open(q.appendingPathComponent("changelog.txt"))
                     } label: { Label("Change log", systemImage: "doc.text") }
                 }
-                if let run = store.runs.first {
+                if let run = store.currentRuns.first {
                     Button(role: .destructive) {
                         activeSheet = nil; store.showCompletionSummary = false; store.undo(run)
                     } label: { Label("Undo this run", systemImage: "arrow.uturn.backward") }
@@ -878,7 +878,7 @@ struct PerfectView: View {
         HStack(spacing: 14) {
             perfectStatus
             Spacer()
-            if !store.runs.isEmpty, let run = store.runs.first {
+            if let run = store.currentRuns.first {
                 Button("Undo last run") { store.undo(run) }.disabled(store.busy)
             }
             Button {
@@ -1584,7 +1584,7 @@ struct PerfectView: View {
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
             Text(summary).font(.callout)
             Spacer()
-            if let run = store.runs.first {
+            if let run = store.currentRuns.first {
                 Button("Undo this run") { store.undo(run) }
                     .controlSize(.small)
                     .disabled(store.busy)

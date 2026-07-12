@@ -325,7 +325,7 @@ struct LibraryAlbumSheet: View {
 }
 
 
-// MARK: - Runs
+// MARK: - Runs (across all libraries)
 
 struct RunsView: View {
     @EnvironmentObject private var perfect: PerfectStore
@@ -335,44 +335,47 @@ struct RunsView: View {
             HStack(spacing: 10) {
                 Image(systemName: "clock.arrow.circlepath").foregroundStyle(.purple)
                 Text("Runs").font(.headline)
-                if perfect.root != nil { Text("\(perfect.runs.count)").font(.caption).foregroundStyle(.secondary) }
+                Text("\(perfect.runs.count)").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button { perfect.loadRuns() } label: { Image(systemName: "arrow.clockwise") }
-                    .disabled(perfect.root == nil)
             }
             .padding(10)
             Divider()
-            if perfect.root == nil {
-                placeholder("Open a music library in the main window first.")
-            } else if perfect.runs.isEmpty {
-                placeholder("No runs yet — nothing has been applied to this library.")
+            if perfect.runs.isEmpty {
+                Text("No runs yet.\nApply changes in Perfect and they'll show up here — from any library.")
+                    .multilineTextAlignment(.center).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(perfect.runs) { run in runRow(run) }
-                    .listStyle(.inset)
+                List(perfect.runs) { run in runRow(run) }.listStyle(.inset)
             }
         }
-        .frame(minWidth: 560, minHeight: 380)
+        .frame(minWidth: 640, minHeight: 400)
         .onAppear { perfect.loadRuns() }
     }
 
     private func runRow(_ run: RunRecord) -> some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(Self.df.string(from: run.date)).fontWeight(.medium).monospacedDigit()
+                HStack(spacing: 6) {
+                    Text(Self.df.string(from: run.date)).fontWeight(.medium).monospacedDigit()
+                    Text(run.root.lastPathComponent).font(.caption)
+                        .foregroundStyle(.purple).lineLimit(1)
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.purple.opacity(0.12)))
+                }
                 Text(run.summary).font(.caption).foregroundStyle(.secondary)
                 Text(breakdown(run)).font(.caption2).foregroundStyle(.tertiary)
             }
             Spacer()
-            Button("Change log") {
-                NSWorkspace.shared.open(run.folder.appendingPathComponent("changelog.txt"))
-            }.controlSize(.small)
-            Button("Show") {
-                NSWorkspace.shared.activateFileViewerSelecting([run.folder])
-            }.controlSize(.small)
+            Button("Change log") { NSWorkspace.shared.open(run.folder.appendingPathComponent("changelog.txt")) }
+                .controlSize(.small)
+            Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([run.folder]) }
+                .controlSize(.small)
             Button(role: .destructive) { perfect.undo(run) } label: { Text("Revert") }
                 .controlSize(.small).disabled(perfect.busy)
         }
         .padding(.vertical, 4)
+        .help("Library: \(run.root.path)")
     }
 
     private func breakdown(_ r: RunRecord) -> String {
@@ -385,98 +388,110 @@ struct RunsView: View {
         return bits.isEmpty ? "—" : bits.joined(separator: " · ")
     }
 
-    private func placeholder(_ msg: String) -> some View {
-        Text(msg).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+    private static let df: DateFormatter = {
+        let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short; return f
+    }()
+}
+
+// MARK: - Logs (structured, per run — a spreadsheet of every change)
+
+private struct LogRow: Identifiable {
+    let id = UUID()
+    let kind: String
+    let file: String
+    let detail: String
+}
+
+struct LogsView: View {
+    @EnvironmentObject private var perfect: PerfectStore
+    @State private var selected: String?      // run folder path (RunRecord.id)
+    @State private var search = ""
+
+    private var selectedRun: RunRecord? { perfect.runs.first { $0.id == selected } }
+
+    private var rows: [LogRow] {
+        guard let r = selectedRun else { return [] }
+        var out = Self.logRows(r)
+        if !search.isEmpty {
+            let q = search.lowercased()
+            out = out.filter { $0.file.lowercased().contains(q) || $0.detail.lowercased().contains(q) || $0.kind.lowercased().contains(q) }
+        }
+        return out
+    }
+
+    var body: some View {
+        HSplitView {
+            VStack(spacing: 0) {
+                HStack { Text("Logs").font(.headline); Spacer()
+                    Button { perfect.loadRuns() } label: { Image(systemName: "arrow.clockwise") } }
+                    .padding(10)
+                Divider()
+                if perfect.runs.isEmpty {
+                    Text("No runs yet.").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(perfect.runs, selection: $selected) { run in
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(Self.df.string(from: run.date)).font(.system(size: 12, weight: .medium)).monospacedDigit()
+                            Text(run.root.lastPathComponent).font(.caption2).foregroundStyle(.purple).lineLimit(1)
+                            Text(run.summary).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        }.tag(run.id)
+                    }
+                    .listStyle(.inset)
+                }
+            }
+            .frame(minWidth: 240, maxWidth: 320)
+
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    if let r = selectedRun {
+                        Text("\(rows.count) change(s)").font(.caption).foregroundStyle(.secondary)
+                        Text(r.root.path).font(.caption2).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer()
+                    if selectedRun != nil {
+                        TextField("Filter", text: $search).textFieldStyle(.roundedBorder).frame(width: 180)
+                        Button("Raw log") {
+                            if let r = selectedRun { NSWorkspace.shared.open(r.folder.appendingPathComponent("changelog.txt")) }
+                        }.controlSize(.small)
+                    }
+                }
+                .padding(8)
+                Divider()
+                if selectedRun == nil {
+                    Text("Select a run to see its changes.").foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    Table(rows) {
+                        TableColumn("Change", value: \.kind).width(120)
+                        TableColumn("File", value: \.file)
+                        TableColumn("Detail", value: \.detail)
+                    }
+                }
+            }
+            .frame(minWidth: 440)
+        }
+        .frame(minWidth: 760, minHeight: 460)
+        .onAppear { perfect.loadRuns(); if selected == nil { selected = perfect.runs.first?.id } }
+    }
+
+    /// Flatten a run's recorded changes into spreadsheet rows.
+    private static func logRows(_ r: RunRecord) -> [LogRow] {
+        var out: [LogRow] = []
+        for e in r.ops { out.append(LogRow(kind: "move", file: e.from, detail: "→ \(e.to)")) }
+        for e in r.tagEdits {
+            out.append(LogRow(kind: "tag: \(e.field)", file: e.rel, detail: e.old.isEmpty ? "set (was blank)" : "was “\(e.old)”"))
+        }
+        for e in r.perfEdits { out.append(LogRow(kind: "credit", file: e.rel, detail: "+ \(e.name) (\(e.role))")) }
+        for rel in r.artEdits { out.append(LogRow(kind: "artwork +", file: rel, detail: "cover added")) }
+        for e in r.artReplacements { out.append(LogRow(kind: "artwork ↔", file: e.rel, detail: "cover replaced (backup kept)")) }
+        for e in r.artPromotions { out.append(LogRow(kind: "artwork ▲", file: e.rel, detail: "promoted to front cover")) }
+        return out
     }
 
     private static let df: DateFormatter = {
         let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .short; return f
     }()
 }
-
-// MARK: - Logs
-
-private struct LogFile: Identifiable, Hashable {
-    let id: String        // path
-    let title: String
-    let subtitle: String
-    let url: URL
-}
-
-struct LogsView: View {
-    @EnvironmentObject private var perfect: PerfectStore
-    @State private var logs: [LogFile] = []
-    @State private var selected: String?
-    @State private var content = ""
-
-    var body: some View {
-        HSplitView {
-            VStack(spacing: 0) {
-                HStack { Text("Logs").font(.headline); Spacer()
-                    Button { loadLogs() } label: { Image(systemName: "arrow.clockwise") } }
-                    .padding(10)
-                Divider()
-                if logs.isEmpty {
-                    Text("No logs yet.").foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    List(logs, selection: $selected) { log in
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(log.title).font(.system(size: 12, weight: .medium))
-                            Text(log.subtitle).font(.caption2).foregroundStyle(.secondary)
-                        }.tag(log.id)
-                    }
-                    .listStyle(.inset)
-                }
-            }
-            .frame(minWidth: 220, maxWidth: 300)
-
-            VStack(spacing: 0) {
-                Divider()
-                ScrollView {
-                    Text(content.isEmpty ? "Select a log on the left." : content)
-                        .font(.system(size: 11, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(10)
-                }
-                .background(Color(nsColor: .textBackgroundColor))
-            }
-            .frame(minWidth: 360)
-        }
-        .frame(minWidth: 640, minHeight: 420)
-        .onAppear { loadLogs() }
-        .onChange(of: selected) { id in
-            guard let log = logs.first(where: { $0.id == id }) else { content = ""; return }
-            content = (try? String(contentsOf: log.url, encoding: .utf8)) ?? "(couldn't read this log)"
-        }
-    }
-
-    private func loadLogs() {
-        var found: [LogFile] = []
-        let fm = FileManager.default
-        if let root = perfect.root {
-            let qroot = root.appendingPathComponent("Music Librarian Quarantine")
-            if let subs = try? fm.contentsOfDirectory(at: qroot, includingPropertiesForKeys: [.contentModificationDateKey]) {
-                for sub in subs {
-                    let log = sub.appendingPathComponent("changelog.txt")
-                    guard fm.fileExists(atPath: log.path) else { continue }
-                    found.append(LogFile(id: log.path, title: sub.lastPathComponent,
-                                         subtitle: "change log", url: log))
-                }
-            }
-        }
-        found.sort { $0.title > $1.title }   // newest run first
-        // the credits diagnostic log lives in the home folder
-        let credits = URL(fileURLWithPath: (NSHomeDirectory() as NSString).appendingPathComponent("musicdeduper-credits.log"))
-        if fm.fileExists(atPath: credits.path) {
-            found.append(LogFile(id: credits.path, title: "Credits lookup", subtitle: "diagnostic", url: credits))
-        }
-        logs = found
-        if selected == nil { selected = found.first?.id }
-    }
-}
-
 // MARK: - Shared tag display (used by both Library and Perfect's Review)
 
 /// Reads every tag we care about off a file, as (label, value) pairs, skipping blanks.
