@@ -6,11 +6,18 @@ That requires a paid Apple Developer account, signing with your **Developer ID**
 
 The project is already set up for this (Hardened Runtime is enabled, which notarization requires).
 
-> **Before you build a release: blank your API keys.** Any value in
-> `Secrets.xcconfig` is baked into the app's Info.plist and would be published
-> inside the shipped build. Set `ACOUSTID_API_KEY` and `DISCOGS_TOKEN` to empty
-> (or delete `Secrets.xcconfig`) before Archiving. Users supply their own keys in
-> **Settings** — see [docs/API-KEYS.md](docs/API-KEYS.md).
+> **API keys can't leak into a release — this is automatic.** Your
+> `Secrets.xcconfig` keys are baked into the Info.plist for *Debug* builds only.
+> The **Release** configuration overrides `ACOUSTID_API_KEY` and `DISCOGS_TOKEN`
+> to empty, so an Archive/Release build always ships blank — you don't have to
+> remember anything. As a second guard, `make_dmg.sh` refuses to package any
+> `.app` whose Info.plist still carries a key. Users supply their own in
+> **Settings** (see [docs/API-KEYS.md](docs/API-KEYS.md)).
+>
+> Archiving uses the Release configuration by default, so the normal flow below
+> is already safe. (If you ever need to confirm: `PlistBuddy -c 'Print
+> :ACOUSTID_API_KEY' "Music Librarian.app/Contents/Info.plist"` should print a
+> blank line.)
 
 ---
 

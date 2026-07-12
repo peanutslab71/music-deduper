@@ -335,6 +335,11 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = DE0000000000000000000080 /* Secrets.xcconfig */;
 			buildSettings = {
+				/* Release/Archive builds NEVER ship API keys: these override any
+				   value from Secrets.xcconfig so a distributed build can't leak the
+				   developer's keys. Users supply their own at runtime (Settings). */
+				ACOUSTID_API_KEY = "";
+				DISCOGS_TOKEN = "";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS = NO;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
