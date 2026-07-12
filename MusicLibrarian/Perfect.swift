@@ -158,6 +158,23 @@ struct RunRecord: Identifiable {
     let summary: String
 }
 
+/// The resumable working plan for one library: the (network-expensive) identify
+/// + enrich results and the user's decisions, plus how far through the wizard we
+/// got. Persisted to Application Support so closing and reopening resumes rather
+/// than re-identifying. Distinct from a run.json (which records an APPLIED run).
+struct PerfectPlan: Codable {
+    let rootPath: String
+    let saved: Date
+    let totalFiles: Int
+    var proposals: [TrackProposal]
+    var diagnosed: Bool
+    var didIdentify: Bool
+    var enriched: Bool
+    var artworkStageDone: Bool
+    var dedupStageDone: Bool
+    var organiseStageDone: Bool
+}
+
 /// One album's cover-art work: resolve a single image (from any of the album's
 /// releases, or iTunes) and apply it to every art-less track in `files`.
 struct AlbumArtJob {
@@ -350,6 +367,7 @@ final class PerfectStore: ObservableObject {
         deduped = false; dedupStageDone = false; organised = false; organiseStageDone = false
         organisePlans = []; dedupClusters = []; dedupTracks = []
         lastRunSummary = nil
+        clearPlan()                      // starting over discards the saved plan for this library
         root = nil                       // → PerfectView shows the intro / new-library screen
         status = "Choose a music library to explore."
     }
@@ -482,11 +500,73 @@ final class PerfectStore: ObservableObject {
         root = url
         Self.rememberRoot(url)
         findings = []; renames = []; artists = []; folderGroups = []; tagGroups = []; proposals = []; didIdentify = false; enriched = false
+        artworkStagePlanned = false; artworkStageDone = false; artworkNeedsReview = []
+        deduped = false; dedupStageDone = false; organised = false; organiseStageDone = false
         diagnosed = false
         lastRunSummary = nil
         loadRuns()
-        // Nothing runs automatically — the user triggers Scan (step 1).
-        status = "Ready — press Scan to check \(url.lastPathComponent)."
+        // Resume a saved plan for this library if one exists (identify/enrich results
+        // and decisions from a previous session) — so closing and reopening doesn't
+        // throw away the network-heavy work.
+        if loadPlan() {
+            status = "Resumed your last session — \(proposals.count) track(s). Re-scan to start over."
+        } else {
+            // Nothing runs automatically — the user triggers Scan (step 1).
+            status = "Ready — press Scan to check \(url.lastPathComponent)."
+        }
+    }
+
+    // MARK: Resumable plan (persist proposals + decisions per library)
+
+    private static func stableHash(_ s: String) -> String {
+        var h: UInt64 = 5381
+        for b in s.utf8 { h = (h &* 33) &+ UInt64(b) }
+        return String(h, radix: 16)
+    }
+    /// Where a library's resumable plan lives — Application Support, keyed by a
+    /// deterministic hash of the library path, so the user's music folder stays clean.
+    private static func planURL(forRoot root: URL) -> URL? {
+        let fm = FileManager.default
+        guard let base = try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                     appropriateFor: nil, create: true) else { return nil }
+        let dir = base.appendingPathComponent("Music Librarian/plans", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(stableHash(root.path)).json")
+    }
+
+    /// Write the current working plan for the open library (no-op if nothing to save).
+    func savePlan() {
+        guard let root, !proposals.isEmpty,
+              let url = Self.planURL(forRoot: root) else { return }
+        let plan = PerfectPlan(rootPath: root.path, saved: Date(), totalFiles: totalFiles,
+                               proposals: proposals, diagnosed: diagnosed, didIdentify: didIdentify,
+                               enriched: enriched, artworkStageDone: artworkStageDone,
+                               dedupStageDone: dedupStageDone, organiseStageDone: organiseStageDone)
+        if let data = try? JSONEncoder().encode(plan) { try? data.write(to: url) }
+    }
+
+    /// Restore a saved plan for the open library. Returns true if one was loaded.
+    @discardableResult
+    func loadPlan() -> Bool {
+        guard let root, let url = Self.planURL(forRoot: root),
+              let data = try? Data(contentsOf: url),
+              let plan = try? JSONDecoder().decode(PerfectPlan.self, from: data),
+              plan.rootPath == root.path, !plan.proposals.isEmpty else { return false }
+        proposals = plan.proposals
+        totalFiles = plan.totalFiles
+        diagnosed = true   // we had scanned last time → keep the later steps reachable
+        didIdentify = plan.didIdentify
+        enriched = plan.enriched
+        artworkStageDone = plan.artworkStageDone
+        dedupStageDone = plan.dedupStageDone
+        organiseStageDone = plan.organiseStageDone
+        return true
+    }
+
+    /// Discard the saved plan (after a full apply, or when starting over).
+    func clearPlan() {
+        guard let root, let url = Self.planURL(forRoot: root) else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 
     /// One exploration pass: structure scan followed by the artist-tag scan.
@@ -981,6 +1061,7 @@ final class PerfectStore: ObservableObject {
             status = p.isEmpty
                 ? "Identified \(total) tracks — nothing matched."
                 : "Identified \(p.count) tracks — \(act) with changes so far · run Fill credits to check the rest."
+            savePlan()   // preserve the network-heavy identify results
         }
     }
 
@@ -1112,6 +1193,7 @@ final class PerfectStore: ObservableObject {
         enriching = false; enrichProgress = ""; enriched = true
         let filled = proposals.filter { !($0.enrichment?.isEmpty ?? true) }.count
         if !cancelled { status = "Looked up credits — \(filled) track(s) enriched." }
+        savePlan()   // preserve the credit lookups + stage progress
     }
 
     // MARK: Organise (rebuild the clean tree from tags)
@@ -1776,6 +1858,7 @@ final class PerfectStore: ObservableObject {
         proposals.removeAll { $0.accepted && $0.hasChange }
         status = lastRunSummary ?? status
         ArtworkCache.shared.clear(); FoundArtCache.shared.clear()   // art on disk changed → drop stale thumbnails
+        if !cancelled && count > 0 { clearPlan() }   // the plan has been applied → consumed
         loadRuns()
     }
 

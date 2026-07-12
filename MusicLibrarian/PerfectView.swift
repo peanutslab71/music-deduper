@@ -119,6 +119,7 @@ struct PerfectView: View {
         if step == 5 { store.dedupStageDone = true }
         if step == 6 { store.organiseStageDone = true }
         currentStep = min(step + 1, lastStep)
+        store.savePlan()   // persist how far through the wizard we are
     }
     // Steps 1–3 need their pass done (Identify/Details are skippable via their own
     // Skip button); the skippable stages (4 Artwork, 5 Duplicates, 6 Organise) can
@@ -1408,6 +1409,7 @@ struct PerfectView: View {
             store.proposals[i].accepted = accept
             store.proposals[i].reviewed = true
         }
+        store.savePlan()   // remember the decision across app restarts
         withAnimation { savedFlash = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
             withAnimation { savedFlash = false }

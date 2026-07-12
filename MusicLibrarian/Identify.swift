@@ -41,8 +41,8 @@ private struct ACReleaseGroup: Decodable {
 
 /// One track's identification result — the current tags vs. what the acoustic
 /// match says they should be. Album is a chosen suggestion, editable.
-struct TrackProposal: Identifiable {
-    let id = UUID()
+struct TrackProposal: Identifiable, Codable {
+    var id = UUID()
     var url: URL                      // updated if Organise moves the file
     var relPath: String
     let score: Double                 // AcoustID match score 0…1
@@ -345,7 +345,7 @@ private extension Array where Element == String {
 /// The extra metadata a MusicBrainz recording gives us beyond names: composer,
 /// lyricist, label, and performer credits (sidemen with instruments). These are
 /// filled only when the file's field is blank — see docs/metadata-mapping.md.
-struct Enrichment {
+struct Enrichment: Codable {
     var composer: String?
     var lyricist: String?
     var label: String?
@@ -353,7 +353,7 @@ struct Enrichment {
     var date: String?
     var performers: [Performer] = []       // (name, role) — go in the credits field, never artist
     var releaseMBID: String?               // for fetching cover art (not a credit itself)
-    struct Performer { let name: String; let role: String }
+    struct Performer: Codable { let name: String; let role: String }
 
     var isEmpty: Bool {
         composer == nil && lyricist == nil && label == nil && catalogNumber == nil
