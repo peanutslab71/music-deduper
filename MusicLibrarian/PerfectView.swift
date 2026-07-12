@@ -492,8 +492,8 @@ struct PerfectView: View {
             passButton(stepDone ? "Re-identify" : "Identify tracks", "waveform.and.magnifyingglass") { store.identify() }
             if !stepDone { Button("Skip →") { store.didIdentify = true }.controlSize(.large) }
         } else if step == 3 {
-            passButton(stepDone ? "Re-fill credits" : "Fill credits", "text.badge.plus") { store.enrich() }
-            if !stepDone { Button("Skip credits →") { store.enriched = true }.controlSize(.large) }
+            passButton(stepDone ? "Re-fill details" : "Fill details", "text.badge.plus") { store.enrich() }
+            if !stepDone { Button("Skip details →") { store.enriched = true }.controlSize(.large) }
         } else if step == 6 {
             passButton(store.artworkStagePlanned ? "Re-check artwork" : "Review artwork", "photo.on.rectangle.angled") { store.planArtworkStage() }
         } else if step == 4 || step == 5 {
@@ -501,7 +501,7 @@ struct PerfectView: View {
         } else {
             Button { store.identify() } label: { Label("Re-identify", systemImage: "arrow.clockwise") }.controlSize(.large)
             if !store.proposals.isEmpty {
-                Button { store.enrich() } label: { Label("Re-fill credits", systemImage: "text.badge.plus") }.controlSize(.large)
+                Button { store.enrich() } label: { Label("Re-fill details", systemImage: "text.badge.plus") }.controlSize(.large)
             }
         }
     }
@@ -729,7 +729,7 @@ struct PerfectView: View {
     private var reviewMiddle: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if let summary = store.lastRunSummary { committedBanner(summary) }
+                if step == 7, let summary = store.lastRunSummary { committedBanner(summary) }
                 if step == 7 && store.organiseStale { organiseStaleBanner }
                 if step == 2 || step == 7 { nameChangeSummary }
                 if step == 2 || step == 3 { identifiedNote }
@@ -1042,7 +1042,7 @@ struct PerfectView: View {
         case 3:
             return store.enriched
                 ? "No credits or artwork were found to add."
-                : "Press “Fill credits” above to add composer, label and cover art (or Skip to review)."
+                : "Press “Fill details” above to add composer, label and other credits (or Skip)."
         default: return "Nothing to change — this library is already tidy."
         }
     }
@@ -1279,8 +1279,10 @@ struct PerfectView: View {
                                foundArtist: a.subtitle, foundAlbum: a.title, wantsArt: a.artwork, size: 176)
                     HStack(spacing: 5) {
                         if a.names { cardTag("Names", .blue) }
-                        if a.artwork { cardTag("+ Art", .pink) }
                         if a.credits { cardTag("+ Credits", Color(red: 0.13, green: 0.6, blue: 0.3)) }
+                        // '+ Art' only from the Artwork step onward — art isn't decided
+                        // on Identify/Details, so advertising it there is premature.
+                        if a.artwork && step >= 6 { cardTag("+ Art", .pink) }
                     }
                     .padding(8)
                 }
