@@ -301,10 +301,13 @@ final class FoundArtCache: ObservableObject {
         // hands back the artist's top album (e.g. "Best of Bowie" → Ziggy Stardust),
         // and a confidently-wrong cover is worse than a placeholder + manual review.
         let want = album.lowercased()
+        let wantArtist = artist.lowercased()
         let ranked = results.compactMap { r -> (Int, [String: Any])? in
             let cn = (r["collectionName"] as? String ?? "").lowercased()
-            let score = cn == want ? 2 : (cn.contains(want) || want.contains(cn) ? 1 : 0)
-            return score > 0 ? (score, r) : nil
+            let an = (r["artistName"] as? String ?? "").lowercased()
+            let albumScore = cn == want ? 2 : (cn.contains(want) || want.contains(cn) ? 1 : 0)
+            let artistOK = !wantArtist.isEmpty && (an == wantArtist || an.contains(wantArtist) || wantArtist.contains(an))
+            return (albumScore > 0 && artistOK) ? (albumScore, r) : nil
         }.sorted { $0.0 > $1.0 }
         for (_, r) in ranked {
             guard let art = r["artworkUrl100"] as? String,

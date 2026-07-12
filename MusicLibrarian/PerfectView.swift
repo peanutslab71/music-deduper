@@ -59,10 +59,10 @@ struct AlbumCover: View {
         // a cover the user picked in the Artwork step (not yet written) previews first
         if let d = await MainActor.run(body: { ArtworkChoices.shared.image(artist: artist, album: album) }),
            let img = NSImage(data: d) { return img }
-        let embedded = await ArtworkCache.shared.image(key: key, sampleURL: sampleURL)
-        if let e = embedded, max(e.size.width, e.size.height) >= 180 { return e }
-        if let f = await FoundArtCache.shared.image(mbid: mbid, artist: artist, album: album) { return f }
-        return embedded
+        // otherwise ONLY what's already embedded in the files — never a fetched
+        // guess. Art is chosen deliberately in the Artwork step; the grid must not
+        // pull covers off the internet (that's what put wrong covers on Identify).
+        return await ArtworkCache.shared.image(key: key, sampleURL: sampleURL)
     }
 }
 

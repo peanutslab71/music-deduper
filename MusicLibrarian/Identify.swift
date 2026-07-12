@@ -793,10 +793,16 @@ actor CoverArtClient {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let results = json["results"] as? [[String: Any]] else { return [] }
         let wantAlbum = TrackProposal.typoFold(album).lowercased()
+        let wantArtist = TrackProposal.typoFold(artist).lowercased()
         let ranked = results.compactMap { r -> (Int, [String: Any])? in
             let cn = TrackProposal.typoFold((r["collectionName"] as? String ?? "")).lowercased()
-            let score = cn == wantAlbum ? 2 : ((cn.contains(wantAlbum) || wantAlbum.contains(cn)) ? 1 : 0)
-            return score > 0 ? (score, r) : nil
+            let an = TrackProposal.typoFold((r["artistName"] as? String ?? "")).lowercased()
+            let albumScore = cn == wantAlbum ? 2 : ((cn.contains(wantAlbum) || wantAlbum.contains(cn)) ? 1 : 0)
+            // the ARTIST must match too — titles like "Greatest Hits" / "The Singles
+            // Collection" are shared by dozens of artists, so a title-only match
+            // pulled the wrong artist's cover (Creedence for The Special AKA).
+            let artistOK = !wantArtist.isEmpty && (an == wantArtist || an.contains(wantArtist) || wantArtist.contains(an))
+            return (albumScore > 0 && artistOK) ? (albumScore, r) : nil
         }.sorted { $0.0 > $1.0 }
         return ranked.prefix(limit).compactMap { (_, r) in
             guard let art = r["artworkUrl100"] as? String else { return nil }
@@ -843,13 +849,15 @@ actor CoverArtClient {
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let results = json["results"] as? [[String: Any]] {
             let wantAlbum = TrackProposal.typoFold(album).lowercased()
-            // Only accept a title that actually matches — otherwise iTunes returns the
-            // artist's top album and we'd embed a confidently-wrong cover. No match →
-            // nil, which flags the album for the manual artwork picker instead.
+            let wantArtist = TrackProposal.typoFold(artist).lowercased()
+            // Album title AND artist must match — otherwise iTunes hands back another
+            // artist's same-titled album and we'd embed a confidently-wrong cover.
             let ranked = results.compactMap { r -> (Int, [String: Any])? in
                 let cn = TrackProposal.typoFold((r["collectionName"] as? String ?? "")).lowercased()
-                let score = cn == wantAlbum ? 2 : (cn.contains(wantAlbum) || wantAlbum.contains(cn) ? 1 : 0)
-                return score > 0 ? (score, r) : nil
+                let an = TrackProposal.typoFold((r["artistName"] as? String ?? "")).lowercased()
+                let albumScore = cn == wantAlbum ? 2 : (cn.contains(wantAlbum) || wantAlbum.contains(cn) ? 1 : 0)
+                let artistOK = !wantArtist.isEmpty && (an == wantArtist || an.contains(wantArtist) || wantArtist.contains(an))
+                return (albumScore > 0 && artistOK) ? (albumScore, r) : nil
             }.sorted { $0.0 > $1.0 }
             for (_, r) in ranked {
                 guard let art = r["artworkUrl100"] as? String else { continue }
