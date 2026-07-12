@@ -325,12 +325,20 @@ final class FoundArtCache: ObservableObject {
 
 /// Plays a track so the user can listen and judge whether a proposed change is
 /// right. One at a time; tapping the playing track stops it.
+/// Playback progress lives on its OWN tiny observable so the 4×/second tick only
+/// re-renders the scrub bar — not the whole album grid (which caused the jank
+/// while a track played).
+final class AudioProgress: ObservableObject {
+    static let shared = AudioProgress()
+    @Published var progress: Double = 0
+}
+
 final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
     static let shared = AudioPreview()
     private var player: AVAudioPlayer?
     private var timer: Timer?
-    @Published var playingURL: URL?
-    @Published var progress: Double = 0        // 0…1 through the track
+    @Published var playingURL: URL?            // changes only on play/stop — cheap to observe
+    var progress: Double { AudioProgress.shared.progress }
     var duration: Double { player?.duration ?? 0 }
     var currentTime: Double { player?.currentTime ?? 0 }
 
@@ -341,10 +349,10 @@ final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
             let p = try AVAudioPlayer(contentsOf: url)
             p.delegate = self
             p.play()
-            player = p; playingURL = url; progress = 0
+            player = p; playingURL = url; AudioProgress.shared.progress = 0
             timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
                 guard let self, let p = self.player, p.duration > 0 else { return }
-                self.progress = p.currentTime / p.duration
+                AudioProgress.shared.progress = p.currentTime / p.duration
             }
         } catch { playingURL = nil }
     }
@@ -352,12 +360,12 @@ final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func seek(to frac: Double) {
         guard let p = player, p.duration > 0 else { return }
         p.currentTime = max(0, min(1, frac)) * p.duration
-        progress = frac
+        AudioProgress.shared.progress = frac
     }
 
     func stop() {
         timer?.invalidate(); timer = nil
-        player?.stop(); player = nil; playingURL = nil; progress = 0
+        player?.stop(); player = nil; playingURL = nil; AudioProgress.shared.progress = 0
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {

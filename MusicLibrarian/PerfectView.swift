@@ -13,6 +13,43 @@ import UniformTypeIdentifiers
 
 /// An album cover: the file's embedded art if it has one, else the cover we
 /// *found* (Cover Art Archive) if art is going to be added, else a placeholder.
+/// The playback seek bar. Observes ONLY AudioProgress, so the 4×/second tick
+/// re-renders just this bar, not the whole screen. Seeks on RELEASE (not on every
+/// drag value), so dragging is smooth instead of fighting the player.
+struct ScrubBar: View {
+    @ObservedObject private var prog = AudioProgress.shared
+    @ObservedObject private var audio = AudioPreview.shared
+    let url: URL
+    @State private var dragging = false
+    @State private var dragValue = 0.0
+
+    private var playing: Bool { audio.playingURL == url }
+    private func fmt(_ s: Double) -> String {
+        guard s.isFinite, s >= 0 else { return "0:00" }
+        return String(format: "%d:%02d", Int(s) / 60, Int(s) % 60)
+    }
+
+    var body: some View {
+        let shown = dragging ? dragValue : (playing ? prog.progress : 0)
+        return HStack(spacing: 8) {
+            Text(playing ? fmt(shown * audio.duration) : "0:00")
+                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                .frame(width: 34, alignment: .trailing)
+            Slider(value: Binding(get: { shown }, set: { dragValue = $0 }), in: 0...1,
+                   onEditingChanged: { editing in
+                       guard playing else { return }
+                       dragging = editing
+                       if !editing { audio.seek(to: dragValue) }   // apply on release only
+                   })
+                .controlSize(.mini).tint(.teal).disabled(!playing)
+            Text(playing && audio.duration > 0 ? fmt(audio.duration) : "—:—")
+                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                .frame(width: 34, alignment: .leading)
+        }
+        .opacity(playing ? 1 : 0.5)
+    }
+}
+
 struct AlbumCover: View {
     // Observe ONLY the lightweight refresh signal (bumped on cache clear), not the
     // image caches — so a fetch completing elsewhere doesn't re-render this card.
@@ -496,13 +533,8 @@ struct PerfectView: View {
             if !stepDone { Button("Skip details →") { store.enriched = true }.controlSize(.large) }
         } else if step == 6 {
             passButton(store.artworkStagePlanned ? "Re-check artwork" : "Review artwork", "photo.on.rectangle.angled") { store.planArtworkStage() }
-        } else if step == 4 || step == 5 {
-            EmptyView()   // the stage's own controls live in the middle panel
         } else {
-            Button { store.identify() } label: { Label("Re-identify", systemImage: "arrow.clockwise") }.controlSize(.large)
-            if !store.proposals.isEmpty {
-                Button { store.enrich() } label: { Label("Re-fill details", systemImage: "text.badge.plus") }.controlSize(.large)
-            }
+            EmptyView()   // Duplicates/Organise controls live in the middle; Review just uses Apply
         }
     }
 
@@ -1409,15 +1441,7 @@ struct PerfectView: View {
         return String(format: "%d:%02d", Int(s) / 60, Int(s) % 60)
     }
 
-    private var scrubBar: some View {
-        HStack(spacing: 8) {
-            Text(fmtTime(audio.currentTime)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-            Slider(value: Binding(get: { audio.progress }, set: { audio.seek(to: $0) }), in: 0...1)
-                .controlSize(.mini).tint(.teal)
-            Text(fmtTime(audio.duration)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-        }
-        .padding(.vertical, 2)
-    }
+    private var scrubBar: some View { ScrubBar(url: audio.playingURL ?? URL(fileURLWithPath: "/")) }
 
     private func playButton(_ url: URL) -> some View {
         let playing = audio.playingURL == url
@@ -1427,26 +1451,8 @@ struct PerfectView: View {
         }.buttonStyle(.plain).help(playing ? "Stop" : "Listen")
     }
 
-    /// A seek bar so you can skip through the track while reviewing it. Only live
-    /// (draggable) for the track that's actually playing; otherwise a thin rail.
-    @ViewBuilder private func scrubber(_ url: URL) -> some View {
-        let playing = audio.playingURL == url
-        HStack(spacing: 8) {
-            Text(playing ? fmtTime(audio.currentTime) : "0:00")
-                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-                .frame(width: 32, alignment: .trailing)
-            Slider(value: Binding(
-                get: { playing ? audio.progress : 0 },
-                set: { if playing { audio.seek(to: $0) } }
-            ), in: 0...1)
-            .controlSize(.mini)
-            .disabled(!playing)
-            Text(playing && audio.duration > 0 ? fmtTime(audio.duration) : "—:—")
-                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-                .frame(width: 32, alignment: .leading)
-        }
-        .opacity(playing ? 1 : 0.5)
-    }
+    /// A seek bar so you can skip through the track while reviewing it.
+    private func scrubber(_ url: URL) -> some View { ScrubBar(url: url) }
 
     /// Record the review decision and drop the item from the queue (it disappears
     /// because `needsReview` now returns false). Stops any preview that's playing.
