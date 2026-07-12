@@ -1,8 +1,8 @@
-# Perfect — Library Restoration for Music Deduper
+# Perfect — Library Restoration for Music Librarian
 
 *Design plan. Research complete; not yet implemented.*
 
-Perfect is a planned capability of Music Deduper that takes a disorganised music
+Perfect is a planned capability of Music Librarian that takes a disorganised music
 library and turns it into a clean, consistently-tagged library any modern music
 server can ingest correctly — with a before/after review the user approves
 before anything is written, and full undo.

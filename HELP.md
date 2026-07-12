@@ -1,4 +1,4 @@
-# Music Deduper — Help
+# Music Librarian — Help
 
 Practical answers for using the app, getting the best copy performance, and
 fixing the problems people actually hit. The step-by-step walkthrough of the
@@ -9,7 +9,7 @@ stuck, or you just want to know what's going on.
 
 ## The basics
 
-Music Deduper does three jobs, in order, and never touches a file without
+Music Librarian does three jobs, in order, and never touches a file without
 asking:
 
 1. **Scan** a music folder and group duplicate tracks together, marking the
@@ -100,7 +100,7 @@ the performance section below.
   called App Nap that deliberately throttles an app's disk and network
   activity when its window is completely covered or minimised — being merely
   "not in front" is fine, but bury the window and macOS starts slowing the
-  app down. Music Deduper opts out of App Nap and additionally declares the
+  app down. Music Librarian opts out of App Nap and additionally declares the
   copy as user-initiated work, but keeping the window at least partly on
   screen is a free extra guarantee. The copy will *survive* being buried —
   retries and reconnects take care of that — it's just slower.
@@ -270,8 +270,8 @@ status, and folder access is how it reads your library. Click Allow.
 
 The app is a single self-contained bundle:
 
-1. Quit Music Deduper.
-2. Drag **Music Deduper** from Applications to the Trash.
+1. Quit Music Librarian.
+2. Drag **Music Librarian** from Applications to the Trash.
 3. Optionally remove its settings (window positions, recent folders, saved
    share address) — open Terminal and run:
    ```

@@ -1,6 +1,6 @@
 # Acknowledgements
 
-Music Deduper's own source code is MIT licensed (see [LICENSE](LICENSE)).
+Music Librarian's own source code is MIT licensed (see [LICENSE](LICENSE)).
 
 From v1.3 the app includes a built-in SMB network engine built on two
 open-source libraries, both licensed under the **GNU Lesser General Public

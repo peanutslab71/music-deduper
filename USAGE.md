@@ -1,4 +1,4 @@
-# Using Music Deduper
+# Using Music Librarian
 
 A walkthrough of the whole workflow, from first scan to a clean library. The app is
 a four-step wizard — **Source → Review → Clean up → Copy** — with the step bar across

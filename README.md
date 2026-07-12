@@ -1,4 +1,4 @@
-# Music Deduper
+# Music Librarian
 
 A small native Mac app that finds and removes duplicate tracks in a music library.
 
@@ -77,8 +77,8 @@ include your macOS version and, for copy problems, what the destination is
 
 You'll need Xcode (free on the Mac App Store).
 
-1. Open `MusicDeduper.xcodeproj`.
-2. Check the scheme says **MusicDeduper** and the destination is **My Mac**.
+1. Open `MusicLibrarian.xcodeproj`.
+2. Check the scheme says **MusicLibrarian** and the destination is **My Mac**.
 3. Press ⌘R. If Xcode asks about signing, set the target's Team to your own Apple ID
    under Signing & Capabilities — a free personal team is fine for running locally.
 
