@@ -630,7 +630,10 @@ final class PerfectStore: ObservableObject {
                 id: dirPath, dir: dir,
                 title: firstAlbum ?? dir.lastPathComponent,
                 subtitle: props.first?.newArtist ?? "",
-                sampleURL: props.first?.url,
+                // sample a track that ACTUALLY HAS art for the thumbnail — otherwise a
+                // mixed album whose first track is art-less shows a blank card even
+                // though other tracks (and the detail view) have the cover.
+                sampleURL: (props.first(where: { $0.curHasArt }) ?? props.first)?.url,
                 trackCount: props.count,
                 names: props.contains { $0.hasChange },
                 artwork: props.contains { !$0.curHasArt },   // any art-less track → art added on apply

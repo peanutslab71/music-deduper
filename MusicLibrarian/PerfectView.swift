@@ -1078,10 +1078,11 @@ struct PerfectView: View {
         let a = store.albumChanges.first(where: { $0.id == id })
         return VStack(spacing: 0) {
             HStack(spacing: 12) {
-                AlbumCover(key: id, sampleURL: props.first?.url, foundMBID: a?.artReleaseMBID,
+                AlbumCover(key: id, sampleURL: (props.first(where: { $0.curHasArt }) ?? props.first)?.url,
+                           foundMBID: a?.artReleaseMBID,
                            foundArtist: a?.subtitle ?? "", foundAlbum: a?.title ?? "",
                            wantsArt: a?.artwork ?? false, size: 52, corner: 8)
-                    .onTapGesture { loadFullCover(props.first?.url) }
+                    .onTapGesture { loadFullCover((props.first(where: { $0.curHasArt }) ?? props.first)?.url) }
                     .help("Click to see the cover full size")
                 VStack(alignment: .leading, spacing: 1) {
                     Text(a?.title ?? "Album").font(.headline)
