@@ -792,12 +792,13 @@ actor CoverArtClient {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let results = json["results"] as? [[String: Any]] else { return [] }
         let wantAlbum = TrackProposal.typoFold(album).lowercased()
-        // rank by title match, but for a manual picker keep loose matches too (the
-        // user is choosing) — exact/contains first, then the rest.
-        let ranked = results.map { r -> (Int, [String: Any]) in
+        // ONLY covers whose album title actually matches — an exact hit, or one
+        // that contains the other. Never the whole artist catalogue (that filled
+        // the picker with covers from unrelated albums). Exact matches rank first.
+        let ranked = results.compactMap { r -> (Int, [String: Any])? in
             let cn = TrackProposal.typoFold((r["collectionName"] as? String ?? "")).lowercased()
-            let score = cn == wantAlbum ? 3 : (cn.contains(wantAlbum) || wantAlbum.contains(cn) ? 2 : 1)
-            return (score, r)
+            let score = cn == wantAlbum ? 2 : ((cn.contains(wantAlbum) || wantAlbum.contains(cn)) ? 1 : 0)
+            return score > 0 ? (score, r) : nil
         }.sorted { $0.0 > $1.0 }
         for (_, r) in ranked.prefix(limit) {
             guard let art = r["artworkUrl100"] as? String else { continue }

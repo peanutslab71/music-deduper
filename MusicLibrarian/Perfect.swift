@@ -434,7 +434,10 @@ final class PerfectStore: ObservableObject {
         var byAlbum: [String: (artist: String, album: String, files: [String], anyBlank: Bool)] = [:]
         for p in proposals {
             let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
-            let album = p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum
+            // strip "[Disc N]" so ALL discs of one set are a single review row —
+            // otherwise a 3-disc album is 3 rows and 3× the work, and one cover
+            // can't be applied across the discs.
+            let album = Organiser.stripDiscSuffix(p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum).clean
             let key = "\(artist.lowercased())|\(album.lowercased())"
             var e = byAlbum[key] ?? (artist, album, [], false)
             e.files.append(p.relPath)
@@ -2000,9 +2003,9 @@ final class PerfectStore: ObservableObject {
 
     /// The release MBIDs the identify pass found for an album (for Cover Art Archive).
     private func mbids(forAlbum album: String, artist: String) -> [String] {
-        let al = album.lowercased(), ar = artist.lowercased()
+        let al = Organiser.stripDiscSuffix(album).clean.lowercased(), ar = artist.lowercased()
         let ids = proposals.filter {
-            ($0.chosenAlbum.isEmpty ? $0.curAlbum : $0.chosenAlbum).lowercased() == al
+            Organiser.stripDiscSuffix($0.chosenAlbum.isEmpty ? $0.curAlbum : $0.chosenAlbum).clean.lowercased() == al
             && ($0.newArtist.isEmpty ? $0.curArtist : $0.newArtist).lowercased() == ar
         }.compactMap { $0.enrichment?.releaseMBID }
         return Array(Set(ids))

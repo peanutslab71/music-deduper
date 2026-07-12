@@ -817,7 +817,7 @@ struct PerfectView: View {
         var byAlbum: [String: (artist: String, album: String, files: [String])] = [:]
         for p in store.proposals {
             let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
-            let album = p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum
+            let album = Organiser.stripDiscSuffix(p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum).clean
             let key = "\(artist.lowercased())|\(album.lowercased())"
             var e = byAlbum[key] ?? (artist, album, [])
             e.files.append(p.relPath)
