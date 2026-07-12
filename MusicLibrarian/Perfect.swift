@@ -1417,13 +1417,18 @@ final class PerfectStore: ObservableObject {
                     let rel = Self.rel(url, root)
                     if rel.hasPrefix("Music Librarian Quarantine") { continue }
                     let c = corrections[rel]
-                    let artist = c?.artist ?? (Self.readField(url, "artist") ?? "")
-                    let album  = c?.album  ?? (Self.readField(url, "album")  ?? "")
+                    var artist = c?.artist ?? (Self.readField(url, "artist") ?? "")
+                    var album  = c?.album  ?? (Self.readField(url, "album")  ?? "")
                     let title  = c?.title  ?? (Self.readField(url, "title")  ?? "")
                     let aa     = Self.readField(url, "albumartist") ?? ""
                     let track  = Int((Self.readField(url, "track") ?? "").prefix(while: { $0.isNumber })) ?? 0
                     let disc   = Int((Self.readField(url, "disc")  ?? "").prefix(while: { $0.isNumber })) ?? 0
                     let composer = Self.readField(url, "composer") ?? ""
+                    // tagless file (DRM etc.) → recover artist/album from the folder path
+                    if (artist.isEmpty || album.isEmpty), let inf = Self.pathAlbumArtist(rel) {
+                        if artist.isEmpty { artist = inf.artist }
+                        if album.isEmpty { album = inf.album }
+                    }
                     inputs.append(OrganiseInput(rel: rel, ext: url.pathExtension.lowercased(),
                         artist: artist, albumArtist: aa, album: album, title: title,
                         trackNo: track, discNo: disc, isClassical: false, composer: composer))
@@ -1432,6 +1437,18 @@ final class PerfectStore: ObservableObject {
             let plans = Organiser.plan(inputs, composerFirstForClassical: composerFirst, renumber: renumber)
             await self.finishOrganise(plans)
         }
+    }
+
+    /// Last-resort artist/album from the folder path (…/Artist/Album/Track) for files
+    /// with NO readable tags — e.g. DRM .m4p, whose tags TagLib can't read but which
+    /// can still be MOVED. Returns nil for shallow paths or a known junk top folder.
+    nonisolated static func pathAlbumArtist(_ rel: String) -> (artist: String, album: String)? {
+        let comps = rel.split(separator: "/").map(String.init)
+        guard comps.count >= 3 else { return nil }                 // need Artist/Album/File
+        let album = comps[comps.count - 2], artist = comps[comps.count - 3]
+        let junk: Set<String> = ["apple music", "downloads", "music", "itunes", "media"]
+        if junk.contains(artist.lowercased()) || album.isEmpty || artist.isEmpty { return nil }
+        return (artist, album)
     }
 
     /// Build organise inputs by reading the tags ON DISK (no in-memory overlay) —
@@ -1446,9 +1463,15 @@ final class PerfectStore: ObservableObject {
             if rel.hasPrefix("Music Librarian Quarantine") { continue }
             let track = Int((readField(url, "track") ?? "").prefix(while: { $0.isNumber })) ?? 0
             let disc  = Int((readField(url, "disc")  ?? "").prefix(while: { $0.isNumber })) ?? 0
+            var artist = readField(url, "artist") ?? "", album = readField(url, "album") ?? ""
+            // tagless file (DRM etc.) → recover artist/album from the folder structure
+            if (artist.isEmpty || album.isEmpty), let inf = pathAlbumArtist(rel) {
+                if artist.isEmpty { artist = inf.artist }
+                if album.isEmpty { album = inf.album }
+            }
             inputs.append(OrganiseInput(rel: rel, ext: url.pathExtension.lowercased(),
-                artist: readField(url, "artist") ?? "", albumArtist: readField(url, "albumartist") ?? "",
-                album: readField(url, "album") ?? "", title: readField(url, "title") ?? "",
+                artist: artist, albumArtist: readField(url, "albumartist") ?? "",
+                album: album, title: readField(url, "title") ?? "",
                 trackNo: track, discNo: disc, isClassical: false, composer: readField(url, "composer") ?? ""))
         }
         return inputs
