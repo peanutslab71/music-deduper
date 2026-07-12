@@ -70,6 +70,19 @@ struct ContentView: View {
                 step = .copy
             }
         }
+        .onAppear(perform: resumeMidRunIfNeeded)
+    }
+
+    // On launch, if a Perfect session was left mid-run (cancelled/closed before
+    // Apply), reopen that library and drop the user back into Perfect at the same
+    // step — so an interrupted session flows on rather than starting from scratch.
+    @State private var didResumeCheck = false
+    private func resumeMidRunIfNeeded() {
+        guard !didResumeCheck else { return }
+        didResumeCheck = true
+        guard perfect.root == nil, let url = PerfectStore.resumableLibrary() else { return }
+        perfect.setRoot(url)     // loads the saved plan + restores the wizard step
+        step = .perfect
     }
 
     private var withDeleteFlow: some View {

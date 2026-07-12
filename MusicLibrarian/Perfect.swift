@@ -174,6 +174,7 @@ struct PerfectPlan: Codable {
     var dedupStageDone: Bool
     var organiseStageDone: Bool
     var artworkChoices: [String: Data] = [:]   // covers picked in the Artwork step, not yet applied
+    var wizardStep: Int = 1                     // the step the user was on
 }
 
 /// One album's cover-art work: resolve a single image (from any of the album's
@@ -396,6 +397,7 @@ final class PerfectStore: ObservableObject {
     private var folderGroups: [FolderGroup] = []
     private var tagGroups: [TagGroup] = []
     @Published var diagnosed = false
+    @Published var wizardStep = 1     // the Perfect step the user is on, persisted so a mid-run resumes in place
 
     // commit-result summary
     @Published var lastRunSummary: String?
@@ -406,7 +408,7 @@ final class PerfectStore: ObservableObject {
     func resetWizard() {
         showCompletionSummary = false
         proposals = []; findings = []; artists = []; renames = []
-        diagnosed = false; didIdentify = false; enriched = false
+        diagnosed = false; didIdentify = false; enriched = false; wizardStep = 1
         artworkStagePlanned = false; artworkStageDone = false; artworkNeedsReview = []
         ArtworkChoices.shared.clearAll()
         deduped = false; dedupStageDone = false; organised = false; organiseStageDone = false
@@ -574,6 +576,7 @@ final class PerfectStore: ObservableObject {
         if loadPlan() {
             status = "Resumed your last session — \(proposals.count) track(s). Re-scan to start over."
         } else {
+            wizardStep = 1
             // Nothing runs automatically — the user triggers Scan (step 1).
             status = "Ready — press Scan to check \(url.lastPathComponent)."
         }
@@ -605,7 +608,7 @@ final class PerfectStore: ObservableObject {
                                proposals: proposals, diagnosed: diagnosed, didIdentify: didIdentify,
                                enriched: enriched, artworkStageDone: artworkStageDone,
                                dedupStageDone: dedupStageDone, organiseStageDone: organiseStageDone,
-                               artworkChoices: ArtworkChoices.shared.byKey)
+                               artworkChoices: ArtworkChoices.shared.byKey, wizardStep: wizardStep)
         if let data = try? JSONEncoder().encode(plan) { try? data.write(to: url) }
     }
 
@@ -625,7 +628,28 @@ final class PerfectStore: ObservableObject {
         dedupStageDone = plan.dedupStageDone
         organiseStageDone = plan.organiseStageDone
         ArtworkChoices.shared.byKey = plan.artworkChoices
+        wizardStep = min(max(plan.wizardStep, 1), 7)
         return true
+    }
+
+    /// The library of the most recently-saved unfinished plan (a mid-run session
+    /// that was cancelled/closed before Apply), so the app can resume it on launch.
+    /// Returns nil if there's no lingering plan or its library no longer exists.
+    static func resumableLibrary() -> URL? {
+        let fm = FileManager.default
+        guard let base = try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: false) else { return nil }
+        let dir = base.appendingPathComponent("Music Librarian/plans", isDirectory: true)
+        guard let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
+        let newest = files.filter { $0.pathExtension == "json" }.sorted {
+            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return a > b
+        }.first
+        guard let f = newest,
+              let data = try? Data(contentsOf: f),
+              let plan = try? JSONDecoder().decode(PerfectPlan.self, from: data),
+              fm.fileExists(atPath: plan.rootPath) else { return nil }
+        return URL(fileURLWithPath: plan.rootPath)
     }
 
     /// Discard the saved plan (after a full apply, or when starting over).
@@ -1327,7 +1351,7 @@ final class PerfectStore: ObservableObject {
         if e.lyricist != nil { bits.append("lyricist") }
         if e.label != nil { bits.append("label") }
         if !e.performers.isEmpty { bits.append("\(e.performers.count) performer\(e.performers.count == 1 ? "" : "s")") }
-        if e.releaseMBID != nil { bits.append("artwork") }
+        if e.releaseMBID != nil { bits.append("cover source") }   // a release for the Artwork step to pull from — not fetched here
         let found = bits.isEmpty ? "nothing new" : "+ " + bits.joined(separator: ", ")
         recentFinds.insert((bits.isEmpty ? "✓ " : "✎ ") + "\(title) — \(found)", at: 0)
         if recentFinds.count > 7 { recentFinds.removeLast() }

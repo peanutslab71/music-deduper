@@ -105,8 +105,7 @@ struct PerfectView: View {
     // The step the user is on. It NEVER advances on its own — running a pass
     // (Scan/Identify/Credits) stays on its step and shows the results; the user
     // presses Next to move on. Back is the step chips.
-    @State private var currentStep = 1
-    private var step: Int { currentStep }
+    private var step: Int { store.wizardStep }   // persisted in the plan so a mid-run resumes in place
 
     // A step is reachable once every earlier step's pass has completed (or skipped).
     private func canReach(_ n: Int) -> Bool {
@@ -131,7 +130,7 @@ struct PerfectView: View {
         if step == 4 { store.dedupStageDone = true }
         if step == 5 { store.organiseStageDone = true }
         if step == 6 { store.artworkStageDone = true }
-        currentStep = min(step + 1, lastStep)
+        store.wizardStep = min(step + 1, lastStep)
         store.savePlan()   // persist how far through the wizard we are
     }
     // Steps 1–3 need their pass done (Identify/Details are skippable via their own
@@ -183,7 +182,7 @@ struct PerfectView: View {
         } message: {
             Text("Music Librarian identifies tracks by their sound using AcoustID — a free service. Without a key it still cleans tags, removes duplicates and organises your library, but it can't identify unknown tracks, fill credits, or fetch missing cover art.\n\nAdd a free key in Settings, then re-scan.")
         }
-        .onChange(of: store.root) { _ in currentStep = 1 }   // new library → back to Scan
+        // (setRoot resets the step for a new library, or restores it for a resume)
         // show/hide the progress dialog as any apply (commit/organise/dedup) runs;
         // when the FINAL commit finishes, swap straight to the "all done" summary.
         .onChange(of: store.committing) { running in
@@ -427,7 +426,7 @@ struct PerfectView: View {
         let done = n < 7 && canReach(n + 1) && n != step
         let now = step == n, reachable = canReach(n)
         return Button {
-            if reachable { currentStep = n }
+            if reachable { store.wizardStep = n }
         } label: {
             HStack(spacing: 7) {
                 ZStack {
