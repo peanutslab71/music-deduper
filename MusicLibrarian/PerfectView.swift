@@ -787,7 +787,7 @@ struct PerfectView: View {
         let all = store.albumChanges
         switch step {
         case 2: return all.filter { $0.names }                       // name/album fixes
-        case 3: return all.filter { $0.credits || $0.artwork }       // credits & art added
+        case 3: return all.filter { $0.credits }                     // credit fills (art is its own step now)
         default: return all
         }
     }
@@ -1265,7 +1265,7 @@ struct PerfectView: View {
     private var albumGridSubtitle: String {
         switch step {
         case 2: return "names & albums corrected from the audio · click to see tracks"
-        case 3: return "credits & artwork added · click to see tracks"
+        case 3: return "composer, label & other credits added · click to see tracks"
         default: return "everything to change · click an album to see and hear its tracks"
         }
     }
