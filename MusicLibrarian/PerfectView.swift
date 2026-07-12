@@ -426,7 +426,7 @@ struct PerfectView: View {
         let done = n < 7 && canReach(n + 1) && n != step
         let now = step == n, reachable = canReach(n)
         return Button {
-            if reachable { store.wizardStep = n }
+            if reachable { store.wizardStep = n; store.savePlan() }
         } label: {
             HStack(spacing: 7) {
                 ZStack {
