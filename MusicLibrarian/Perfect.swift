@@ -365,6 +365,7 @@ final class PerfectStore: ObservableObject {
         diagnosed = false; didIdentify = false; enriched = false
         artworkStagePlanned = false; artworkStageDone = false; artworkNeedsReview = []
         deduped = false; dedupStageDone = false; organised = false; organiseStageDone = false
+        organiseStale = false
         organisePlans = []; dedupClusters = []; dedupTracks = []
         lastRunSummary = nil
         clearPlan()                      // starting over discards the saved plan for this library
@@ -412,6 +413,17 @@ final class PerfectStore: ObservableObject {
     @Published var artworkStageDone = false     // Artwork step passed (reviewed or skipped) → Duplicates reachable
     @Published var dedupStageDone = false      // stage applied or skipped → Organise reachable
     @Published var organiseStageDone = false   // stage applied or skipped → Review reachable
+    @Published var organiseStale = false       // a placement-affecting change was confirmed AFTER Organise ran
+    private var pendingReorganiseApply = false // re-plan then auto-apply the straggler moves
+
+    /// Re-plan Organise and apply just the moves that changed — used when a Review
+    /// decision (e.g. a confirmed album guess) affects where a file should live
+    /// after Organise already ran. Reuses the normal, reversible organise apply.
+    func reorganiseStragglers() {
+        guard organiseStageDone else { return }
+        pendingReorganiseApply = true
+        organise()
+    }
 
     /// Plan the Artwork step cheaply from what the scan already knows: any album
     /// with an art-less track needs a cover choice (fill from the album's own
@@ -502,6 +514,7 @@ final class PerfectStore: ObservableObject {
         findings = []; renames = []; artists = []; folderGroups = []; tagGroups = []; proposals = []; didIdentify = false; enriched = false
         artworkStagePlanned = false; artworkStageDone = false; artworkNeedsReview = []
         deduped = false; dedupStageDone = false; organised = false; organiseStageDone = false
+        organiseStale = false
         diagnosed = false
         lastRunSummary = nil
         loadRuns()
@@ -1347,6 +1360,10 @@ final class PerfectStore: ObservableObject {
         let moves = plans.filter { $0.targetRel != nil && $0.targetRel != $0.rel }.count
         let flagged = plans.filter { $0.targetRel == nil }.count
         status = "Clean tree planned — \(moves) file(s) to reorganise, \(flagged) flagged."
+        if pendingReorganiseApply {          // reorganiseStragglers(): re-planned, now apply the moves
+            pendingReorganiseApply = false
+            if moves > 0 { applyOrganise() } else { organiseStale = false }
+        }
     }
 
     /// Apply the organise plan: write the guaranteed tags, then move each file to
@@ -1452,7 +1469,7 @@ final class PerfectStore: ObservableObject {
             }
         }
         organisePlans.removeAll(); organised = false
-        organiseStageDone = true
+        organiseStageDone = true; organiseStale = false
         lastRunSummary = "Reorganised \(moves.count) file(s)."
         status = lastRunSummary ?? status
         ArtworkCache.shared.clear(); FoundArtCache.shared.clear()   // paths changed → drop stale thumbnails

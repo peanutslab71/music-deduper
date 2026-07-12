@@ -718,6 +718,7 @@ struct PerfectView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if let summary = store.lastRunSummary { committedBanner(summary) }
+                if step == 7 && store.organiseStale { organiseStaleBanner }
                 if step == 2 || step == 7 { nameChangeSummary }
                 if step == 2 || step == 3 { identifiedNote }
                 if step == 7 && !store.artworkNeedsReview.isEmpty { artworkReviewSection }
@@ -729,6 +730,26 @@ struct PerfectView: View {
             }
             .padding(16)
         }
+    }
+
+    /// Shown on Review when a confirmed album/name change happened after Organise
+    /// already ran — one click re-files the affected tracks (reversibly) so the
+    /// tree matches your decisions before the final Apply.
+    private var organiseStaleBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("A confirmed change affects the folder layout").font(.system(size: 13, weight: .semibold))
+                Text("You accepted an album or name change after organising. Re-organise to move those tracks into the right folders before applying.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button("Re-organise") { store.reorganiseStragglers() }
+                .buttonStyle(.borderedProminent).tint(.orange).disabled(store.busy)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.10)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.orange.opacity(0.25)))
     }
 
     /// Explains why a step shows fewer tracks than were scanned: only tracks that
@@ -1408,6 +1429,11 @@ struct PerfectView: View {
         if let i = store.proposals.firstIndex(where: { $0.id == p.id }) {
             store.proposals[i].accepted = accept
             store.proposals[i].reviewed = true
+        }
+        // Confirming a name/album change AFTER Organise ran means the file's clean
+        // folder changed — flag it so the tree can be re-filed before Apply.
+        if accept && store.organiseStageDone && (p.albumChanged || p.artistChanged || p.titleChanged) {
+            store.organiseStale = true
         }
         store.savePlan()   // remember the decision across app restarts
         withAnimation { savedFlash = true }
