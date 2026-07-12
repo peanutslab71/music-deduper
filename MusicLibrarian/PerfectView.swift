@@ -718,6 +718,7 @@ struct PerfectView: View {
             VStack(alignment: .leading, spacing: 14) {
                 if let summary = store.lastRunSummary { committedBanner(summary) }
                 if step == 2 || step == 7 { nameChangeSummary }
+                if step == 2 || step == 3 { identifiedNote }
                 if step == 7 && !store.artworkNeedsReview.isEmpty { artworkReviewSection }
                 if visibleAlbums.isEmpty && !store.identifying && !store.enriching {
                     emptyStageNote
@@ -726,6 +727,22 @@ struct PerfectView: View {
                 albumGrid
             }
             .padding(16)
+        }
+    }
+
+    /// Explains why a step shows fewer tracks than were scanned: only tracks that
+    /// AcoustID matched by sound get a proposal, so unmatched tracks aren't here.
+    @ViewBuilder private var identifiedNote: some View {
+        if store.totalFiles > 0 {
+            let identified = max(store.identifyMatched, store.proposals.count)
+            let unmatched = max(0, store.totalFiles - identified)
+            HStack(spacing: 6) {
+                Image(systemName: "info.circle").foregroundStyle(.secondary)
+                Text("\(identified) of \(store.totalFiles) tracks identified by sound"
+                     + (unmatched > 0 ? " · \(unmatched) couldn't be matched, so they're left as they are" : ""))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 4)
         }
     }
 
