@@ -1345,7 +1345,12 @@ final class PerfectStore: ObservableObject {
     private func pushEnrich(_ id: UUID, _ e: Enrichment, done: Int, total: Int) {
         enrichDone = done
         enrichProgress = "Credits \(done)/\(total)…"
-        let title = proposals.first(where: { $0.id == id })?.newTitle ?? "track"
+        // lead with artist · album · title so the log line says WHICH track it is
+        let p = proposals.first(where: { $0.id == id })
+        let artist = p.map { $0.newArtist.isEmpty ? $0.curArtist : $0.newArtist } ?? ""
+        let album  = p.map { $0.chosenAlbum.isEmpty ? $0.curAlbum : $0.chosenAlbum } ?? ""
+        let title  = p.map { $0.newTitle.isEmpty ? $0.curTitle : $0.newTitle } ?? "track"
+        let head = [artist, album, title].filter { !$0.isEmpty }.joined(separator: " · ")
         var bits: [String] = []
         if e.composer != nil { bits.append("composer") }
         if e.lyricist != nil { bits.append("lyricist") }
@@ -1353,7 +1358,7 @@ final class PerfectStore: ObservableObject {
         if !e.performers.isEmpty { bits.append("\(e.performers.count) performer\(e.performers.count == 1 ? "" : "s")") }
         if e.releaseMBID != nil { bits.append("cover source") }   // a release for the Artwork step to pull from — not fetched here
         let found = bits.isEmpty ? "nothing new" : "+ " + bits.joined(separator: ", ")
-        recentFinds.insert((bits.isEmpty ? "✓ " : "✎ ") + "\(title) — \(found)", at: 0)
+        recentFinds.insert((bits.isEmpty ? "✓ " : "✎ ") + "\(head) — \(found)", at: 0)
         if recentFinds.count > 7 { recentFinds.removeLast() }
     }
 
