@@ -442,7 +442,7 @@ actor MusicBrainzClient {
         return URLSession(configuration: c)
     }()
     private let userAgent = "MusicLibrarian ( neil.cottyincar@gmail.com )"
-    private let discogsUA = "MusicLibrarian/1.4 +https://github.com/peanutslab71/music-deduper"
+    private let discogsUA = "MusicLibrarian/1.4 +https://github.com/peanutslab71/music-librarian"
     // Optional Discogs personal token (from Secrets.xcconfig). Present → 60/min
     // and authenticated; blank → 25/min unauthenticated.
     private let discogsToken = (Bundle.main.object(forInfoDictionaryKey: "DISCOGS_TOKEN") as? String) ?? ""

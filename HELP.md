@@ -287,6 +287,6 @@ anything.
 ## Still stuck?
 
 Open an issue on the
-[GitHub issues page](https://github.com/peanutslab71/music-deduper/issues)
+[GitHub issues page](https://github.com/peanutslab71/music-librarian/issues)
 with your macOS version, what the destination is (local folder, NAS, Roon
 ROCK), and — for copy problems — a screenshot of the copy log.

@@ -69,7 +69,7 @@ open the DMG, drag the app to Applications. Needs macOS 13 (Ventura) or later.
 ## Problems or ideas?
 
 Report bugs and requests on the
-[GitHub issues page](https://github.com/peanutslab71/music-deduper/issues) —
+[GitHub issues page](https://github.com/peanutslab71/music-librarian/issues) —
 include your macOS version and, for copy problems, what the destination is
 (local folder, NAS, Roon ROCK).
 

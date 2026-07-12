@@ -47,7 +47,7 @@ struct MusicLibrarianApp: App {
             CommandGroup(replacing: .help) {
                 Button("Music Librarian Help") {
                     NSWorkspace.shared.open(
-                        URL(string: "https://github.com/peanutslab71/music-deduper/blob/main/HELP.md")!)
+                        URL(string: "https://github.com/peanutslab71/music-librarian/blob/main/HELP.md")!)
                 }
                 .keyboardShortcut("?", modifiers: .command)
             }
@@ -135,16 +135,16 @@ struct AboutView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 aboutLink("Usage guide",
-                          "https://github.com/peanutslab71/music-deduper/blob/main/USAGE.md",
+                          "https://github.com/peanutslab71/music-librarian/blob/main/USAGE.md",
                           icon: "book")
                 aboutLink("Help — performance & troubleshooting",
-                          "https://github.com/peanutslab71/music-deduper/blob/main/HELP.md",
+                          "https://github.com/peanutslab71/music-librarian/blob/main/HELP.md",
                           icon: "questionmark.circle")
                 aboutLink("Source code on GitHub",
-                          "https://github.com/peanutslab71/music-deduper",
+                          "https://github.com/peanutslab71/music-librarian",
                           icon: "chevron.left.forwardslash.chevron.right")
                 aboutLink("Licence (MIT)",
-                          "https://github.com/peanutslab71/music-deduper/blob/main/LICENSE",
+                          "https://github.com/peanutslab71/music-librarian/blob/main/LICENSE",
                           icon: "doc.text")
                 aboutLink("Neil at AllSports.World",
                           "https://allsports.world/profiles/neilcotty/",
@@ -165,7 +165,7 @@ struct AboutView: View {
                 .multilineTextAlignment(.center)
 
             Link("Acknowledgements & licences",
-                 destination: URL(string: "https://github.com/peanutslab71/music-deduper/blob/main/ACKNOWLEDGEMENTS.md")!)
+                 destination: URL(string: "https://github.com/peanutslab71/music-librarian/blob/main/ACKNOWLEDGEMENTS.md")!)
                 .font(.caption2)
         }
         .padding(28)
