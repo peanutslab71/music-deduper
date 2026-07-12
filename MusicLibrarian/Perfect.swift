@@ -197,6 +197,13 @@ final class FoundArtCache: ObservableObject {
 
     func cached(_ key: String) -> NSImage? { images.object(forKey: key as NSString) }
 
+    /// Drop all cached covers + miss/inflight sets so previews re-resolve. Call
+    /// after an apply so the grid reflects what's now on disk, not a stale fetch.
+    func clear() {
+        images.removeAllObjects(); misses.removeAll(); inflight.removeAll()
+        objectWillChange.send()
+    }
+
     func request(mbid: String?, artist: String, album: String) {
         let k = Self.key(mbid: mbid, artist: artist, album: album)
         guard images.object(forKey: k as NSString) == nil, !misses.contains(k), !inflight.contains(k) else { return }
@@ -1256,6 +1263,7 @@ final class PerfectStore: ObservableObject {
         organiseStageDone = true
         lastRunSummary = "Reorganised \(moves.count) file(s)."
         status = lastRunSummary ?? status
+        ArtworkCache.shared.clear(); FoundArtCache.shared.clear()   // paths changed → drop stale thumbnails
         loadRuns()
     }
 
@@ -1418,6 +1426,7 @@ final class PerfectStore: ObservableObject {
         dedupStageDone = true
         lastRunSummary = "Removed \(removedRels.count) duplicate(s)."
         status = lastRunSummary ?? status
+        ArtworkCache.shared.clear(); FoundArtCache.shared.clear()   // keeper art may have changed → drop stale thumbnails
         loadRuns()
     }
 
@@ -1729,6 +1738,7 @@ final class PerfectStore: ObservableObject {
         artists.removeAll { $0.accepted && artistHasApplicableWork($0) }
         proposals.removeAll { $0.accepted && $0.hasChange }
         status = lastRunSummary ?? status
+        ArtworkCache.shared.clear(); FoundArtCache.shared.clear()   // art on disk changed → drop stale thumbnails
         loadRuns()
     }
 

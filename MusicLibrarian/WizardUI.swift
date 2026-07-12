@@ -998,6 +998,15 @@ final class ArtworkCache: ObservableObject {
 
     func cached(_ key: String) -> NSImage? { images.object(forKey: key as NSString) }
 
+    /// Drop every cached thumbnail AND the miss/inflight sets, so art re-reads
+    /// from disk. Call after an apply changes embedded covers — otherwise an
+    /// album that had no art (a recorded "miss") never re-requests and keeps
+    /// showing a placeholder until the app restarts.
+    func clear() {
+        images.removeAllObjects(); misses.removeAll(); inflight.removeAll()
+        objectWillChange.send()
+    }
+
     func request(key: String, sampleURL: URL?) {
         guard images.object(forKey: key as NSString) == nil, !misses.contains(key),
               !inflight.contains(key), let url = sampleURL else { return }

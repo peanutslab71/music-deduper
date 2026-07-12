@@ -63,6 +63,8 @@ struct LibraryBrowserView: View {
             Spacer()
             if root != nil {
                 TextField("Search", text: $search).textFieldStyle(.roundedBorder).frame(width: 200)
+                Button { ArtworkCache.shared.clear(); load() } label: { Image(systemName: "arrow.clockwise") }
+                    .help("Reload from disk — use after a Perfect run to see the new tags and artwork")
             }
             Button { pick() } label: { Label(root == nil ? "Choose library…" : "Change…", systemImage: "folder") }
         }
