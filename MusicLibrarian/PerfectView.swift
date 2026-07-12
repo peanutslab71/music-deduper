@@ -61,6 +61,11 @@ struct PerfectView: View {
     @State private var savedFlash = false            // brief "Saved" toast after a queue decision
     @State private var showResetConfirm = false      // "Start over" confirmation
     @ObservedObject private var creds = APICredentials.shared   // live API-key status
+    // The legacy artist-name/folder reconciliation panel. Its job (merging
+    // AC-DC/AC_DC, picking one spelling) is now done by Organise + Identify, and
+    // it flashed distractingly on entry while tags were read. Hidden from the UI;
+    // the code is kept intact behind this flag.
+    private let showLegacyArtistsPanel = false
     @State private var keysBannerDismissed = false   // per-launch dismiss of the "no key" banner
     @State private var proposalExtras: [UUID: [(label: String, value: String)]] = [:]  // current tags for the album sheet
     // One sheet driver. SwiftUI only honours the LAST `.sheet` modifier on a view,
@@ -371,7 +376,7 @@ struct PerfectView: View {
             HStack(spacing: 0) {
                 stepChip(1, "Scan"); stepDash()
                 stepChip(2, "Identify"); stepDash()
-                stepChip(3, "Credits"); stepDash()
+                stepChip(3, "Details"); stepDash()
                 stepChip(4, "Duplicates"); stepDash()
                 stepChip(5, "Organise"); stepDash()
                 stepChip(6, "Review"); stepDash()
@@ -426,7 +431,7 @@ struct PerfectView: View {
         switch step {
         case 1: return "Step 1 — Scan"
         case 2: return "Step 2 — Identify"
-        case 3: return "Step 3 — Fill credits"
+        case 3: return "Step 3 — Details"
         case 4: return "Step 4 — Duplicates"
         case 5: return "Step 5 — Organise"
         default: return "Step 6 — Review"
@@ -442,7 +447,7 @@ struct PerfectView: View {
             }
             return "Reading tags and finding junk, empty folders and duplicate artists."
         case 2: return "Matching each track by its sound. Your tags are trusted; only real gaps get filled."
-        case 3: return "Looking up composer, label and cover art for the tracks missing them."
+        case 3: return "Filling in missing details — composer, label and other credits — for tracks that lack them."
         case 4: return "Find duplicate tracks and keep the best copy — or skip if you don't need it."
         case 5: return "Rebuild a clean Album Artist / Album / ## Title tree from the tags — or skip it."
         default:
@@ -652,10 +657,10 @@ struct PerfectView: View {
             VStack(alignment: .leading, spacing: 14) {
                 Text("What the scan found — junk files, empty folders and duplicate artists. These merge/clean on disk when you Apply.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                if store.artists.isEmpty && store.renames.isEmpty && store.groups.isEmpty && !store.checkingTags {
+                if store.renames.isEmpty && store.groups.isEmpty && !store.checkingTags {
                     Text("Nothing to clean up — the folder structure is already tidy.").foregroundStyle(.secondary).padding(.top, 8)
                 }
-                artistsSection
+                if showLegacyArtistsPanel { artistsSection }
                 if !store.renames.isEmpty { renamesSection }
                 ForEach(store.groups, id: \.kind.rawValue) { group in section(group.kind, group.items) }
             }
