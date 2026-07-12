@@ -764,6 +764,51 @@ actor CoverArtClient {
         return await itunesCover(artist: artist, album: album)
     }
 
+    /// SEVERAL candidate covers for manual review — every release MBID's Cover Art
+    /// Archive image plus the top matching iTunes results, deduped. This is what the
+    /// Artwork step shows so you can pick the right one from the services, rather
+    /// than trusting a single auto-picked cover.
+    func candidates(releaseMBIDs: [String], artist: String, album: String) async -> [Data] {
+        var out: [Data] = []
+        var seen = Set<String>()
+        func add(_ d: Data) {
+            let k = "\(d.count):" + String(d.prefix(48).reduce(UInt64(0)) { $0 &+ UInt64($1) })
+            if seen.insert(k).inserted { out.append(d) }
+        }
+        for mbid in releaseMBIDs { if let d = await frontCover(releaseMBID: mbid) { add(d) } }
+        for d in await itunesCovers(artist: artist, album: album) { add(d) }
+        return out
+    }
+
+    /// The top matching iTunes album covers (not just the single best one), for the picker.
+    func itunesCovers(artist: String, album: String, limit: Int = 6) async -> [Data] {
+        guard !album.isEmpty else { return [] }
+        var out: [Data] = []
+        let termRaw = (artist + " " + album).trimmingCharacters(in: .whitespaces)
+        let term = termRaw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "https://itunes.apple.com/search?term=\(term)&entity=album&limit=15"),
+              let (data, resp) = try? await session.data(from: url),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let results = json["results"] as? [[String: Any]] else { return [] }
+        let wantAlbum = TrackProposal.typoFold(album).lowercased()
+        // rank by title match, but for a manual picker keep loose matches too (the
+        // user is choosing) — exact/contains first, then the rest.
+        let ranked = results.map { r -> (Int, [String: Any]) in
+            let cn = TrackProposal.typoFold((r["collectionName"] as? String ?? "")).lowercased()
+            let score = cn == wantAlbum ? 3 : (cn.contains(wantAlbum) || wantAlbum.contains(cn) ? 2 : 1)
+            return (score, r)
+        }.sorted { $0.0 > $1.0 }
+        for (_, r) in ranked.prefix(limit) {
+            guard let art = r["artworkUrl100"] as? String else { continue }
+            let big = art.replacingOccurrences(of: "100x100bb", with: "1200x1200bb")
+            if let iu = URL(string: big),
+               let (d, ir) = try? await session.data(from: iu),
+               (ir as? HTTPURLResponse)?.statusCode == 200, !d.isEmpty { out.append(d) }
+        }
+        return out
+    }
+
     /// Apple iTunes Search artwork (no key; ~20 req/min). Upsizes the 100px thumb
     /// URL to 600px. Picks the album result whose title best matches.
     func itunesCover(artist: String, album: String) async -> Data? {

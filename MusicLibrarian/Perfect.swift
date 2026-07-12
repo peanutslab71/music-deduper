@@ -192,6 +192,7 @@ struct ArtworkReviewItem: Identifiable {
     let artist: String
     let album: String
     let files: [String]     // root-relative paths of the album's tracks
+    var mbids: [String] = [] // release MBIDs (from identify), for Cover Art Archive lookups
 }
 
 // MARK: - Found cover art (preview before it's embedded)
@@ -441,7 +442,8 @@ final class PerfectStore: ObservableObject {
             byAlbum[key] = e
         }
         artworkNeedsReview = byAlbum.values.filter { $0.anyBlank }
-            .map { ArtworkReviewItem(artist: $0.artist, album: $0.album, files: $0.files) }
+            .map { ArtworkReviewItem(artist: $0.artist, album: $0.album, files: $0.files,
+                                     mbids: mbids(forAlbum: $0.album, artist: $0.artist)) }
             .sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
         artworkStagePlanned = true
     }
@@ -450,7 +452,8 @@ final class PerfectStore: ObservableObject {
     /// a cover they don't like even on an album that wasn't auto-flagged.
     func reviewAlbumArt(artist: String, album: String, files: [String]) {
         guard !artworkNeedsReview.contains(where: { $0.artist == artist && $0.album == album }) else { return }
-        artworkNeedsReview.append(ArtworkReviewItem(artist: artist, album: album, files: files))
+        artworkNeedsReview.append(ArtworkReviewItem(artist: artist, album: album, files: files,
+                                                    mbids: mbids(forAlbum: album, artist: artist)))
     }
 
     // organise (rebuild the clean Album Artist/Album/## Title tree from tags)
@@ -1726,7 +1729,7 @@ final class PerfectStore: ObservableObject {
             var artEdits: [String] = []                                      // rels where art was added
             var artPromotions: [(rel: String, oldType: Int)] = []            // rels whose art was retagged to front
             let artReplacements: [(rel: String, backup: String, oldType: Int)] = []  // kept for run.json shape; keep-existing art no longer replaces, so always empty here
-            var flaggedArt: [(artist: String, album: String, files: [String])] = []  // mixed albums with no cover found
+            var flaggedArt: [(artist: String, album: String, files: [String], mbids: [String])] = []  // mixed albums with no cover found
             var log = "Music Librarian — change log \(Date())\nLibrary: \(root.path)\n\n"
 
             func move(_ fromRel: String, _ toRel: String) -> Bool {
@@ -1820,7 +1823,7 @@ final class PerfectStore: ObservableObject {
                 let blanks = prints.filter { $0.print == nil }
                 let distinct = Set(withArt.compactMap { $0.print })
                 if distinct.count > 1 {
-                    flaggedArt.append((job.artist, job.album, job.files.map { $0.rel }))
+                    flaggedArt.append((job.artist, job.album, job.files.map { $0.rel }, job.mbids))
                     log += "ART: album '\(job.artist) — \(job.album)' has \(distinct.count) different covers → flagged for review\n"
                     continue
                 }
@@ -1842,7 +1845,7 @@ final class PerfectStore: ObservableObject {
                 }
                 guard let data = fillData else {
                     // gaps but nothing to fill with → manual review
-                    flaggedArt.append((job.artist, job.album, blanks.map { $0.f.rel }))
+                    flaggedArt.append((job.artist, job.album, blanks.map { $0.f.rel }, job.mbids))
                     log += "ART: album '\(job.artist) — \(job.album)' has \(blanks.count) blank track(s) and no cover found → flagged for review\n"
                     continue
                 }
@@ -1932,7 +1935,7 @@ final class PerfectStore: ObservableObject {
                 try? fm.removeItem(at: quarantine)
             }
             await self.finishCommit(count: total, quarantine: quarantine, cancelled: wasCancelled,
-                                    flagged: flaggedArt.map { ArtworkReviewItem(artist: $0.artist, album: $0.album, files: $0.files) })
+                                    flagged: flaggedArt.map { ArtworkReviewItem(artist: $0.artist, album: $0.album, files: $0.files, mbids: $0.mbids) })
         }
     }
 
@@ -1979,6 +1982,27 @@ final class PerfectStore: ObservableObject {
     /// Re-run the online search for a flagged album (editable artist/album).
     func researchCover(artist: String, album: String) async -> Data? {
         await CoverArtClient().itunesCover(artist: artist, album: album)
+    }
+
+    /// Candidate covers FROM THE SERVICES for an album under review — Cover Art
+    /// Archive (by the album's release MBIDs) plus the top iTunes matches — so the
+    /// Artwork step offers real cover choices, not just whatever's already embedded.
+    func serviceCovers(for item: ArtworkReviewItem) async -> [Data] {
+        await CoverArtClient().candidates(releaseMBIDs: item.mbids, artist: item.artist, album: item.album)
+    }
+    /// Re-search the services with edited artist/album terms.
+    func serviceCovers(artist: String, album: String, mbids: [String] = []) async -> [Data] {
+        await CoverArtClient().candidates(releaseMBIDs: mbids, artist: artist, album: album)
+    }
+
+    /// The release MBIDs the identify pass found for an album (for Cover Art Archive).
+    private func mbids(forAlbum album: String, artist: String) -> [String] {
+        let al = album.lowercased(), ar = artist.lowercased()
+        let ids = proposals.filter {
+            ($0.chosenAlbum.isEmpty ? $0.curAlbum : $0.chosenAlbum).lowercased() == al
+            && ($0.newArtist.isEmpty ? $0.curArtist : $0.newArtist).lowercased() == ar
+        }.compactMap { $0.enrichment?.releaseMBID }
+        return Array(Set(ids))
     }
 
     /// Apply a chosen cover to every track of a flagged album — backing up any

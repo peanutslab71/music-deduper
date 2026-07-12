@@ -1979,11 +1979,12 @@ struct OrganiseTreePanel: View {
 struct ArtworkReviewCard: View {
     @ObservedObject var store: PerfectStore
     let item: ArtworkReviewItem
-    @State private var covers: [Data] = []
+    @State private var covers: [Data] = []           // covers already embedded on the tracks
+    @State private var serviceCovers: [Data] = []    // candidates fetched from the cover services
+    @State private var loadingService = true
     @State private var searchArtist: String
     @State private var searchAlbum: String
     @State private var searching = false
-    @State private var searchResult: Data?
 
     init(store: PerfectStore, item: ArtworkReviewItem) {
         self.store = store; self.item = item
@@ -2001,41 +2002,59 @@ struct ArtworkReviewCard: View {
                 Spacer()
                 Button("Leave as-is") { store.skipArtworkReview(item) }.controlSize(.small)
             }
-            if !covers.isEmpty {
-                Text("Use one of the covers already on these tracks:").font(.caption).foregroundStyle(.secondary)
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(Array(covers.enumerated()), id: \.offset) { _, d in
-                            if let img = NSImage(data: d) {
-                                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-                                    .frame(width: 60, height: 60).clipShape(RoundedRectangle(cornerRadius: 6))
-                                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.black.opacity(0.1)))
-                                    .onTapGesture { store.applyChosenArtwork(item: item, image: d) }
-                                    .help("Put this on all \(item.files.count) tracks")
-                            }
-                        }
-                    }
-                }
+
+            // From the cover services — the real choices (Cover Art Archive + iTunes)
+            HStack(spacing: 6) {
+                Text("From the cover services — click to use:").font(.caption).foregroundStyle(.secondary)
+                if loadingService { ProgressView().controlSize(.mini) }
             }
+            if serviceCovers.isEmpty && !loadingService {
+                Text("No cover found online — edit the artist/album and search again, choose a file, or use one already on the tracks.")
+                    .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                coverStrip(serviceCovers, size: 74)
+            }
+
+            // Fallback: a cover already embedded on one of the tracks
+            if !covers.isEmpty {
+                Text("Or use a cover already on these tracks:").font(.caption).foregroundStyle(.secondary)
+                coverStrip(covers, size: 58)
+            }
+
             HStack(spacing: 8) {
-                Button { chooseFile() } label: { Label("Choose image…", systemImage: "folder") }.controlSize(.small)
-                Divider().frame(height: 16)
-                TextField("Artist", text: $searchArtist).textFieldStyle(.roundedBorder).frame(width: 110).controlSize(.small)
-                TextField("Album", text: $searchAlbum).textFieldStyle(.roundedBorder).frame(width: 130).controlSize(.small)
-                Button { research() } label: { Label("Search", systemImage: "magnifyingglass") }
+                TextField("Artist", text: $searchArtist).textFieldStyle(.roundedBorder).frame(width: 120).controlSize(.small)
+                TextField("Album", text: $searchAlbum).textFieldStyle(.roundedBorder).frame(width: 140).controlSize(.small)
+                Button { research() } label: { Label("Search again", systemImage: "magnifyingglass") }
                     .controlSize(.small).disabled(searching || searchAlbum.isEmpty)
                 if searching { ProgressView().controlSize(.mini) }
-                if let r = searchResult, let img = NSImage(data: r) {
-                    Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-                        .frame(width: 40, height: 40).clipShape(RoundedRectangle(cornerRadius: 4))
-                        .onTapGesture { store.applyChosenArtwork(item: item, image: r) }
-                        .help("Use this search result on all tracks")
-                }
+                Divider().frame(height: 16)
+                Button { chooseFile() } label: { Label("Choose file…", systemImage: "folder") }.controlSize(.small)
             }
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor).opacity(0.5)))
-        .task { covers = store.existingCovers(for: item) }
+        .task {
+            covers = store.existingCovers(for: item)
+            serviceCovers = await store.serviceCovers(for: item)
+            loadingService = false
+        }
+    }
+
+    /// A horizontal strip of tappable candidate covers.
+    @ViewBuilder private func coverStrip(_ data: [Data], size: CGFloat) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Array(data.enumerated()), id: \.offset) { _, d in
+                    if let img = NSImage(data: d) {
+                        Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                            .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.black.opacity(0.1)))
+                            .onTapGesture { store.applyChosenArtwork(item: item, image: d) }
+                            .help("Put this on all \(item.files.count) track(s)")
+                    }
+                }
+            }
+        }
     }
 
     private func chooseFile() {
@@ -2050,8 +2069,8 @@ struct ArtworkReviewCard: View {
     private func research() {
         searching = true
         Task {
-            let d = await store.researchCover(artist: searchArtist, album: searchAlbum)
-            await MainActor.run { searchResult = d; searching = false }
+            let found = await store.serviceCovers(artist: searchArtist, album: searchAlbum, mbids: item.mbids)
+            await MainActor.run { serviceCovers = found; searching = false }
         }
     }
 }
