@@ -175,6 +175,7 @@ struct PerfectPlan: Codable {
     var organiseStageDone: Bool
     var artworkChoices: [String: Data] = [:]   // covers picked in the Artwork step, not yet applied
     var wizardStep: Int = 1                     // the step the user was on
+    var confirmedCompilations: [String] = []    // albums the user OK'd as various-artists sets
 }
 
 /// One album's cover-art work: resolve a single image (from any of the album's
@@ -422,6 +423,7 @@ final class PerfectStore: ObservableObject {
         deduped = false; dedupStageDone = false; organised = false; organiseStageDone = false
         organiseStale = false
         organisePlans = []; dedupClusters = []; dedupTracks = []
+        compilationCandidates = []; confirmedCompilations = []
         lastRunSummary = nil
         clearPlan()                      // starting over discards the saved plan for this library
         root = nil                       // → PerfectView shows the intro / new-library screen
@@ -518,6 +520,52 @@ final class PerfectStore: ObservableObject {
     @Published var organised = false          // organise plan has been built at least once
     @Published var organising = false
     @Published var organiseProgress = ""
+
+    // Compilations: albums confirmed as various-artists sets → filed under "Various
+    // Artists". Flag (TCMP/cpil) ones are auto; flag-less ones are surfaced as
+    // candidates for the user to confirm.
+    struct CompilationCandidate: Identifiable {
+        let id: String            // fold(stripDiscSuffix(album))
+        let album: String
+        let artists: [String]
+        let trackCount: Int
+        let flagged: Bool         // carries the compilation flag → auto, no confirmation needed
+    }
+    @Published var compilationCandidates: [CompilationCandidate] = []
+    @Published var confirmedCompilations: Set<String> = []    // fold-keyed album names the user OK'd
+
+    func toggleCompilation(_ id: String, on: Bool) {
+        if on { confirmedCompilations.insert(id) } else { confirmedCompilations.remove(id) }
+        organise()   // re-plan with the new set so the tree preview updates
+    }
+
+    /// Flag-less compilation candidates: an album title shared by ≥2 distinct artists
+    /// with NO album-artist on any track, non-generic name. Flagged albums are marked
+    /// flagged=true (auto). For the Organise step's confirmation list.
+    nonisolated static func compilationCandidates(from inputs: [OrganiseInput]) -> [CompilationCandidate] {
+        struct Acc { var album = ""; var artists = Set<String>(); var count = 0; var anyAA = false; var anyFlag = false }
+        var by: [String: Acc] = [:]
+        for t in inputs {
+            let a = Organiser.stripDiscSuffix(t.album).clean
+            guard !a.isEmpty, !Organiser.isPlaceholderAlbum(a) else { continue }
+            let key = Organiser.fold(a)
+            var acc = by[key] ?? Acc(); acc.album = a
+            if !t.artist.isEmpty { acc.artists.insert(Organiser.fold(t.artist)) }
+            acc.count += 1
+            if !t.albumArtist.isEmpty { acc.anyAA = true }
+            if t.isCompilation { acc.anyFlag = true }
+            by[key] = acc
+        }
+        let generic: Set<String> = ["greatest hits", "the greatest hits", "hits", "live", "best of",
+                                    "the best of", "collection", "the collection", "compilation",
+                                    "essential", "the essential", "gold", "anthology"]
+        return by.compactMap { (key, acc) -> CompilationCandidate? in
+            let heuristic = acc.artists.count >= 2 && !acc.anyAA && !generic.contains(key)
+            guard heuristic || acc.anyFlag else { return nil }
+            return CompilationCandidate(id: key, album: acc.album, artists: Array(acc.artists).sorted(),
+                                        trackCount: acc.count, flagged: acc.anyFlag)
+        }.sorted { $0.album.lowercased() < $1.album.lowercased() }
+    }
     @Published var composerFirstClassical = false   // classical → Composer-first folders
     @Published var renumberTracks = false           // assign a clean 1…N per album/disc
     // category-level toggles (the mockup's bulk on/off buttons)
@@ -575,6 +623,7 @@ final class PerfectStore: ObservableObject {
         artworkStagePlanned = false; artworkStageDone = false; artworkNeedsReview = []
         deduped = false; dedupStageDone = false; organised = false; organiseStageDone = false
         organiseStale = false
+        compilationCandidates = []; confirmedCompilations = []
         diagnosed = false
         lastRunSummary = nil
         loadRuns()
@@ -616,7 +665,8 @@ final class PerfectStore: ObservableObject {
                                proposals: proposals, diagnosed: diagnosed, didIdentify: didIdentify,
                                enriched: enriched, artworkStageDone: artworkStageDone,
                                dedupStageDone: dedupStageDone, organiseStageDone: organiseStageDone,
-                               artworkChoices: ArtworkChoices.shared.byKey, wizardStep: wizardStep)
+                               artworkChoices: ArtworkChoices.shared.byKey, wizardStep: wizardStep,
+                               confirmedCompilations: Array(confirmedCompilations))
         if let data = try? JSONEncoder().encode(plan) { try? data.write(to: url) }
     }
 
@@ -637,6 +687,7 @@ final class PerfectStore: ObservableObject {
         organiseStageDone = plan.organiseStageDone
         ArtworkChoices.shared.byKey = plan.artworkChoices
         wizardStep = min(max(plan.wizardStep, 1), 7)
+        confirmedCompilations = Set(plan.confirmedCompilations)
         return true
     }
 
@@ -1408,6 +1459,7 @@ final class PerfectStore: ObservableObject {
             }, uniquingKeysWith: { a, _ in a })
         let composerFirst = composerFirstClassical
         let renumber = renumberTracks
+        let comps = confirmedCompilations
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var inputs: [OrganiseInput] = []
@@ -1429,13 +1481,16 @@ final class PerfectStore: ObservableObject {
                         if artist.isEmpty { artist = inf.artist }
                         if album.isEmpty { album = inf.album }
                     }
+                    let comp = (Self.readField(url, "compilation") ?? "").hasPrefix("1")
                     inputs.append(OrganiseInput(rel: rel, ext: url.pathExtension.lowercased(),
                         artist: artist, albumArtist: aa, album: album, title: title,
-                        trackNo: track, discNo: disc, isClassical: false, composer: composer))
+                        trackNo: track, discNo: disc, isClassical: false, composer: composer,
+                        isCompilation: comp))
                 }
             }
-            let plans = Organiser.plan(inputs, composerFirstForClassical: composerFirst, renumber: renumber)
-            await self.finishOrganise(plans)
+            let plans = Organiser.plan(inputs, composerFirstForClassical: composerFirst, renumber: renumber, compilations: comps)
+            let candidates = Self.compilationCandidates(from: inputs)
+            await self.finishOrganise(plans, candidates: candidates)
         }
     }
 
@@ -1472,7 +1527,8 @@ final class PerfectStore: ObservableObject {
             inputs.append(OrganiseInput(rel: rel, ext: url.pathExtension.lowercased(),
                 artist: artist, albumArtist: readField(url, "albumartist") ?? "",
                 album: album, title: readField(url, "title") ?? "",
-                trackNo: track, discNo: disc, isClassical: false, composer: readField(url, "composer") ?? ""))
+                trackNo: track, discNo: disc, isClassical: false, composer: readField(url, "composer") ?? "",
+                isCompilation: (readField(url, "compilation") ?? "").hasPrefix("1")))
         }
         return inputs
     }
@@ -1501,8 +1557,11 @@ final class PerfectStore: ObservableObject {
         organisePlans[i].targetRel = dir.isEmpty ? clean : dir + "/" + clean
     }
 
-    private func finishOrganise(_ plans: [OrganisePlan]) {
+    private func finishOrganise(_ plans: [OrganisePlan], candidates: [CompilationCandidate] = []) {
         organising = false; organiseProgress = ""; organised = true; organisePlans = plans
+        compilationCandidates = candidates
+        // auto-confirm flagged compilations so they're filed under Various Artists
+        for c in candidates where c.flagged { confirmedCompilations.insert(c.id) }
         let moves = plans.filter { $0.targetRel != nil && $0.targetRel != $0.rel }.count
         let flagged = plans.filter { $0.targetRel == nil }.count
         status = "Clean tree planned — \(moves) file(s) to reorganise, \(flagged) flagged."
@@ -1881,6 +1940,7 @@ final class PerfectStore: ObservableObject {
         let doOrganise = organised
         let composerFirstOrg = composerFirstClassical
         let renumberOrg = renumberTracks
+        let compsOrg = confirmedCompilations
         commitTotal = accTagEdits.count
             + accEnrich.reduce(0) { $0 + $1.2.count }
             + accPerf.reduce(0) { $0 + $1.2.count }
@@ -2157,7 +2217,8 @@ final class PerfectStore: ObservableObject {
             if doOrganise && !box.cancelled {
                 await self.setCommitProgress("Reorganising files", done: done)
                 let plans = Organiser.plan(Self.organiseInputsFromDisk(root: root, fm: fm),
-                                           composerFirstForClassical: composerFirstOrg, renumber: renumberOrg)
+                                           composerFirstForClassical: composerFirstOrg, renumber: renumberOrg,
+                                           compilations: compsOrg)
                 for p in plans {
                     if box.cancelled { break }
                     guard let target = p.targetRel, target != p.rel else { continue }
@@ -2244,6 +2305,7 @@ final class PerfectStore: ObservableObject {
             deduped = false; dedupClusters = []; dedupTracks = []
             organised = false; organisePlans = []
             organiseStale = false
+            compilationCandidates = []; confirmedCompilations = []
         }
         if !cancelled && count > 0 { clearPlan() }   // the plan has been applied → consumed
         loadRuns()

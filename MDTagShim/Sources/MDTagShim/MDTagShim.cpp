@@ -61,6 +61,7 @@ static const char *frameIdFor(const char *field) {
     if (std::strcmp(field, "label") == 0)       return "TPUB";
     if (std::strcmp(field, "conductor") == 0)   return "TPE3";
     if (std::strcmp(field, "date") == 0)        return "TDRC";
+    if (std::strcmp(field, "compilation") == 0) return "TCMP";
     return nullptr;
 }
 
@@ -80,6 +81,7 @@ static const char *propKeyFor(const char *field) {
     if (std::strcmp(field, "conductor") == 0)   return "CONDUCTOR";
     if (std::strcmp(field, "label") == 0)       return "LABEL";
     if (std::strcmp(field, "date") == 0)        return "DATE";
+    if (std::strcmp(field, "compilation") == 0) return "COMPILATION";
     return nullptr;
 }
 

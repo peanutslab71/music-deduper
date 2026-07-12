@@ -658,6 +658,7 @@ struct PerfectView: View {
                 }
                 .frame(maxWidth: .infinity)
             } else {
+                compilationsPanel
                 Text("\(moves.count) file(s) to reorganise on Apply · \(flagged.count) left in place · rename folders/files on the right if you like")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack(spacing: 0) {
@@ -675,6 +676,49 @@ struct PerfectView: View {
             }
         }
         .padding(16)
+    }
+
+    // Albums that look like various-artists compilations. Flagged ones (TCMP/cpil) are
+    // filed under "Various Artists" automatically; flag-less guesses need a tick to confirm.
+    @ViewBuilder private var compilationsPanel: some View {
+        let cands = store.compilationCandidates
+        if !cands.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "person.2.square.stack").foregroundStyle(.orange)
+                    Text("Compilations").fontWeight(.semibold)
+                    Text("filed under “Various Artists” instead of split across each artist")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(cands) { c in
+                    HStack(spacing: 8) {
+                        Toggle("", isOn: Binding(
+                            get: { store.confirmedCompilations.contains(c.id) },
+                            set: { store.toggleCompilation(c.id, on: $0) }))
+                            .toggleStyle(.checkbox).labelsHidden()
+                            .disabled(c.flagged)
+                            .help(c.flagged ? "Tagged as a compilation — filed automatically." : "Tick to file this as a Various Artists compilation.")
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack(spacing: 6) {
+                                Text(c.album).fontWeight(.medium)
+                                if c.flagged {
+                                    Text("tagged").font(.system(size: 9, weight: .bold))
+                                        .padding(.horizontal, 5).padding(.vertical, 1)
+                                        .background(Capsule().fill(Color.orange.opacity(0.2)))
+                                        .foregroundStyle(.orange)
+                                }
+                            }
+                            Text("\(c.trackCount) tracks · \(c.artists.count) artists: \(c.artists.prefix(4).joined(separator: ", "))\(c.artists.count > 4 ? "…" : "")")
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.orange.opacity(0.25)))
+        }
     }
 
     private func treePanelColumn(title: String, subtitle: String, panel: OrganiseTreePanel) -> some View {

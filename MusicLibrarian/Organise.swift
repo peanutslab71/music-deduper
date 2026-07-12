@@ -22,6 +22,7 @@ struct OrganiseInput {
     var discNo: Int            // 0 = missing/none
     var isClassical: Bool = false
     var composer: String = ""
+    var isCompilation: Bool = false   // TCMP/cpil flag set → file under Various Artists
 }
 
 /// What Organise proposes for one track.
@@ -38,25 +39,36 @@ enum Organiser {
     /// Build a placement plan for a whole library. `composerFirstForClassical`
     /// switches classical tracks to a Composer-first top folder.
     static func plan(_ inputs: [OrganiseInput], composerFirstForClassical: Bool = false,
-                     renumber: Bool = false) -> [OrganisePlan] {
+                     renumber: Bool = false, compilations: Set<String> = []) -> [OrganisePlan] {
+        // A track belongs to a compilation if it carries the compilation flag OR its
+        // album was confirmed as one. Compilations group GLOBALLY by album (all the
+        // various-artist tracks scattered under different artist folders come back
+        // together under "Various Artists / <Album>").
+        func isCompilation(_ t: OrganiseInput) -> Bool {
+            t.isCompilation || compilations.contains(fold(stripDiscSuffix(t.album).clean))
+        }
         // Group by the ARTIST FOLDER + the disc-stripped album, so the two discs of a
         // set (which live in separate "[Disc 1]"/"[Disc 2]" folders) land in ONE group
-        // — that's what lets multi-disc numbering and one shared cover work — while
-        // different albums (even same-named, different artist) stay apart.
+        // — while different albums (even same-named, different artist) stay apart.
         var groups: [String: [OrganiseInput]] = [:]
         for t in inputs {
-            let dir = (t.rel as NSString).deletingLastPathComponent
-            let parent = (dir as NSString).deletingLastPathComponent
-            let key = parent + "\u{0}" + fold(stripDiscSuffix(t.album).clean)
+            let album = fold(stripDiscSuffix(t.album).clean)
+            let key: String
+            if isCompilation(t) && !albumOrEmpty(t.album).isEmpty {
+                key = "\u{0}VA\u{0}" + album            // one group per compilation album, across folders
+            } else {
+                let parent = ((t.rel as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+                key = parent + "\u{0}" + album
+            }
             groups[key, default: []].append(t)
         }
 
         var plans: [OrganisePlan] = []
-        for (_, tracks) in groups {
-            // Album Artist for the whole group: an explicit album-artist tag wins;
-            // else if the folder holds several different track artists it's a
-            // compilation → "Various Artists"; else the single track artist.
-            let groupAlbumArtist = deriveAlbumArtist(tracks)
+        for (key, tracks) in groups {
+            let isCompGroup = key.hasPrefix("\u{0}VA\u{0}")
+            // Album Artist for the whole group: a compilation is "Various Artists";
+            // else an explicit album-artist tag wins; else the dominant/only artist.
+            let groupAlbumArtist = isCompGroup ? "Various Artists" : deriveAlbumArtist(tracks)
             // Canonical album name for the whole group (most common disc-stripped title)
             // so every disc/track of one album shares a folder even if casing differs.
             let albumNames = tracks.map { albumOrEmpty($0.album) }.filter { !$0.isEmpty }
