@@ -39,7 +39,8 @@ enum Organiser {
     /// Build a placement plan for a whole library. `composerFirstForClassical`
     /// switches classical tracks to a Composer-first top folder.
     static func plan(_ inputs: [OrganiseInput], composerFirstForClassical: Bool = false,
-                     renumber: Bool = false, compilations: Set<String> = []) -> [OrganisePlan] {
+                     renumber: Bool = false, compilations: Set<String> = [],
+                     mergeAlbums: Set<String> = []) -> [OrganisePlan] {
         // A track belongs to a compilation if it carries the compilation flag OR its
         // album was confirmed as one. Compilations group GLOBALLY by album (all the
         // various-artist tracks scattered under different artist folders come back
@@ -58,7 +59,14 @@ enum Organiser {
                 key = "\u{0}VA\u{0}" + album            // one group per compilation album, across folders
             } else {
                 let parent = ((t.rel as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
-                key = parent + "\u{0}" + album
+                let canon = canonicalAlbumKey(t.album)
+                // A confirmed edition-merge folds "X", "X [Sony]", "X (Remastered)" into one
+                // group so their tracks share a folder and gaps get filled from each other.
+                if mergeAlbums.contains(canon) {
+                    key = parent + "\u{0}#M#\u{0}" + canon
+                } else {
+                    key = parent + "\u{0}" + album
+                }
             }
             groups[key, default: []].append(t)
         }
@@ -66,14 +74,18 @@ enum Organiser {
         var plans: [OrganisePlan] = []
         for (key, tracks) in groups {
             let isCompGroup = key.hasPrefix("\u{0}VA\u{0}")
+            let isMergeGroup = key.contains("\u{0}#M#\u{0}")
             // Album Artist for the whole group: a compilation is "Various Artists";
             // else an explicit album-artist tag wins; else the dominant/only artist.
             let groupAlbumArtist = isCompGroup ? "Various Artists" : deriveAlbumArtist(tracks)
-            // Canonical album name for the whole group (most common disc-stripped title)
-            // so every disc/track of one album shares a folder even if casing differs.
+            // Canonical album name for the whole group. A merge group uses the cleanest
+            // edition-stripped name ("The Very Best Of Curtis Mayfield", not "…[Castle]");
+            // otherwise the most common disc-stripped title (so casing/format agree).
             let albumNames = tracks.map { albumOrEmpty($0.album) }.filter { !$0.isEmpty }
-            let groupAlbum = Dictionary(grouping: albumNames, by: { fold($0) })
-                .max(by: { $0.value.count < $1.value.count })?.value.first ?? (albumNames.first ?? "")
+            let groupAlbum = isMergeGroup
+                ? canonicalAlbumDisplay(albumNames)
+                : (Dictionary(grouping: albumNames, by: { fold($0) })
+                    .max(by: { $0.value.count < $1.value.count })?.value.first ?? (albumNames.first ?? ""))
             // Multi-disc if any track carries a disc number ≥ 2 (tag or album-name).
             let multiDisc = tracks.contains { t in
                 if t.discNo >= 2 { return true }
@@ -252,6 +264,82 @@ enum Organiser {
 
     static func fold(_ s: String) -> String {
         s.lowercased().trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Remove edition/label/format markers from an album name so different pressings
+    /// of the SAME album collapse together: "Legends [Sony]" → "Legends",
+    /// "The Very Best of Curtis Mayfield [Castle]" → "The Very Best of Curtis Mayfield",
+    /// "Rumours (Remastered 2013)" → "Rumours". Song qualifiers in parens that are NOT
+    /// edition words (e.g. "(Live)", "(Acoustic)") are LEFT ALONE — they mark a genuinely
+    /// different album. Square-bracket groups are always metadata and always stripped.
+    static func stripEditionMarkers(_ s: String) -> String {
+        var t = s
+        // [Castle] [Sony] [Remastered] [Disc 2] … — square brackets are never part of a title
+        t = t.replacingOccurrences(of: #"\s*\[[^\]]*\]"#, with: "", options: .regularExpression)
+        // (Remastered 2013) (Deluxe Edition) (Mono) … — parens ONLY when an edition word is inside
+        let kw = "remaster(?:ed)?|deluxe|expanded|anniversary|mono|stereo|bonus|reissue|collector'?s?|" +
+                 "special edition|digital remaster|original recording|explicit|clean version"
+        t = t.replacingOccurrences(of: "\\s*\\([^)]*\\b(?:\(kw))\\b[^)]*\\)", with: "",
+                                   options: [.regularExpression, .caseInsensitive])
+        // trailing " - Remastered 2009" / " – Deluxe" with no brackets
+        t = t.replacingOccurrences(of: "\\s*[-–—]\\s*(?:\\d{4}\\s+)?(?:\(kw))(?:\\s+\\d{4})?\\s*$", with: "",
+                                   options: [.regularExpression, .caseInsensitive])
+        return t.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The canonical identity of an album for merging/deduping: album name with disc
+    /// suffix + edition markers removed, then punctuation/case/leading-article folded.
+    /// Two folders with the same key are the same album, wherever their files live.
+    static func canonicalAlbumKey(_ album: String) -> String {
+        let core = stripEditionMarkers(stripDiscSuffix(album).clean)
+        var k = core.lowercased()
+        k = k.replacingOccurrences(of: #"[’‘`]"#, with: "'", options: .regularExpression)
+        k = k.replacingOccurrences(of: "&", with: "and")
+        k = k.replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
+        k = k.replacingOccurrences(of: #"\b(the|a|an)\b"#, with: " ", options: .regularExpression)
+        return k.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Detected album-merge groups: one canonical album whose files carry ≥2 genuinely
+    /// different raw names (an edition suffix or a stray copy), under one artist folder.
+    /// These are surfaced in Organise for the user to confirm before folding together.
+    struct MergeGroup: Identifiable { let key: String; let display: String; let rawNames: [String]; let artist: String; let count: Int
+        var id: String { artist + "\u{0}" + key } }
+    static func albumMergeCandidates(_ inputs: [OrganiseInput]) -> [MergeGroup] {
+        struct Acc { var origNames: [String] = []; var foldedDistinct = Set<String>(); var artist = ""; var count = 0 }
+        var by: [String: Acc] = [:]
+        for t in inputs {
+            let a = albumOrEmpty(t.album)
+            guard !a.isEmpty else { continue }
+            let parent = ((t.rel as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+            let key = parent + "\u{0}" + canonicalAlbumKey(t.album)
+            var acc = by[key] ?? Acc()
+            // count distinct names only after the disc suffix is removed, so multi-disc
+            // "[Disc 1]"/"[Disc 2]" folders don't look like different albums.
+            acc.foldedDistinct.insert(fold(stripDiscSuffix(a).clean))
+            acc.origNames.append(a)
+            acc.count += 1
+            if acc.artist.isEmpty { acc.artist = deriveAlbumArtist([t]) }
+            by[key] = acc
+        }
+        return by.compactMap { (key, acc) -> MergeGroup? in
+            guard acc.foldedDistinct.count >= 2 else { return nil }
+            let canon = String(key.split(separator: "\u{0}").last ?? "")
+            let names = Array(Set(acc.origNames)).sorted()
+            return MergeGroup(key: canon, display: canonicalAlbumDisplay(acc.origNames),
+                              rawNames: names, artist: acc.artist, count: acc.count)
+        }.sorted { $0.display < $1.display }
+    }
+
+    /// The cleanest display name to give a merged album: the disc/edition-stripped form
+    /// of its most common raw name (ties → the shortest, which usually has least junk).
+    static func canonicalAlbumDisplay(_ names: [String]) -> String {
+        let cleaned = names.map { stripEditionMarkers(stripDiscSuffix($0).clean) }.filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else { return names.first ?? "" }
+        let counts = Dictionary(grouping: cleaned, by: { $0 }).mapValues { $0.count }
+        return counts.max(by: { ($0.value, $1.key.count) < ($1.value, $0.key.count) })?.key ?? cleaned[0]
     }
 
     /// Leading track number from a filename like "02 Keep The Faith" or "1-05 …".

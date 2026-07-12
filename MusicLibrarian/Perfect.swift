@@ -176,6 +176,7 @@ struct PerfectPlan: Codable {
     var artworkChoices: [String: Data] = [:]   // covers picked in the Artwork step, not yet applied
     var wizardStep: Int = 1                     // the step the user was on
     var confirmedCompilations: [String] = []    // albums the user OK'd as various-artists sets
+    var declinedAlbumMerges: [String] = []      // edition-merges the user turned off
 }
 
 /// One album's cover-art work: resolve a single image (from any of the album's
@@ -424,6 +425,7 @@ final class PerfectStore: ObservableObject {
         organiseStale = false
         organisePlans = []; dedupClusters = []; dedupTracks = []
         compilationCandidates = []; confirmedCompilations = []
+        albumMergeCandidates = []; declinedAlbumMerges = []
         lastRunSummary = nil
         clearPlan()                      // starting over discards the saved plan for this library
         root = nil                       // → PerfectView shows the intro / new-library screen
@@ -539,6 +541,18 @@ final class PerfectStore: ObservableObject {
         organise()   // re-plan with the new set so the tree preview updates
     }
 
+    // Album-edition merges: different-named folders of the SAME album ("Legends" +
+    // "Legends [Sony]", or "…[Castle]") folded into one. Surfaced for confirmation;
+    // default ON (the edition markers stripped are high-confidence), so we track the
+    // ones the user has explicitly DECLINED rather than the ones they've approved.
+    @Published var albumMergeCandidates: [Organiser.MergeGroup] = []
+    @Published var declinedAlbumMerges: Set<String> = []    // canonical keys the user turned OFF
+
+    func toggleAlbumMerge(_ key: String, on: Bool) {
+        if on { declinedAlbumMerges.remove(key) } else { declinedAlbumMerges.insert(key) }
+        organise()
+    }
+
     /// Flag-less compilation candidates: an album title shared by ≥2 distinct artists
     /// with NO album-artist on any track, non-generic name. Flagged albums are marked
     /// flagged=true (auto). For the Organise step's confirmation list.
@@ -624,6 +638,7 @@ final class PerfectStore: ObservableObject {
         deduped = false; dedupStageDone = false; organised = false; organiseStageDone = false
         organiseStale = false
         compilationCandidates = []; confirmedCompilations = []
+        albumMergeCandidates = []; declinedAlbumMerges = []
         diagnosed = false
         lastRunSummary = nil
         loadRuns()
@@ -666,7 +681,8 @@ final class PerfectStore: ObservableObject {
                                enriched: enriched, artworkStageDone: artworkStageDone,
                                dedupStageDone: dedupStageDone, organiseStageDone: organiseStageDone,
                                artworkChoices: ArtworkChoices.shared.byKey, wizardStep: wizardStep,
-                               confirmedCompilations: Array(confirmedCompilations))
+                               confirmedCompilations: Array(confirmedCompilations),
+                               declinedAlbumMerges: Array(declinedAlbumMerges))
         if let data = try? JSONEncoder().encode(plan) { try? data.write(to: url) }
     }
 
@@ -688,6 +704,7 @@ final class PerfectStore: ObservableObject {
         ArtworkChoices.shared.byKey = plan.artworkChoices
         wizardStep = min(max(plan.wizardStep, 1), 7)
         confirmedCompilations = Set(plan.confirmedCompilations)
+        declinedAlbumMerges = Set(plan.declinedAlbumMerges)
         return true
     }
 
@@ -1460,6 +1477,7 @@ final class PerfectStore: ObservableObject {
         let composerFirst = composerFirstClassical
         let renumber = renumberTracks
         let comps = confirmedCompilations
+        let declinedMerges = declinedAlbumMerges
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var inputs: [OrganiseInput] = []
@@ -1488,9 +1506,13 @@ final class PerfectStore: ObservableObject {
                         isCompilation: comp))
                 }
             }
-            let plans = Organiser.plan(inputs, composerFirstForClassical: composerFirst, renumber: renumber, compilations: comps)
+            let mergeCands = Organiser.albumMergeCandidates(inputs)
+            // default every detected edition-merge ON, minus the ones the user declined
+            let merges = Set(mergeCands.map { $0.key }).subtracting(declinedMerges)
+            let plans = Organiser.plan(inputs, composerFirstForClassical: composerFirst, renumber: renumber,
+                                       compilations: comps, mergeAlbums: merges)
             let candidates = Self.compilationCandidates(from: inputs)
-            await self.finishOrganise(plans, candidates: candidates)
+            await self.finishOrganise(plans, candidates: candidates, mergeCands: mergeCands)
         }
     }
 
@@ -1557,9 +1579,11 @@ final class PerfectStore: ObservableObject {
         organisePlans[i].targetRel = dir.isEmpty ? clean : dir + "/" + clean
     }
 
-    private func finishOrganise(_ plans: [OrganisePlan], candidates: [CompilationCandidate] = []) {
+    private func finishOrganise(_ plans: [OrganisePlan], candidates: [CompilationCandidate] = [],
+                                mergeCands: [Organiser.MergeGroup] = []) {
         organising = false; organiseProgress = ""; organised = true; organisePlans = plans
         compilationCandidates = candidates
+        albumMergeCandidates = mergeCands
         // auto-confirm flagged compilations so they're filed under Various Artists
         for c in candidates where c.flagged { confirmedCompilations.insert(c.id) }
         let moves = plans.filter { $0.targetRel != nil && $0.targetRel != $0.rel }.count
@@ -1689,32 +1713,39 @@ final class PerfectStore: ObservableObject {
         deduping = true; status = "Finding duplicates…"; dedupClusters = []; dedupTracks = []
         let mode = MatchMode.balanced, tol = 2.0, cross = false
         Task.detached(priority: .userInitiated) {
-            var urls: [URL] = []
-            if let en = FileManager.default.enumerator(at: root,
-                    includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) {
-                while let obj = en.nextObject() {
-                    guard let u = obj as? URL, Self.isAudio(u) else { continue }
-                    if Self.rel(u, root).hasPrefix("Music Librarian Quarantine") { continue }
-                    urls.append(u)
-                }
-            }
-            var built: [Track] = []
-            for u in urls {
-                let size = Int64((try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-                let m = await readMetadata(url: u, size: size)
-                let rel = Self.rel(u, root)
-                built.append(Track(id: built.count, url: u, name: u.lastPathComponent,
-                    relDir: (rel as NSString).deletingLastPathComponent, size: size, ext: m.ext,
-                    title: m.title, artist: m.artist, album: m.album, albumArtist: m.albumArtist,
-                    trackNo: m.trackNo, discNo: m.discNo, duration: m.duration,
-                    lossless: m.lossless, bitrate: m.bitrate, codec: m.codec))
-            }
-            var mutable = built
+            var mutable = await Self.buildTracksFromDisk(root: root, fm: FileManager.default)
             let cl = buildClusters(&mutable, mode: mode, tol: tol, crossAlbum: cross) { s in
                 Task { await self.setDedupStatus(s) }
             }
             await self.finishDedup(tracks: mutable, clusters: cl)
         }
+    }
+
+    /// Read every audio file under `root` (skipping quarantine) into Track records with
+    /// their current on-disk tags. Shared by the Duplicates preview and the Apply-time
+    /// re-detection, so both see exactly the same data.
+    nonisolated static func buildTracksFromDisk(root: URL, fm: FileManager) async -> [Track] {
+        var urls: [URL] = []
+        if let en = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey],
+                                  options: [.skipsHiddenFiles]) {
+            while let obj = en.nextObject() {
+                guard let u = obj as? URL, isAudio(u) else { continue }
+                if rel(u, root).hasPrefix("Music Librarian Quarantine") { continue }
+                urls.append(u)
+            }
+        }
+        var built: [Track] = []
+        for u in urls {
+            let size = Int64((try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            let m = await readMetadata(url: u, size: size)
+            let r = rel(u, root)
+            built.append(Track(id: built.count, url: u, name: u.lastPathComponent,
+                relDir: (r as NSString).deletingLastPathComponent, size: size, ext: m.ext,
+                title: m.title, artist: m.artist, album: m.album, albumArtist: m.albumArtist,
+                trackNo: m.trackNo, discNo: m.discNo, duration: m.duration,
+                lossless: m.lossless, bitrate: m.bitrate, codec: m.codec))
+        }
+        return built
     }
 
     private func setDedupStatus(_ s: String) { status = s }
@@ -1925,28 +1956,25 @@ final class PerfectStore: ObservableObject {
         // (instead of a separate immediate apply). Files come from the dedup scan.
         struct DedupJob: Sendable { let keeper: URL; let keeperRel: String; let losers: [DLoser] }
         struct DLoser: Sendable { let url: URL; let rel: String }
-        var dedupJobs: [DedupJob] = []
-        if deduped {
-            let byId = Dictionary(dedupTracks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-            for c in dedupClusters {
-                guard let k = byId[c.keeperID] else { continue }
-                let losers = c.memberIDs.filter { $0 != c.keeperID }.compactMap { byId[$0] }
-                    .map { DLoser(url: $0.url, rel: Self.rel($0.url, root)) }
-                if !losers.isEmpty { dedupJobs.append(DedupJob(keeper: k.url, keeperRel: Self.rel(k.url, root), losers: losers)) }
-            }
-        }
+        // Duplicates are RE-DETECTED at commit from the final on-disk tags (below),
+        // not taken from the Duplicates-step snapshot — so album fixes made in Identify
+        // or Review are in effect when we decide what's a duplicate. The snapshot count
+        // is only used to size the progress bar.
+        let doDedup = deduped
+        let dedupEstimate = dedupClusters.reduce(0) { $0 + max($1.memberIDs.count - 1, 0) }
         // DEFERRED organise — rebuild the clean tree at the end of this run, on the
         // final tags (so late-accepted album fixes land in the right folder).
         let doOrganise = organised
         let composerFirstOrg = composerFirstClassical
         let renumberOrg = renumberTracks
         let compsOrg = confirmedCompilations
+        let declinedMergesOrg = declinedAlbumMerges
         commitTotal = accTagEdits.count
             + accEnrich.reduce(0) { $0 + $1.2.count }
             + accPerf.reduce(0) { $0 + $1.2.count }
             + albumArt.reduce(0) { $0 + $1.files.count }
             + removals.count + accRenames.count + accMerges.count
-            + dedupJobs.reduce(0) { $0 + $1.losers.count }
+            + dedupEstimate
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var done = 0
@@ -2131,8 +2159,27 @@ final class PerfectStore: ObservableObject {
                 }
             }
 
-            // 0e) DUPLICATES — merge each keeper's blank fields + missing cover from a
-            //     duplicate, then quarantine the losers (deferred from the step).
+            // 0e) DUPLICATES — RE-DETECT from the final tags now that every Identify/Review
+            //     album fix above is on disk, so cross-folder copies that only became
+            //     duplicates after their album was corrected (an "Unknown Album" that's
+            //     really "Check Your Head", a "[Sony]"/"[Castle]" edition) are caught.
+            //     Highest-quality copy is kept; losers are quarantined. (User setting:
+            //     auto within an album.)
+            var dedupJobs: [DedupJob] = []
+            if doDedup && !box.cancelled {
+                await self.setCommitProgress("Finding duplicates", done: done)
+                var tracks = await Self.buildTracksFromDisk(root: root, fm: fm)
+                let clusters = buildClusters(&tracks, mode: .balanced, tol: 2.0, crossAlbum: false)
+                let byId = Dictionary(tracks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+                for c in clusters {
+                    guard let k = byId[c.keeperID] else { continue }
+                    let losers = c.memberIDs.filter { $0 != c.keeperID }.compactMap { byId[$0] }
+                        .map { DLoser(url: $0.url, rel: Self.rel($0.url, root)) }
+                    if !losers.isEmpty {
+                        dedupJobs.append(DedupJob(keeper: k.url, keeperRel: Self.rel(k.url, root), losers: losers))
+                    }
+                }
+            }
             if !dedupJobs.isEmpty && !box.cancelled {
                 await self.setCommitProgress("Merging & removing duplicates", done: done)
                 let backfill = ["title", "artist", "album", "albumartist", "composer", "lyricist", "label", "conductor", "date", "track", "disc"]
@@ -2216,14 +2263,39 @@ final class PerfectStore: ObservableObject {
             //    land in the right folder. Re-planned here, not from the step preview.
             if doOrganise && !box.cancelled {
                 await self.setCommitProgress("Reorganising files", done: done)
-                let plans = Organiser.plan(Self.organiseInputsFromDisk(root: root, fm: fm),
+                let orgInputs = Self.organiseInputsFromDisk(root: root, fm: fm)
+                let mergesOrg = Set(Organiser.albumMergeCandidates(orgInputs).map { $0.key })
+                    .subtracting(declinedMergesOrg)
+                let plans = Organiser.plan(orgInputs,
                                            composerFirstForClassical: composerFirstOrg, renumber: renumberOrg,
-                                           compilations: compsOrg)
+                                           compilations: compsOrg, mergeAlbums: mergesOrg)
                 for p in plans {
                     if box.cancelled { break }
                     guard let target = p.targetRel, target != p.rel else { continue }
                     let src = root.appendingPathComponent(p.rel)
                     guard fm.fileExists(atPath: src.path) else { continue }
+                    // Collision: the clean-tree destination is already occupied. If the
+                    // sitting file is the SAME recording (matching size, or matching
+                    // duration), this source is a leftover duplicate the dedup pass didn't
+                    // fold in — quarantine it rather than stranding it in a stray folder.
+                    let dst = root.appendingPathComponent(target)
+                    if fm.fileExists(atPath: dst.path) {
+                        let sSize = (try? src.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
+                        let dSize = (try? dst.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -2
+                        var sameTrack = (sSize == dSize)
+                        if !sameTrack {
+                            let sd = await readMetadata(url: src, size: Int64(max(sSize, 0))).duration
+                            let dd = await readMetadata(url: dst, size: Int64(max(dSize, 0))).duration
+                            if sd > 0 && dd > 0 { sameTrack = abs(sd - dd) <= 3.0 }
+                        }
+                        if sameTrack {
+                            if move(p.rel, qRel + "/" + p.rel) { log += "DUPLICATE (target exists) → quarantine: \(p.rel)\n" }
+                        } else {
+                            log += "SKIPPED (target exists, different track): \(p.rel) → \(target)\n"
+                        }
+                        await bump("Reorganising files")
+                        continue
+                    }
                     for (field, value) in p.tagWrites {
                         let old = Self.readField(src, field) ?? ""
                         if old == value { continue }
@@ -2306,6 +2378,7 @@ final class PerfectStore: ObservableObject {
             organised = false; organisePlans = []
             organiseStale = false
             compilationCandidates = []; confirmedCompilations = []
+            albumMergeCandidates = []; declinedAlbumMerges = []
         }
         if !cancelled && count > 0 { clearPlan() }   // the plan has been applied → consumed
         loadRuns()

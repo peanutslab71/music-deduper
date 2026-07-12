@@ -293,6 +293,31 @@ func buildClusters(_ tracks: inout [Track], mode: MatchMode, tol: Double,
                 else { used.remove(a.i) }
             }
         }
+        // 2.5) same album (edition/case-folded) + same disc + same track number = a
+        //      duplicate, even when the titles disagree — a typo ("Fingel" vs "Finger")
+        //      or a different filename format across folders. A loose duration check
+        //      guards against two genuinely different songs sharing a track number.
+        var byNum: [String: [Int]] = [:]
+        for t in tracks where !used.contains(t.id) && t.trackNo > 0 && !t.album.isEmpty {
+            let key = normText(t.displayArtist) + "\u{0}" + Organiser.canonicalAlbumKey(t.album)
+                    + "\u{0}\(max(t.discNo, 0))\u{0}\(t.trackNo)"
+            byNum[key, default: []].append(t.id)
+        }
+        for ids in byNum.values where ids.count > 1 {
+            var remaining = ids.sorted()
+            while let first = remaining.first {
+                let a = tracks[first]
+                var grp = [first]; var rest: [Int] = []
+                for id in remaining.dropFirst() {
+                    let b = tracks[id]
+                    let durOK = (a.duration <= 0 || b.duration <= 0) ? true
+                                : abs(a.duration - b.duration) <= max(tol, 3.0)
+                    if durOK { grp.append(id) } else { rest.append(id) }
+                }
+                if grp.count > 1 { clusters.append(make(grp, "same album & track number")); used.formUnion(grp) }
+                remaining = rest
+            }
+        }
         // 3) filename-copy net (same dir + base + ext)
         var byDir: [String: [Int]] = [:]
         for t in tracks where !used.contains(t.id) {

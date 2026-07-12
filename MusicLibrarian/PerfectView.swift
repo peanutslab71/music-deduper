@@ -658,6 +658,7 @@ struct PerfectView: View {
                 }
                 .frame(maxWidth: .infinity)
             } else {
+                albumMergePanel
                 compilationsPanel
                 Text("\(moves.count) file(s) to reorganise on Apply · \(flagged.count) left in place · rename folders/files on the right if you like")
                     .font(.caption).foregroundStyle(.secondary)
@@ -718,6 +719,40 @@ struct PerfectView: View {
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.06)))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.orange.opacity(0.25)))
+        }
+    }
+
+    // Differently-named folders of the same album ("Legends" + "Legends [Sony]", or a
+    // "[Castle]" edition) that will be folded into one. On by default; untick to keep apart.
+    @ViewBuilder private var albumMergePanel: some View {
+        let cands = store.albumMergeCandidates
+        if !cands.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "square.stack.3d.up").foregroundStyle(.blue)
+                    Text("Album editions to merge").fontWeight(.semibold)
+                    Text("same album under different folder names — combined into one, keeping the best of each")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(cands) { m in
+                    HStack(spacing: 8) {
+                        Toggle("", isOn: Binding(
+                            get: { !store.declinedAlbumMerges.contains(m.key) },
+                            set: { store.toggleAlbumMerge(m.key, on: $0) }))
+                            .toggleStyle(.checkbox).labelsHidden()
+                            .help("Merge these into one album folder. Untick to keep them separate.")
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(m.artist.isEmpty ? "" : m.artist + " — ")\(m.display)").fontWeight(.medium)
+                            Text("folders: \(m.rawNames.joined(separator: "  ·  "))")
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.blue.opacity(0.25)))
         }
     }
 
