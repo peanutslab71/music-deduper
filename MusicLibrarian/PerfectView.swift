@@ -114,10 +114,10 @@ struct PerfectView: View {
         case 1:  return true
         case 2:  return store.diagnosed              // Scan done
         case 3:  return store.didIdentify            // Identify done/skipped
-        case 4:  return store.enriched               // Details done/skipped → Artwork
-        case 5:  return store.artworkStageDone       // Artwork done/skipped → Duplicates
-        case 6:  return store.dedupStageDone         // Duplicates done/skipped → Organise
-        case 7:  return store.organiseStageDone      // Organise done/skipped → Review
+        case 4:  return store.enriched               // Details done/skipped → Duplicates
+        case 5:  return store.dedupStageDone         // Duplicates done/skipped → Organise
+        case 6:  return store.organiseStageDone      // Organise done/skipped → Artwork
+        case 7:  return store.artworkStageDone       // Artwork done/skipped → Review
         default: return false
         }
     }
@@ -128,14 +128,14 @@ struct PerfectView: View {
     /// Advance to the next step, marking the skippable stages done as we leave them
     /// (whether or not they were applied).
     private func advance() {
-        if step == 4 { store.artworkStageDone = true }
-        if step == 5 { store.dedupStageDone = true }
-        if step == 6 { store.organiseStageDone = true }
+        if step == 4 { store.dedupStageDone = true }
+        if step == 5 { store.organiseStageDone = true }
+        if step == 6 { store.artworkStageDone = true }
         currentStep = min(step + 1, lastStep)
         store.savePlan()   // persist how far through the wizard we are
     }
     // Steps 1–3 need their pass done (Identify/Details are skippable via their own
-    // Skip button); the skippable stages (4 Artwork, 5 Duplicates, 6 Organise) can
+    // Skip button); the skippable stages (4 Duplicates, 5 Organise, 6 Artwork) can
     // always be moved past; Review (7) uses Apply instead of Next.
     private var showNext: Bool {
         switch step {
@@ -145,9 +145,9 @@ struct PerfectView: View {
         }
     }
     private var nextLabel: String {
-        if step == 4 { return store.artworkStagePlanned ? "Next" : "Skip →" }
-        if step == 5 { return store.deduped ? "Next" : "Skip →" }
-        if step == 6 { return store.organised ? "Next" : "Skip →" }
+        if step == 4 { return store.deduped ? "Next" : "Skip →" }
+        if step == 5 { return store.organised ? "Next" : "Skip →" }
+        if step == 6 { return store.artworkStagePlanned ? "Next" : "Skip →" }
         return "Next"
     }
 
@@ -397,9 +397,9 @@ struct PerfectView: View {
                 stepChip(1, "Scan"); stepDash()
                 stepChip(2, "Identify"); stepDash()
                 stepChip(3, "Details"); stepDash()
-                stepChip(4, "Artwork"); stepDash()
-                stepChip(5, "Duplicates"); stepDash()
-                stepChip(6, "Organise"); stepDash()
+                stepChip(4, "Duplicates"); stepDash()
+                stepChip(5, "Organise"); stepDash()
+                stepChip(6, "Artwork"); stepDash()
                 stepChip(7, "Review"); stepDash()
                 stepChip(8, "Apply")
             }
@@ -453,9 +453,9 @@ struct PerfectView: View {
         case 1: return "Step 1 — Scan"
         case 2: return "Step 2 — Identify"
         case 3: return "Step 3 — Details"
-        case 4: return "Step 4 — Artwork"
-        case 5: return "Step 5 — Duplicates"
-        case 6: return "Step 6 — Organise"
+        case 4: return "Step 4 — Duplicates"
+        case 5: return "Step 5 — Organise"
+        case 6: return "Step 6 — Artwork"
         default: return "Step 7 — Review"
         }
     }
@@ -470,9 +470,9 @@ struct PerfectView: View {
             return "Reading tags and finding junk, empty folders and duplicate artists."
         case 2: return "Matching each track by its sound. Your tags are trusted; only real gaps get filled."
         case 3: return "Filling in missing details — composer, label and other credits — for tracks that lack them."
-        case 4: return "Your existing covers are kept. Choose art only for albums that are missing or mixed — or skip."
-        case 5: return "Find duplicate tracks and keep the best copy — or skip if you don't need it."
-        case 6: return "Rebuild a clean Album Artist / Album / ## Title tree from the tags — or skip it."
+        case 4: return "Find duplicate tracks and keep the best copy — or skip if you don't need it."
+        case 5: return "Rebuild a clean Album Artist / Album / ## Title tree from the tags — or skip it."
+        case 6: return "Your existing covers are kept. Choose art only for albums that are missing or mixed — or skip."
         default:
             let act = store.proposals.filter { $0.isActionable }.count
             return "\(act) track(s) with a suggested change. \(reviewQueueCount) worth checking before you apply."
@@ -495,9 +495,9 @@ struct PerfectView: View {
         } else if step == 3 {
             passButton(stepDone ? "Re-fill credits" : "Fill credits", "text.badge.plus") { store.enrich() }
             if !stepDone { Button("Skip credits →") { store.enriched = true }.controlSize(.large) }
-        } else if step == 4 {
+        } else if step == 6 {
             passButton(store.artworkStagePlanned ? "Re-check artwork" : "Review artwork", "photo.on.rectangle.angled") { store.planArtworkStage() }
-        } else if step == 5 || step == 6 {
+        } else if step == 4 || step == 5 {
             EmptyView()   // the stage's own controls live in the middle panel
         } else {
             Button { store.identify() } label: { Label("Re-identify", systemImage: "arrow.clockwise") }.controlSize(.large)
@@ -556,11 +556,11 @@ struct PerfectView: View {
             if store.enriching { workingMiddle(title: "looking up credits", sub: store.enrichProgress, live: true, credits: true) }
             else { reviewMiddle }                        // credit adds (or prompt if not run)
         case 4:
-            artworkMiddle                                // Artwork stage
-        case 5:
             dedupMiddle                                  // Duplicates stage
-        case 6:
+        case 5:
             organiseMiddle                               // Organise stage
+        case 6:
+            artworkMiddle                                // Artwork stage
         default:
             reviewMiddle                                 // Review (step 7)
         }
