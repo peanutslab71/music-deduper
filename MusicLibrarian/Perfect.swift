@@ -1055,6 +1055,8 @@ final class PerfectStore: ObservableObject {
 
     var hasWork: Bool {
         !ArtworkChoices.shared.byKey.isEmpty          // covers picked in the Artwork step
+            || (deduped && !dedupClusters.isEmpty)    // duplicates to remove on Apply
+            || (organised && organisePlans.contains { $0.targetRel != nil && $0.targetRel != $0.rel })  // tree to rebuild
             || findings.contains { $0.accepted && $0.kind.safe }
             || renames.contains { $0.accepted && $0.newName != $0.oldName }
             || artists.contains { $0.accepted && artistHasApplicableWork($0) }
@@ -1430,6 +1432,26 @@ final class PerfectStore: ObservableObject {
             let plans = Organiser.plan(inputs, composerFirstForClassical: composerFirst, renumber: renumber)
             await self.finishOrganise(plans)
         }
+    }
+
+    /// Build organise inputs by reading the tags ON DISK (no in-memory overlay) —
+    /// used by the final Apply, which re-plans the tree AFTER the tag/dedup writes
+    /// so placement reflects the final state. Nonisolated → runs in the commit task.
+    nonisolated static func organiseInputsFromDisk(root: URL, fm: FileManager) -> [OrganiseInput] {
+        var inputs: [OrganiseInput] = []
+        guard let en = fm.enumerator(at: root, includingPropertiesForKeys: nil) else { return inputs }
+        for case let url as URL in en {
+            guard isAudio(url) else { continue }
+            let rel = self.rel(url, root)
+            if rel.hasPrefix("Music Librarian Quarantine") { continue }
+            let track = Int((readField(url, "track") ?? "").prefix(while: { $0.isNumber })) ?? 0
+            let disc  = Int((readField(url, "disc")  ?? "").prefix(while: { $0.isNumber })) ?? 0
+            inputs.append(OrganiseInput(rel: rel, ext: url.pathExtension.lowercased(),
+                artist: readField(url, "artist") ?? "", albumArtist: readField(url, "albumartist") ?? "",
+                album: readField(url, "album") ?? "", title: readField(url, "title") ?? "",
+                trackNo: track, discNo: disc, isClassical: false, composer: readField(url, "composer") ?? ""))
+        }
+        return inputs
     }
 
     /// Rename a proposed folder (and cascade to everything under it). `oldPath` is the
@@ -1817,11 +1839,31 @@ final class PerfectStore: ObservableObject {
             return files.isEmpty ? nil : (img, files)
         }
         // rough total for the progress bar (art files counted; merges/renames add a little)
+        // DEFERRED duplicate plan — keeper + losers per cluster, applied in THIS run
+        // (instead of a separate immediate apply). Files come from the dedup scan.
+        struct DedupJob: Sendable { let keeper: URL; let keeperRel: String; let losers: [DLoser] }
+        struct DLoser: Sendable { let url: URL; let rel: String }
+        var dedupJobs: [DedupJob] = []
+        if deduped {
+            let byId = Dictionary(dedupTracks.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            for c in dedupClusters {
+                guard let k = byId[c.keeperID] else { continue }
+                let losers = c.memberIDs.filter { $0 != c.keeperID }.compactMap { byId[$0] }
+                    .map { DLoser(url: $0.url, rel: Self.rel($0.url, root)) }
+                if !losers.isEmpty { dedupJobs.append(DedupJob(keeper: k.url, keeperRel: Self.rel(k.url, root), losers: losers)) }
+            }
+        }
+        // DEFERRED organise — rebuild the clean tree at the end of this run, on the
+        // final tags (so late-accepted album fixes land in the right folder).
+        let doOrganise = organised
+        let composerFirstOrg = composerFirstClassical
+        let renumberOrg = renumberTracks
         commitTotal = accTagEdits.count
             + accEnrich.reduce(0) { $0 + $1.2.count }
             + accPerf.reduce(0) { $0 + $1.2.count }
             + albumArt.reduce(0) { $0 + $1.files.count }
             + removals.count + accRenames.count + accMerges.count
+            + dedupJobs.reduce(0) { $0 + $1.losers.count }
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var done = 0
@@ -2006,52 +2048,124 @@ final class PerfectStore: ObservableObject {
                 }
             }
 
-            // 1) merges — move each non-canonical source's contents into the canonical
-            //    folder, then quarantine the emptied source folder.
-            if !accMerges.isEmpty || !removals.isEmpty || !accRenames.isEmpty {
-                await self.setCommitProgress("Reorganising folders", done: done)
-            }
-            for (canonical, sources) in accMerges {
-                if box.cancelled { break }
-                for src in sources where src != canonical {
-                    let srcDir = root.appendingPathComponent(src)
-                    let children = (try? fm.contentsOfDirectory(atPath: srcDir.path)) ?? []
-                    for child in children {
-                        let fromRel = src + "/" + child
-                        let toRel = canonical + "/" + child
-                        if fm.fileExists(atPath: root.appendingPathComponent(toRel).path) {
-                            // album/file already exists under the canonical — merge its
-                            // files in (one level) rather than clobber
-                            let sub = (try? fm.contentsOfDirectory(atPath: srcDir.appendingPathComponent(child).path)) ?? []
-                            for f in sub {
-                                let fFrom = fromRel + "/" + f, fTo = toRel + "/" + f
-                                if !fm.fileExists(atPath: root.appendingPathComponent(fTo).path) {
-                                    if move(fFrom, fTo) { log += "MERGED: \(fFrom) → \(fTo)\n" }
-                                } else { log += "SKIPPED (exists): \(fTo)\n" }
+            // 0e) DUPLICATES — merge each keeper's blank fields + missing cover from a
+            //     duplicate, then quarantine the losers (deferred from the step).
+            if !dedupJobs.isEmpty && !box.cancelled {
+                await self.setCommitProgress("Merging & removing duplicates", done: done)
+                let backfill = ["title", "artist", "album", "albumartist", "composer", "lyricist", "label", "conductor", "date", "track", "disc"]
+                for job in dedupJobs {
+                    if box.cancelled { break }
+                    for field in backfill where (Self.readField(job.keeper, field) ?? "").isEmpty {
+                        for l in job.losers {
+                            let v = Self.readField(l.url, field) ?? ""
+                            if !v.isEmpty {
+                                do { try Self.writeField(job.keeper, field, to: v); tagEdits.append((job.keeperRel, field, "")); log += "MERGE: \(job.keeperRel)  + \(field)\n" } catch {}
+                                break
                             }
-                        } else if move(fromRel, toRel) {
-                            log += "MERGED: \(fromRel) → \(toRel)\n"
                         }
                     }
-                    // the source folder should now be empty → quarantine it
-                    if move(src, qRel + "/" + src) { log += "QUARANTINED (emptied): \(src)\n" }
+                    if md_has_artwork(job.keeper.path) == 0 {
+                        for l in job.losers {
+                            var len: Int32 = 0, ty: Int32 = 0
+                            if let b = md_copy_artwork(l.url.path, &len, &ty) {
+                                let d = Data(bytes: b, count: Int(len)); free(b)
+                                let mime = d.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
+                                let rc = d.withUnsafeBytes { buf in md_set_artwork(job.keeper.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(d.count), mime) }
+                                if rc == 0 { artEdits.append(job.keeperRel); log += "MERGE: \(job.keeperRel)  + cover\n" }
+                                break
+                            }
+                        }
+                    }
+                    for l in job.losers {
+                        if box.cancelled { break }
+                        if move(l.rel, qRel + "/" + l.rel) { log += "DUPLICATE → quarantine: \(l.rel)\n" }
+                        await bump("Merging & removing duplicates")
+                    }
                 }
             }
 
-            // 2) removals — junk + empty folders → quarantine (deepest first)
+            // 1) folder merges + renames — ONLY when we're not rebuilding the whole
+            //    tree below (Organise supersedes artist/album placement).
+            if !doOrganise {
+                if !accMerges.isEmpty || !accRenames.isEmpty {
+                    await self.setCommitProgress("Reorganising folders", done: done)
+                }
+                for (canonical, sources) in accMerges {
+                    if box.cancelled { break }
+                    for src in sources where src != canonical {
+                        let srcDir = root.appendingPathComponent(src)
+                        let children = (try? fm.contentsOfDirectory(atPath: srcDir.path)) ?? []
+                        for child in children {
+                            let fromRel = src + "/" + child
+                            let toRel = canonical + "/" + child
+                            if fm.fileExists(atPath: root.appendingPathComponent(toRel).path) {
+                                let sub = (try? fm.contentsOfDirectory(atPath: srcDir.appendingPathComponent(child).path)) ?? []
+                                for f in sub {
+                                    let fFrom = fromRel + "/" + f, fTo = toRel + "/" + f
+                                    if !fm.fileExists(atPath: root.appendingPathComponent(fTo).path) {
+                                        if move(fFrom, fTo) { log += "MERGED: \(fFrom) → \(fTo)\n" }
+                                    } else { log += "SKIPPED (exists): \(fTo)\n" }
+                                }
+                            } else if move(fromRel, toRel) {
+                                log += "MERGED: \(fromRel) → \(toRel)\n"
+                            }
+                        }
+                        if move(src, qRel + "/" + src) { log += "QUARANTINED (emptied): \(src)\n" }
+                    }
+                }
+                for (rel, newName) in accRenames.sorted(by: { $0.0.count > $1.0.count }) {
+                    if box.cancelled { break }
+                    let parent = (rel as NSString).deletingLastPathComponent
+                    let toRel = parent.isEmpty ? newName : parent + "/" + newName
+                    if move(rel, toRel) { log += "RENAMED: \(rel) → \(toRel)\n" }
+                }
+            }
+
+            // 2) removals — junk + empty folders → quarantine (deepest first). Always.
             if !box.cancelled {
                 for (rel, kind) in removals.sorted(by: { $0.0.count > $1.0.count }) {
                     if move(rel, qRel + "/" + rel) { log += "QUARANTINED (\(kind)): \(rel)\n" }
                 }
             }
 
-            // 3) rename untidy folders (deepest first; nested renames were excluded
-            //    at detection so no parent-rename invalidates a child path)
+            // 3) ORGANISE — rebuild the clean Album Artist / Album / ## Title tree from
+            //    the FINAL tags (after every write above), so late-accepted album fixes
+            //    land in the right folder. Re-planned here, not from the step preview.
+            if doOrganise && !box.cancelled {
+                await self.setCommitProgress("Reorganising files", done: done)
+                let plans = Organiser.plan(Self.organiseInputsFromDisk(root: root, fm: fm),
+                                           composerFirstForClassical: composerFirstOrg, renumber: renumberOrg)
+                for p in plans {
+                    if box.cancelled { break }
+                    guard let target = p.targetRel, target != p.rel else { continue }
+                    let src = root.appendingPathComponent(p.rel)
+                    guard fm.fileExists(atPath: src.path) else { continue }
+                    for (field, value) in p.tagWrites {
+                        let old = Self.readField(src, field) ?? ""
+                        if old == value { continue }
+                        do { try Self.writeField(src, field, to: value); tagEdits.append((p.rel, field, old)) } catch {}
+                    }
+                    if move(p.rel, target) { log += "MOVED: \(p.rel) → \(target)\n" }
+                    await bump("Reorganising files")
+                }
+            }
+
+            // 4) prune folders emptied by any of the above moves (deepest first,
+            //    genuinely-empty only; undo re-creates them when it restores files).
             if !box.cancelled {
-                for (rel, newName) in accRenames.sorted(by: { $0.0.count > $1.0.count }) {
-                    let parent = (rel as NSString).deletingLastPathComponent
-                    let toRel = parent.isEmpty ? newName : parent + "/" + newName
-                    if move(rel, toRel) { log += "RENAMED: \(rel) → \(toRel)\n" }
+                var checkDirs = Set<String>()
+                for op in ops {
+                    var cur = (op.from as NSString).deletingLastPathComponent
+                    while !cur.isEmpty && cur != "." { checkDirs.insert(cur); cur = (cur as NSString).deletingLastPathComponent }
+                }
+                for rel in checkDirs.sorted(by: { $0.count > $1.count }) {
+                    if rel.hasPrefix("Music Librarian Quarantine") { continue }
+                    let dir = root.appendingPathComponent(rel)
+                    guard let contents = try? fm.contentsOfDirectory(atPath: dir.path) else { continue }
+                    if contents.allSatisfy({ $0 == ".DS_Store" }) {
+                        for junk in contents { try? fm.removeItem(at: dir.appendingPathComponent(junk)) }
+                        if (try? fm.removeItem(at: dir)) != nil { log += "REMOVED empty folder: \(rel)\n" }
+                    }
                 }
             }
 
@@ -2101,7 +2215,13 @@ final class PerfectStore: ObservableObject {
         proposals.removeAll { $0.accepted && $0.hasChange }
         status = lastRunSummary ?? status
         ArtworkCache.shared.clear(); FoundArtCache.shared.clear()   // art on disk changed → drop stale thumbnails
-        if !cancelled { ArtworkChoices.shared.clearAll() }          // cover choices were embedded in this run
+        if !cancelled {
+            ArtworkChoices.shared.clearAll()                        // cover choices were embedded in this run
+            // the dedup + organise plans were applied in this run → consume them
+            deduped = false; dedupClusters = []; dedupTracks = []
+            organised = false; organisePlans = []
+            organiseStale = false
+        }
         if !cancelled && count > 0 { clearPlan() }   // the plan has been applied → consumed
         loadRuns()
     }

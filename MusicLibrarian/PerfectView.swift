@@ -531,10 +531,14 @@ struct PerfectView: View {
         } else if step == 3 {
             passButton(stepDone ? "Re-fill details" : "Fill details", "text.badge.plus") { store.enrich() }
             if !stepDone { Button("Skip details →") { store.enriched = true }.controlSize(.large) }
+        } else if step == 4 {
+            passButton(store.deduped ? "Re-scan duplicates" : "Find duplicates", "square.on.square") { store.dedup() }
+        } else if step == 5 {
+            passButton(store.organised ? "Re-plan tree" : "Preview clean tree", "eye") { store.organise() }
         } else if step == 6 {
             passButton(store.artworkStagePlanned ? "Re-check artwork" : "Review artwork", "photo.on.rectangle.angled") { store.planArtworkStage() }
         } else {
-            EmptyView()   // Duplicates/Organise controls live in the middle; Review just uses Apply
+            EmptyView()   // Review just uses the footer Apply
         }
     }
 
@@ -648,15 +652,13 @@ struct PerfectView: View {
                     Spacer()
                     Image(systemName: "folder.badge.gearshape").font(.system(size: 40, weight: .light)).foregroundStyle(.purple)
                     Text("Preview the clean tree").font(.title3).fontWeight(.semibold)
-                    Text("See exactly where every file would go, side by side with where it is now.\nNothing moves until you apply — or skip this stage.")
+                    Text("Press “Preview clean tree” above to see exactly where every file would go, side by side with where it is now.\nNothing moves until the final Apply — or skip this stage.")
                         .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    Button { store.organise() } label: { Label("Preview clean tree", systemImage: "eye").frame(minWidth: 160) }
-                        .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple).disabled(store.busy)
                     Spacer()
                 }
                 .frame(maxWidth: .infinity)
             } else {
-                Text("\(moves.count) file(s) to reorganise · \(flagged.count) left in place · rename folders/files on the right if you like")
+                Text("\(moves.count) file(s) to reorganise on Apply · \(flagged.count) left in place · rename folders/files on the right if you like")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack(spacing: 0) {
                     treePanelColumn(title: "NOW", subtitle: "on disk",
@@ -670,16 +672,6 @@ struct PerfectView: View {
                 .frame(maxHeight: .infinity)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor).opacity(0.5)))
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.15)))
-                HStack {
-                    Button { store.organise() } label: { Label("Re-plan", systemImage: "arrow.clockwise") }
-                        .controlSize(.small).disabled(store.busy)
-                    Spacer()
-                    Button { store.applyOrganise() } label: {
-                        Label("Organise \(moves.count) file(s)", systemImage: "checkmark.circle.fill")
-                    }
-                    .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
-                    .disabled(store.busy || moves.isEmpty)
-                }
             }
         }
         .padding(16)
@@ -906,31 +898,18 @@ struct PerfectView: View {
                 HStack(spacing: 8) { ProgressView().controlSize(.small)
                     Text(store.status).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
             } else if store.dedupClusters.isEmpty {
-                HStack(spacing: 10) {
-                    Button { store.dedup() } label: { Label("Find duplicates", systemImage: "magnifyingglass") }
-                        .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple).disabled(store.busy)
-                    if store.deduped { Text("No duplicates found.").font(.caption).foregroundStyle(.secondary) }
-                    else { Text("Match tracks by content and tags; you pick which copy to keep.").font(.caption).foregroundStyle(.secondary) }
-                }
+                Text(store.deduped ? "No duplicates found — press Next to carry on."
+                                   : "Press “Find duplicates” above to match tracks by content and tags; you pick which copy to keep.")
+                    .font(.caption).foregroundStyle(.secondary)
             } else {
-                Text("\(store.dedupClusters.count) group(s) · \(store.dedupRemovableCount) file(s) to remove")
+                Text("\(store.dedupClusters.count) group(s) · \(store.dedupRemovableCount) file(s) will be removed on Apply — pick which copy to keep.")
                     .font(.caption).foregroundStyle(.secondary)
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
                         ForEach(store.dedupClusters) { cluster in dedupClusterRow(cluster) }
                     }
                 }
-                .frame(maxHeight: 300)
-                HStack {
-                    Button { store.dedup() } label: { Label("Re-scan", systemImage: "arrow.clockwise") }
-                        .controlSize(.small).disabled(store.busy)
-                    Spacer()
-                    Button { store.applyDedup() } label: {
-                        Label("Remove \(store.dedupRemovableCount) duplicate(s)", systemImage: "trash")
-                    }
-                    .controlSize(.large).buttonStyle(.borderedProminent).tint(.purple)
-                    .disabled(store.busy || store.dedupRemovableCount == 0)
-                }
+                .frame(maxHeight: 340)
             }
         }
         .padding(12)
@@ -1462,11 +1441,8 @@ struct PerfectView: View {
             store.proposals[i].accepted = accept
             store.proposals[i].reviewed = true
         }
-        // Confirming a name/album change AFTER Organise ran means the file's clean
-        // folder changed — flag it so the tree can be re-filed before Apply.
-        if accept && store.organiseStageDone && (p.albumChanged || p.artistChanged || p.titleChanged) {
-            store.organiseStale = true
-        }
+        // (No organise-stale flag needed now: the final Apply re-plans the tree from
+        // the settled tags, so a late-accepted change lands in the right folder.)
         store.savePlan()   // remember the decision across app restarts
         withAnimation { savedFlash = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
@@ -1770,6 +1746,13 @@ struct PerfectView: View {
         if store.applyArtwork { let n = acc.filter { $0.canAddArt }.count; if n > 0 { rows.append(("Add cover art to \(n) track(s)", .pink)) } }
         let chosen = ArtworkChoices.shared.byKey.count
         if chosen > 0 { rows.append(("Set your chosen cover on \(chosen) album(s)", .pink)) }
+        if store.deduped, store.dedupRemovableCount > 0 {
+            rows.append(("Remove \(store.dedupRemovableCount) duplicate(s), keeping the best copy", .purple))
+        }
+        if store.organised {
+            let n = store.organisePlans.filter { $0.targetRel != nil && $0.targetRel != $0.rel }.count
+            if n > 0 { rows.append(("Reorganise \(n) file(s) into the clean tree", .purple)) }
+        }
         if store.applyCredits { let n = acc.filter { !($0.enrichment?.isEmpty ?? true) }.count; if n > 0 { rows.append(("Fill credits on \(n) track(s)", Color(red: 0.13, green: 0.6, blue: 0.3))) } }
         let merges = store.artists.filter { $0.accepted }.reduce(0) { $0 + $1.folderMerges }
         if merges > 0 { rows.append(("Merge \(merges) duplicate artist folder(s)", .purple)) }
