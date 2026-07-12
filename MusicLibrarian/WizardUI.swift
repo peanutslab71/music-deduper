@@ -9,6 +9,7 @@
 import SwiftUI
 import AVFoundation
 import UniformTypeIdentifiers
+import MDTagShim
 
 // MARK: - Wizard steps
 
@@ -1031,12 +1032,14 @@ final class ArtworkCache: ObservableObject {
     }
 
     nonisolated static func load(url: URL) async -> NSImage? {
-        let asset = AVURLAsset(url: url)
-        guard let meta = try? await asset.load(.commonMetadata) else { return nil }
-        let items = AVMetadataItem.metadataItems(from: meta, filteredByIdentifier: .commonIdentifierArtwork)
-        guard let item = items.first,
-              let data = try? await item.load(.dataValue),
-              let img = NSImage(data: data) else { return nil }
+        // Read embedded art with TagLib (the same robust reader the rest of the app
+        // uses) — AVFoundation's commonMetadata misses some mp3 APIC frames, which is
+        // why an album with a valid cover (Aretha's Gold) showed blank in the grid
+        // but fine in the Library.
+        var len: Int32 = 0, type: Int32 = 0
+        guard let buf = md_copy_artwork(url.path, &len, &type), len > 0 else { return nil }
+        let data = Data(bytes: buf, count: Int(len)); free(buf)
+        guard let img = NSImage(data: data) else { return nil }
         return downscaled(img, maxSide: 320)
     }
 
