@@ -8,6 +8,7 @@
 
 import SwiftUI
 import AppKit
+import AVFoundation
 import UniformTypeIdentifiers
 
 /// An album cover: the file's embedded art if it has one, else the cover we
@@ -67,6 +68,7 @@ struct PerfectView: View {
     // the code is kept intact behind this flag.
     private let showLegacyArtistsPanel = false
     @State private var keysBannerDismissed = false   // per-launch dismiss of the "no key" banner
+    @State private var fullCover: NSImage?           // full-size cover shown when the album-sheet art is clicked
     @State private var proposalExtras: [UUID: [(label: String, value: String)]] = [:]  // current tags for the album sheet
     // One sheet driver. SwiftUI only honours the LAST `.sheet` modifier on a view,
     // so two stacked sheets meant Apply silently never opened — hence a single enum.
@@ -1040,6 +1042,8 @@ struct PerfectView: View {
                 AlbumCover(key: id, sampleURL: props.first?.url, foundMBID: a?.artReleaseMBID,
                            foundArtist: a?.subtitle ?? "", foundAlbum: a?.title ?? "",
                            wantsArt: a?.artwork ?? false, size: 52, corner: 8)
+                    .onTapGesture { loadFullCover(props.first?.url) }
+                    .help("Click to see the cover full size")
                 VStack(alignment: .leading, spacing: 1) {
                     Text(a?.title ?? "Album").font(.headline)
                     Text("\(a?.subtitle ?? "") · \(props.count) track(s)").font(.caption).foregroundStyle(.secondary)
@@ -1055,8 +1059,42 @@ struct PerfectView: View {
             }
         }
         .frame(width: 620, height: 560)
+        .overlay { fullCoverOverlay }
         .onAppear { loadProposalExtras(props) }
-        .onDisappear { audio.stop() }
+        .onDisappear { audio.stop(); fullCover = nil }
+    }
+
+    /// A tap-to-dismiss full-size view of the album cover, over the album sheet.
+    @ViewBuilder private var fullCoverOverlay: some View {
+        if let img = fullCover {
+            ZStack {
+                Color.black.opacity(0.78).ignoresSafeArea()
+                VStack(spacing: 10) {
+                    Image(nsImage: img).resizable().aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: 480, maxHeight: 480)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .shadow(radius: 24)
+                    Text("\(Int(img.size.width)) × \(Int(img.size.height)) · click to close")
+                        .font(.caption).foregroundStyle(.white.opacity(0.7))
+                }
+                .padding(24)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { fullCover = nil }
+        }
+    }
+
+    /// Read the album's full-resolution embedded cover (not the downscaled cache) for the overlay.
+    private func loadFullCover(_ url: URL?) {
+        guard let url else { return }
+        Task {
+            let asset = AVURLAsset(url: url)
+            guard let meta = try? await asset.load(.commonMetadata) else { return }
+            let items = AVMetadataItem.metadataItems(from: meta, filteredByIdentifier: .commonIdentifierArtwork)
+            guard let item = items.first, let data = try? await item.load(.dataValue),
+                  let img = NSImage(data: data) else { return }
+            await MainActor.run { fullCover = img }
+        }
     }
 
     /// Read the current tags for the album's tracks so the review rows show them all.

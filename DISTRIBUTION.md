@@ -38,7 +38,7 @@ The project is already set up for this (Hardened Runtime is enabled, which notar
 3. Click **Distribute App → Direct Distribution** (this is the Developer ID + notarization path;
    older Xcode calls it **Developer ID → Upload**).
 4. Xcode signs it, uploads it to Apple for notarization, and (after a few minutes) marks it
-   **Ready to distribute**. Click **Export** and save `MusicLibrarian.app` to a folder.
+   **Ready to distribute**. Click **Export** and save `Music Librarian.app` to a folder.
    - Xcode already **stapled** the notarization ticket to the app during export.
 
 ## 3. Make the DMG
@@ -47,7 +47,7 @@ From this folder, run the script against the exported app:
 
 ```bash
 chmod +x make_dmg.sh
-./make_dmg.sh "/path/to/exported/MusicLibrarian.app"
+./make_dmg.sh "/path/to/exported/Music Librarian.app"
 ```
 
 You'll get **`Music Librarian.dmg`** with a drag-to-Applications layout.

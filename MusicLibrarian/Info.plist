@@ -2,6 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Force the spaced name in the app menu / title bar (PRODUCT_NAME has no space). -->
+	<key>CFBundleName</key>
+	<string>Music Librarian</string>
 	<!-- The ROCK admin API is plain HTTP on the LAN; allow local-network cleartext only. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
@@ -10,7 +13,7 @@
 	</dict>
 	<!-- macOS local-network privacy prompt (Sequoia+) -->
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Music Deduper contacts your Roon ROCK server on the local network to check whether Roon Server is running before copying music to it, and to stop/start it around the copy.</string>
+	<string>Music Librarian contacts your Roon ROCK server on the local network to check whether Roon Server is running before copying music to it, and to stop/start it around the copy.</string>
 	<!-- AcoustID key for Perfect's identify feature, injected from Secrets.xcconfig -->
 	<key>ACOUSTID_API_KEY</key>
 	<string>$(ACOUSTID_API_KEY)</string>
