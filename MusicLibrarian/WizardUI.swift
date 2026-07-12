@@ -998,12 +998,23 @@ final class ArtworkCache: ObservableObject {
 
     func cached(_ key: String) -> NSImage? { images.object(forKey: key as NSString) }
 
+    /// Cache-or-load the embedded thumbnail, returning it directly (for AlbumCover's
+    /// own async load — avoids the shared objectWillChange re-render storm).
+    func image(key: String, sampleURL: URL?) async -> NSImage? {
+        if let c = images.object(forKey: key as NSString) { return c }
+        if misses.contains(key) { return nil }
+        guard let url = sampleURL else { return nil }
+        if let img = await Self.load(url: url) { images.setObject(img, forKey: key as NSString); return img }
+        misses.insert(key); return nil
+    }
+
     /// Drop every cached thumbnail AND the miss/inflight sets, so art re-reads
     /// from disk. Call after an apply changes embedded covers — otherwise an
     /// album that had no art (a recorded "miss") never re-requests and keeps
     /// showing a placeholder until the app restarts.
     func clear() {
         images.removeAllObjects(); misses.removeAll(); inflight.removeAll()
+        ArtRefresh.shared.bump()
         objectWillChange.send()
     }
 
@@ -1019,7 +1030,7 @@ final class ArtworkCache: ObservableObject {
         }
     }
 
-    nonisolated private static func load(url: URL) async -> NSImage? {
+    nonisolated static func load(url: URL) async -> NSImage? {
         let asset = AVURLAsset(url: url)
         guard let meta = try? await asset.load(.commonMetadata) else { return nil }
         let items = AVMetadataItem.metadataItems(from: meta, filteredByIdentifier: .commonIdentifierArtwork)

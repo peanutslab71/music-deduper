@@ -14,8 +14,9 @@ import UniformTypeIdentifiers
 /// An album cover: the file's embedded art if it has one, else the cover we
 /// *found* (Cover Art Archive) if art is going to be added, else a placeholder.
 struct AlbumCover: View {
-    @ObservedObject private var art = ArtworkCache.shared
-    @ObservedObject private var found = FoundArtCache.shared
+    // Observe ONLY the lightweight refresh signal (bumped on cache clear), not the
+    // image caches — so a fetch completing elsewhere doesn't re-render this card.
+    @ObservedObject private var refresh = ArtRefresh.shared
     let key: String
     let sampleURL: URL?
     let foundMBID: String?
@@ -25,11 +26,11 @@ struct AlbumCover: View {
     let size: CGFloat
     var corner: CGFloat = 12
 
-    private var foundKey: String { FoundArtCache.key(mbid: foundMBID, artist: foundArtist, album: foundAlbum) }
+    @State private var image: NSImage?
 
     var body: some View {
         Group {
-            if let img = art.cached(key) ?? (wantsArt ? found.cached(foundKey) : nil) {
+            if let img = image {
                 Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
             } else {
                 ZStack {
@@ -43,13 +44,22 @@ struct AlbumCover: View {
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: corner))
         .overlay(RoundedRectangle(cornerRadius: corner).strokeBorder(Color.black.opacity(0.08)))
-        .onAppear {
-            art.request(key: key, sampleURL: sampleURL)
-            // only reach out for a found cover when the file has none (art-less album)
-            if wantsArt && art.cached(key) == nil {
-                found.request(mbid: foundMBID, artist: foundArtist, album: foundAlbum)
-            }
+        // reload when the inputs change OR the caches were cleared (refresh.gen) —
+        // fixes the "only updates when you scroll" staleness.
+        .task(id: "\(key)|\(sampleURL?.path ?? "")|\(foundMBID ?? "")|\(wantsArt)|\(refresh.gen)") {
+            image = await Self.bestImage(key: key, sampleURL: sampleURL, mbid: foundMBID,
+                                         artist: foundArtist, album: foundAlbum, wantsArt: wantsArt)
         }
+    }
+
+    /// Prefer good embedded art; if it's missing OR a tiny thumbnail, use the
+    /// higher-resolution service cover instead (fixes 60×50 pixelated cards).
+    static func bestImage(key: String, sampleURL: URL?, mbid: String?,
+                          artist: String, album: String, wantsArt: Bool) async -> NSImage? {
+        let embedded = await ArtworkCache.shared.image(key: key, sampleURL: sampleURL)
+        if let e = embedded, max(e.size.width, e.size.height) >= 180 { return e }
+        if let f = await FoundArtCache.shared.image(mbid: mbid, artist: artist, album: album) { return f }
+        return embedded
     }
 }
 
@@ -1082,7 +1092,10 @@ struct PerfectView: View {
                            foundMBID: a?.artReleaseMBID,
                            foundArtist: a?.subtitle ?? "", foundAlbum: a?.title ?? "",
                            wantsArt: a?.artwork ?? false, size: 52, corner: 8)
-                    .onTapGesture { loadFullCover((props.first(where: { $0.curHasArt }) ?? props.first)?.url) }
+                    .onTapGesture {
+                        loadFullCover((props.first(where: { $0.curHasArt }) ?? props.first)?.url,
+                                      mbid: a?.artReleaseMBID, artist: a?.subtitle ?? "", album: a?.title ?? "")
+                    }
                     .help("Click to see the cover full size")
                 VStack(alignment: .leading, spacing: 1) {
                     Text(a?.title ?? "Album").font(.headline)
@@ -1125,15 +1138,23 @@ struct PerfectView: View {
     }
 
     /// Read the album's full-resolution embedded cover (not the downscaled cache) for the overlay.
-    private func loadFullCover(_ url: URL?) {
-        guard let url else { return }
+    /// Show the album's cover full size — whatever is actually on screen: the
+    /// embedded art if the file has it, otherwise the fetched service cover (so
+    /// the click works for albums whose shown cover was fetched, not embedded).
+    private func loadFullCover(_ url: URL?, mbid: String?, artist: String, album: String) {
         Task {
-            let asset = AVURLAsset(url: url)
-            guard let meta = try? await asset.load(.commonMetadata) else { return }
-            let items = AVMetadataItem.metadataItems(from: meta, filteredByIdentifier: .commonIdentifierArtwork)
-            guard let item = items.first, let data = try? await item.load(.dataValue),
-                  let img = NSImage(data: data) else { return }
-            await MainActor.run { fullCover = img }
+            var img: NSImage? = nil
+            if let url {
+                let asset = AVURLAsset(url: url)
+                if let meta = try? await asset.load(.commonMetadata) {
+                    let items = AVMetadataItem.metadataItems(from: meta, filteredByIdentifier: .commonIdentifierArtwork)
+                    if let item = items.first, let data = try? await item.load(.dataValue) { img = NSImage(data: data) }
+                }
+            }
+            if img == nil || max(img!.size.width, img!.size.height) < 180 {
+                if let f = await FoundArtCache.shared.image(mbid: mbid, artist: artist, album: album) { img = f }
+            }
+            if let img { await MainActor.run { fullCover = img } }
         }
     }
 

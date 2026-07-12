@@ -197,6 +197,17 @@ struct ArtworkReviewItem: Identifiable {
 
 // MARK: - Found cover art (preview before it's embedded)
 
+/// A single lightweight "artwork changed" signal. AlbumCover observes ONLY this
+/// (not the image caches themselves), so a cover fetch completing doesn't
+/// re-render every card on screen — only a cache clear (after an apply) bumps it,
+/// telling visible cards to reload from disk.
+@MainActor
+final class ArtRefresh: ObservableObject {
+    static let shared = ArtRefresh()
+    @Published private(set) var gen = 0
+    func bump() { gen &+= 1 }
+}
+
 /// Previews the cover an album will get on Apply — the SAME resolution the commit
 /// uses: Cover Art Archive by release MBID, else Apple iTunes by artist+album. So
 /// albums that'll be filled from iTunes (Aretha's Gold, Intergalactic…) show their
@@ -215,10 +226,23 @@ final class FoundArtCache: ObservableObject {
 
     func cached(_ key: String) -> NSImage? { images.object(forKey: key as NSString) }
 
+    /// Cache-or-fetch a found cover, returning it directly (for AlbumCover's own
+    /// async load — no shared objectWillChange storm).
+    func image(mbid: String?, artist: String, album: String) async -> NSImage? {
+        let k = Self.key(mbid: mbid, artist: artist, album: album)
+        if let c = images.object(forKey: k as NSString) { return c }
+        if misses.contains(k) { return nil }
+        if let img = await Self.resolve(mbid: mbid, artist: artist, album: album) {
+            images.setObject(img, forKey: k as NSString); return img
+        }
+        misses.insert(k); return nil
+    }
+
     /// Drop all cached covers + miss/inflight sets so previews re-resolve. Call
     /// after an apply so the grid reflects what's now on disk, not a stale fetch.
     func clear() {
         images.removeAllObjects(); misses.removeAll(); inflight.removeAll()
+        ArtRefresh.shared.bump()
         objectWillChange.send()
     }
 
@@ -234,7 +258,7 @@ final class FoundArtCache: ObservableObject {
         }
     }
 
-    nonisolated private static func resolve(mbid: String?, artist: String, album: String) async -> NSImage? {
+    nonisolated static func resolve(mbid: String?, artist: String, album: String) async -> NSImage? {
         if let m = mbid, !m.isEmpty, let img = await coverArtArchive(m) { return img }
         return await itunes(artist: artist, album: album)
     }
