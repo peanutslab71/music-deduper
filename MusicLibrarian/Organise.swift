@@ -210,16 +210,29 @@ enum Organiser {
     /// ", Disc 2", " - Disc 2", "Disc 2" — returning the clean title and the disc
     /// number if one was embedded. Multi-disc sets then collapse to one album.
     static func stripDiscSuffix(_ album: String) -> (clean: String, disc: Int?) {
+        // Edition/format markers — strip them but they carry NO disc number for the
+        // track (the SET size, e.g. "[2-CD]", is not "this is disc 2").
+        let editionPatterns = [
+            #"\s*[\[(]\s*\d+\s*[- ]?\s*cd(?:\s+set)?\s*[\])]\s*$"#,   // [2-CD]  (2 CD Set)
+        ]
+        for p in editionPatterns {
+            if let m = album.range(of: p, options: [.regularExpression, .caseInsensitive]) {
+                let clean = String(album[..<m.lowerBound]).trimmingCharacters(in: .whitespaces)
+                if !clean.isEmpty { return (clean, nil) }
+            }
+        }
         let patterns = [
-            #"\s*[\[(]\s*(?:disc|cd)\s*(\d+)\s*[\])]\s*$"#,   // [Disc 2] (CD 2)
-            #"\s*[-,]\s*(?:disc|cd)\s*(\d+)\s*$"#,            // , Disc 2  - CD 2
-            #"\s+(?:disc|cd)\s*(\d+)\s*$"#                    // Disc 2
+            #"\s*[\[(]\s*(?:disc|cd)\s*\d+\s*[\])]\s*$"#,        // [Disc 2] (CD 2)
+            #"\s*[-,]\s*(?:disc|cd)\s*\d+\s*$"#,                 // , Disc 2  - CD 2
+            #"\s+(?:disc|cd)\s*\d+(?:\s+of\s+\d+)?\s*$"#         // Disc 2   |   Disc 6 of 8
         ]
         for p in patterns {
             if let m = album.range(of: p, options: [.regularExpression, .caseInsensitive]) {
                 let clean = String(album[..<m.lowerBound]).trimmingCharacters(in: .whitespaces)
-                let digits = album[m].components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
-                if !clean.isEmpty { return (clean, Int(digits)) }
+                // the FIRST number in the match is the disc number ("Disc 6 of 8" → 6)
+                let matchStr = String(album[m])
+                let disc = matchStr.range(of: #"\d+"#, options: .regularExpression).flatMap { Int(matchStr[$0]) }
+                if !clean.isEmpty { return (clean, disc) }
             }
         }
         return (album, nil)
