@@ -1977,12 +1977,16 @@ struct OrganiseTreePanel: View {
 
 /// One flagged album in the manual artwork picker: choose from the covers already
 /// on its tracks, drop in your own image, re-search online, or leave it as-is.
+private struct PickImage: Identifiable { let id = UUID(); let img: NSImage }
+
 struct ArtworkReviewCard: View {
     @ObservedObject var store: PerfectStore
     let item: ArtworkReviewItem
     @State private var covers: [Data] = []           // covers already embedded on the tracks
     @State private var serviceCovers: [Data] = []    // candidates fetched from the cover services
     @State private var loadingService = true
+    @State private var selected: Data?               // the cover the user picked (border), applied on Accept
+    @State private var full: PickImage?              // shown full size in a popover from the "+" button
     @State private var searchArtist: String
     @State private var searchAlbum: String
     @State private var searching = false
@@ -1998,28 +2002,31 @@ struct ArtworkReviewCard: View {
             HStack {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("\(item.artist) — \(item.album)").fontWeight(.medium)
-                    Text("\(item.files.count) track(s)").font(.caption2).foregroundStyle(.secondary)
+                    Text("\(item.files.count) track(s) · click a cover to select, then Accept").font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Leave as-is") { store.skipArtworkReview(item) }.controlSize(.small)
+                Button("Accept") { if let s = selected { store.applyChosenArtwork(item: item, image: s) } }
+                    .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
+                    .disabled(selected == nil || store.busy)
             }
 
             // From the cover services — the real choices (Cover Art Archive + iTunes)
             HStack(spacing: 6) {
-                Text("From the cover services — click to use:").font(.caption).foregroundStyle(.secondary)
+                Text("From the cover services — click to select, + to view full size:").font(.caption).foregroundStyle(.secondary)
                 if loadingService { ProgressView().controlSize(.mini) }
             }
             if serviceCovers.isEmpty && !loadingService {
                 Text("No cover found online — edit the artist/album and search again, choose a file, or use one already on the tracks.")
                     .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
             } else {
-                coverStrip(serviceCovers, size: 74)
+                coverStrip(serviceCovers, size: 148)
             }
 
             // Fallback: a cover already embedded on one of the tracks
             if !covers.isEmpty {
-                Text("Or use a cover already on these tracks:").font(.caption).foregroundStyle(.secondary)
-                coverStrip(covers, size: 58)
+                Text("Or a cover already on these tracks:").font(.caption).foregroundStyle(.secondary)
+                coverStrip(covers, size: 96)
             }
 
             HStack(spacing: 8) {
@@ -2034,27 +2041,46 @@ struct ArtworkReviewCard: View {
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor).opacity(0.5)))
+        .popover(item: $full) { pi in
+            VStack(spacing: 8) {
+                Image(nsImage: pi.img).resizable().aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: 460, maxHeight: 460)
+                Text("\(Int(pi.img.size.width)) × \(Int(pi.img.size.height))").font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(14)
+        }
         .task {
             covers = store.existingCovers(for: item)
-            serviceCovers = await store.serviceCovers(for: item)
+            serviceCovers = await store.serviceCovers(for: item)   // preserves fetch order: CAA first, then iTunes matches
             loadingService = false
         }
     }
 
-    /// A horizontal strip of tappable candidate covers.
+    /// A horizontal strip of candidate covers — click to SELECT (border), "+" to
+    /// view at native size. Applying happens on the Accept button, not on click.
     @ViewBuilder private func coverStrip(_ data: [Data], size: CGFloat) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 ForEach(Array(data.enumerated()), id: \.offset) { _, d in
                     if let img = NSImage(data: d) {
-                        Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-                            .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: 6))
-                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.black.opacity(0.1)))
-                            .onTapGesture { store.applyChosenArtwork(item: item, image: d) }
-                            .help("Put this on all \(item.files.count) track(s)")
+                        ZStack(alignment: .topTrailing) {
+                            Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                                .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: 8))
+                                .overlay(RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(selected == d ? Color.orange : Color.black.opacity(0.12),
+                                                  lineWidth: selected == d ? 3 : 1))
+                                .onTapGesture { selected = d }
+                                .help("Click to select")
+                            Button { full = PickImage(img: img) } label: {
+                                Image(systemName: "plus.magnifyingglass").font(.system(size: 12, weight: .bold))
+                                    .padding(5).background(.ultraThinMaterial, in: Circle())
+                            }
+                            .buttonStyle(.plain).padding(5).help("View full size")
+                        }
                     }
                 }
             }
+            .padding(.vertical, 2)
         }
     }
 
@@ -2063,12 +2089,13 @@ struct ArtworkReviewCard: View {
         p.allowedContentTypes = [.image]; p.canChooseFiles = true; p.allowsMultipleSelection = false
         p.message = "Choose a cover image for \(item.album)"
         if p.runModal() == .OK, let u = p.url, let d = try? Data(contentsOf: u) {
-            store.applyChosenArtwork(item: item, image: d)
+            store.applyChosenArtwork(item: item, image: d)   // explicit file pick → apply straight away
         }
     }
 
     private func research() {
         searching = true
+        selected = nil              // old selection may not be in the new results
         Task {
             let found = await store.serviceCovers(artist: searchArtist, album: searchAlbum, mbids: item.mbids)
             await MainActor.run { serviceCovers = found; searching = false }
