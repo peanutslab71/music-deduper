@@ -59,7 +59,7 @@ enum Organiser {
             let groupAlbumArtist = deriveAlbumArtist(tracks)
             // Canonical album name for the whole group (most common disc-stripped title)
             // so every disc/track of one album shares a folder even if casing differs.
-            let albumNames = tracks.map { stripDiscSuffix($0.album).clean }.filter { !$0.isEmpty }
+            let albumNames = tracks.map { albumOrEmpty($0.album) }.filter { !$0.isEmpty }
             let groupAlbum = Dictionary(grouping: albumNames, by: { fold($0) })
                 .max(by: { $0.value.count < $1.value.count })?.value.first ?? (albumNames.first ?? "")
             // Multi-disc if any track carries a disc number ≥ 2 (tag or album-name).
@@ -100,6 +100,23 @@ enum Organiser {
             if let r = t.range(of: sep, options: .caseInsensitive) { t = String(t[..<r.lowerBound]); break }
         }
         return t.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Placeholder album tags that must NOT become a real folder ("Unknown Album",
+    /// "various", "track 03", blank). Treated as no-album so the file is flagged and
+    /// left where it is, rather than moved into a literal "Unknown Album" folder.
+    static func isPlaceholderAlbum(_ s: String) -> Bool {
+        let t = s.trimmingCharacters(in: .whitespaces).lowercased()
+        if t.isEmpty { return true }
+        if t == "unknown" || t.hasPrefix("unknown ") || t.contains("unknown album")
+            || t == "various" || t == "various artists" { return true }
+        if t.range(of: "^track ?0*\\d+$", options: .regularExpression) != nil { return true }
+        return false
+    }
+    /// The disc-stripped album to place under, or "" if it's a placeholder.
+    static func albumOrEmpty(_ raw: String) -> String {
+        let cleaned = stripDiscSuffix(raw).clean
+        return isPlaceholderAlbum(cleaned) ? "" : cleaned
     }
 
     /// Album artist for a group: a single consistent (non-"Various Artists") tag wins;
@@ -143,7 +160,7 @@ enum Organiser {
         // Use the GROUP's album artist + album name for every track, so all discs/tracks
         // of one album agree (a stray "Various Artists" on one disc no longer splits it).
         let albumArtist = groupAlbumArtist.isEmpty ? t.albumArtist : groupAlbumArtist
-        let cleanAlbum = groupAlbum.isEmpty ? Organiser.stripDiscSuffix(t.album).clean : groupAlbum
+        let cleanAlbum = groupAlbum.isEmpty ? Organiser.albumOrEmpty(t.album) : groupAlbum
         // Can't place a file with no album or no artist of any kind — flag, leave put.
         if cleanAlbum.isEmpty || (albumArtist.isEmpty && t.artist.isEmpty) {
             return OrganisePlan(rel: t.rel, targetRel: nil,
