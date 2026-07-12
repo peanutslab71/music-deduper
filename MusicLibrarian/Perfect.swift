@@ -1516,7 +1516,7 @@ final class PerfectStore: ObservableObject {
             var perfEdits: [(rel: String, name: String, role: String)] = []  // recorded performer credits
             var artEdits: [String] = []                                      // rels where art was added
             var artPromotions: [(rel: String, oldType: Int)] = []            // rels whose art was retagged to front
-            var artReplacements: [(rel: String, backup: String, oldType: Int)] = []  // rels whose art was replaced (old art backed up)
+            let artReplacements: [(rel: String, backup: String, oldType: Int)] = []  // kept for run.json shape; keep-existing art no longer replaces, so always empty here
             var flaggedArt: [(artist: String, album: String, files: [String])] = []  // mixed albums with no cover found
             var log = "Music Librarian — change log \(Date())\nLibrary: \(root.path)\n\n"
 
@@ -1579,8 +1579,6 @@ final class PerfectStore: ObservableObject {
             //     track — backing up each replaced image so it's fully reversible. If
             //     no cover can be found for a mixed album, flag it for manual review.
             let artClient = CoverArtClient()
-            let artBackupDir = quarantine.appendingPathComponent("artwork-backups", isDirectory: true)
-            var artBackupIndex = 0
             // cheap image fingerprint: byte count + a checksum of the first 64 bytes
             func artFingerprint(_ url: URL) -> String? {
                 var len: Int32 = 0, type: Int32 = 0
@@ -1600,47 +1598,55 @@ final class PerfectStore: ObservableObject {
                         }
                     }
                 }
-                // (ii) fetch the album's canonical cover (Cover Art Archive by release,
-                //      else iTunes by title-matched album). We PREFER this over whatever
-                //      is embedded, because ripped files often carry a consistent-but-
-                //      WRONG cover (e.g. "Aretha's Gold" showing a different compilation).
-                await bump("Fetching cover art")
-                let cover = await artClient.albumCover(releaseMBIDs: job.mbids, artist: job.artist, album: job.album)
-                guard let data = cover else {
-                    // No canonical cover found — keep the existing art if it's consistent,
-                    // flag the album for manual review only if it's mixed or has gaps.
-                    let prints = job.files.map { artFingerprint($0.url) }
-                    let hasGap = prints.contains { $0 == nil }
-                    if hasGap || Set(prints.compactMap { $0 }).count > 1 {
-                        flaggedArt.append((job.artist, job.album, job.files.map { $0.rel }))
-                        log += "ART: album '\(job.artist) — \(job.album)' is mixed/missing but no cover was found → flagged for manual review\n"
+                // (ii) KEEP existing art. Only fill tracks that have NONE — and
+                //      prefer the album's OWN cover (copied from a track that has
+                //      one) over anything fetched, so the owner's real cover
+                //      propagates to blank tracks (e.g. one disc has art, the other
+                //      doesn't). Never replace art that's already there. If an album
+                //      carries several DIFFERENT covers, don't guess — flag it for
+                //      the Artwork review step to choose.
+                await bump("Checking cover art")
+                let prints = job.files.map { (f: $0, print: artFingerprint($0.url)) }
+                let withArt = prints.filter { $0.print != nil }
+                let blanks = prints.filter { $0.print == nil }
+                let distinct = Set(withArt.compactMap { $0.print })
+                if distinct.count > 1 {
+                    flaggedArt.append((job.artist, job.album, job.files.map { $0.rel }))
+                    log += "ART: album '\(job.artist) — \(job.album)' has \(distinct.count) different covers → flagged for review\n"
+                    continue
+                }
+                if blanks.isEmpty { continue }   // every track already shares one cover — leave it untouched
+
+                // pick the fill image: the album's own cover if any track has one, else fetched
+                var fillData: Data? = nil
+                var fillSource = "album's own cover"
+                if let src = withArt.first?.f.url {
+                    var l: Int32 = 0, t: Int32 = 0
+                    if let b = md_copy_artwork(src.path, &l, &t) {
+                        fillData = Data(bytes: b, count: Int(l)); free(b)
                     }
+                } else {
+                    await bump("Fetching cover art")
+                    if let cover = await artClient.albumCover(releaseMBIDs: job.mbids, artist: job.artist, album: job.album) {
+                        fillData = cover; fillSource = "fetched album cover"
+                    }
+                }
+                guard let data = fillData else {
+                    // gaps but nothing to fill with → manual review
+                    flaggedArt.append((job.artist, job.album, blanks.map { $0.f.rel }))
+                    log += "ART: album '\(job.artist) — \(job.album)' has \(blanks.count) blank track(s) and no cover found → flagged for review\n"
                     continue
                 }
                 let mime = data.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
-                let coverPrint = "\(data.count):" + String(data.prefix(64).reduce(UInt64(0)) { $0 &+ UInt64($1) })
-                for (url, rel) in job.files {
-                    await bump("Setting cover art")
-                    let cur = artFingerprint(url)
-                    if cur == coverPrint { continue }            // already the album cover
-                    // back up any existing art so the replace is reversible
-                    if cur != nil {
-                        var blen: Int32 = 0, btype: Int32 = 0
-                        if let bbuf = md_copy_artwork(url.path, &blen, &btype) {
-                            let bdata = Data(bytes: bbuf, count: Int(blen)); free(bbuf)
-                            try? fm.createDirectory(at: artBackupDir, withIntermediateDirectories: true)
-                            let backupName = "\(artBackupIndex).img"; artBackupIndex += 1
-                            try? bdata.write(to: artBackupDir.appendingPathComponent(backupName))
-                            artReplacements.append((rel, "artwork-backups/" + backupName, Int(btype)))
-                        }
-                    }
+                for (f, _) in blanks {
+                    await bump("Adding cover art")
                     let rc = data.withUnsafeBytes { buf in
-                        md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(data.count), mime)
+                        md_set_artwork(f.url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(data.count), mime)
                     }
                     if rc == 0 {
-                        if cur == nil { artEdits.append(rel) }   // was empty → undo just strips it
-                        log += "ART: \(rel)  ← album cover (\(data.count) bytes)\n"
-                    } else { log += "FAILED art \(rel): rc \(rc)\n" }
+                        artEdits.append(f.rel)   // was empty → undo just strips it
+                        log += "ART: \(f.rel)  ← \(fillSource) (\(data.count) bytes, gap filled)\n"
+                    } else { log += "FAILED art \(f.rel): rc \(rc)\n" }
                 }
             }
 
