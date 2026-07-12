@@ -2082,7 +2082,9 @@ struct ArtworkReviewCard: View {
         }
         .task {
             covers = store.existingCovers(for: item)
-            serviceCovers = await store.serviceCovers(for: item)   // preserves fetch order: CAA first, then iTunes matches
+            serviceCovers = []
+            // progressive: each cover appears in order as it downloads (CAA first, then iTunes)
+            await store.streamServiceCovers(for: item) { d in serviceCovers.append(d) }
             loadingService = false
         }
     }
@@ -2127,9 +2129,12 @@ struct ArtworkReviewCard: View {
     private func research() {
         searching = true
         selected = nil              // old selection may not be in the new results
-        Task {
-            let found = await store.serviceCovers(artist: searchArtist, album: searchAlbum, mbids: item.mbids)
-            await MainActor.run { serviceCovers = found; searching = false }
+        serviceCovers = []
+        Task { @MainActor in
+            await store.streamServiceCovers(artist: searchArtist, album: searchAlbum, mbids: item.mbids) { d in
+                serviceCovers.append(d)
+            }
+            searching = false
         }
     }
 }

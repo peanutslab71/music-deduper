@@ -780,10 +780,11 @@ actor CoverArtClient {
         return out
     }
 
-    /// The top matching iTunes album covers (not just the single best one), for the picker.
-    func itunesCovers(artist: String, album: String, limit: Int = 6) async -> [Data] {
+    /// The matched iTunes album-artwork URLs (metadata only — fast), upsized to
+    /// 1200px. ONLY covers whose album title actually matches (exact, or one
+    /// contains the other) — never the whole artist catalogue.
+    func itunesArtworkURLs(artist: String, album: String, limit: Int = 6) async -> [URL] {
         guard !album.isEmpty else { return [] }
-        var out: [Data] = []
         let termRaw = (artist + " " + album).trimmingCharacters(in: .whitespaces)
         let term = termRaw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         guard let url = URL(string: "https://itunes.apple.com/search?term=\(term)&entity=album&limit=15"),
@@ -792,22 +793,39 @@ actor CoverArtClient {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let results = json["results"] as? [[String: Any]] else { return [] }
         let wantAlbum = TrackProposal.typoFold(album).lowercased()
-        // ONLY covers whose album title actually matches — an exact hit, or one
-        // that contains the other. Never the whole artist catalogue (that filled
-        // the picker with covers from unrelated albums). Exact matches rank first.
         let ranked = results.compactMap { r -> (Int, [String: Any])? in
             let cn = TrackProposal.typoFold((r["collectionName"] as? String ?? "")).lowercased()
             let score = cn == wantAlbum ? 2 : ((cn.contains(wantAlbum) || wantAlbum.contains(cn)) ? 1 : 0)
             return score > 0 ? (score, r) : nil
         }.sorted { $0.0 > $1.0 }
-        for (_, r) in ranked.prefix(limit) {
-            guard let art = r["artworkUrl100"] as? String else { continue }
-            let big = art.replacingOccurrences(of: "100x100bb", with: "1200x1200bb")
-            if let iu = URL(string: big),
-               let (d, ir) = try? await session.data(from: iu),
+        return ranked.prefix(limit).compactMap { (_, r) in
+            guard let art = r["artworkUrl100"] as? String else { return nil }
+            return URL(string: art.replacingOccurrences(of: "100x100bb", with: "1200x1200bb"))
+        }
+    }
+
+    /// The top matching iTunes album covers (not just the single best one), for the picker.
+    func itunesCovers(artist: String, album: String, limit: Int = 6) async -> [Data] {
+        var out: [Data] = []
+        for u in await itunesArtworkURLs(artist: artist, album: album, limit: limit) {
+            if let (d, ir) = try? await session.data(from: u),
                (ir as? HTTPURLResponse)?.statusCode == 200, !d.isEmpty { out.append(d) }
         }
         return out
+    }
+
+    /// Stream candidate covers to `onEach` IN ORDER as each finishes downloading —
+    /// Cover Art Archive (by MBID) first, then matching iTunes — so the picker
+    /// fills progressively instead of appearing all at once after a long wait.
+    func streamCandidates(releaseMBIDs: [String], artist: String, album: String,
+                          onEach: @escaping (Data) async -> Void) async {
+        for mbid in releaseMBIDs {
+            if let d = await frontCover(releaseMBID: mbid) { await onEach(d) }
+        }
+        for u in await itunesArtworkURLs(artist: artist, album: album) {
+            if let (d, ir) = try? await session.data(from: u),
+               (ir as? HTTPURLResponse)?.statusCode == 200, !d.isEmpty { await onEach(d) }
+        }
     }
 
     /// Apple iTunes Search artwork (no key; ~20 req/min). Upsizes the 100px thumb

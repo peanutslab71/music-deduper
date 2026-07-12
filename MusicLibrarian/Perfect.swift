@@ -2025,6 +2025,20 @@ final class PerfectStore: ObservableObject {
         await CoverArtClient().candidates(releaseMBIDs: mbids, artist: artist, album: album)
     }
 
+    /// Stream service covers to `onEach` progressively, in order, deduped — so the
+    /// Artwork picker fills in one cover at a time as each downloads.
+    func streamServiceCovers(artist: String, album: String, mbids: [String],
+                             onEach: @escaping @MainActor (Data) -> Void) async {
+        var seen = Set<String>()
+        await CoverArtClient().streamCandidates(releaseMBIDs: mbids, artist: artist, album: album) { d in
+            let k = "\(d.count):" + String(d.prefix(48).reduce(UInt64(0)) { $0 &+ UInt64($1) })
+            if seen.insert(k).inserted { await MainActor.run { onEach(d) } }
+        }
+    }
+    func streamServiceCovers(for item: ArtworkReviewItem, onEach: @escaping @MainActor (Data) -> Void) async {
+        await streamServiceCovers(artist: item.artist, album: item.album, mbids: item.mbids, onEach: onEach)
+    }
+
     /// The release MBIDs the identify pass found for an album (for Cover Art Archive).
     private func mbids(forAlbum album: String, artist: String) -> [String] {
         let al = Organiser.stripDiscSuffix(album).clean.lowercased(), ar = artist.lowercased()
