@@ -699,18 +699,26 @@ final class PerfectStore: ObservableObject {
 
     /// Albums touched by identify/enrich, for the cover carousel. Grouped by the
     /// tracks' folder; each carries which kinds of change it will get.
+    /// The album a proposal belongs to — artist + disc-stripped album — so the grid
+    /// shows ONE card per album even when its tracks are split across folders/discs.
+    static func albumGroupKey(_ p: TrackProposal) -> String {
+        ArtworkChoices.key(artist: p.newArtist.isEmpty ? p.curArtist : p.newArtist,
+                           album: p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum)
+    }
+
     var albumChanges: [AlbumChange] {
-        var byDir: [String: [TrackProposal]] = [:]
+        var byAlbum: [String: [TrackProposal]] = [:]
         for p in proposals where p.isActionable {
-            byDir[p.url.deletingLastPathComponent().path, default: []].append(p)
+            byAlbum[Self.albumGroupKey(p), default: []].append(p)
         }
-        return byDir.map { (dirPath, props) -> AlbumChange in
-            let dir = URL(fileURLWithPath: dirPath)
-            let firstAlbum = props.first(where: { !$0.chosenAlbum.isEmpty })?.chosenAlbum
+        return byAlbum.map { (key, props) -> AlbumChange in
+            let p0 = props.first!
+            let artist = p0.newArtist.isEmpty ? p0.curArtist : p0.newArtist
+            let album = Organiser.stripDiscSuffix(p0.chosenAlbum.isEmpty ? p0.curAlbum : p0.chosenAlbum).clean
             return AlbumChange(
-                id: dirPath, dir: dir,
-                title: firstAlbum ?? dir.lastPathComponent,
-                subtitle: props.first?.newArtist ?? "",
+                id: key, dir: p0.url.deletingLastPathComponent(),
+                title: album.isEmpty ? "Unknown Album" : album,
+                subtitle: artist,
                 // sample a track that ACTUALLY HAS art for the thumbnail — otherwise a
                 // mixed album whose first track is art-less shows a blank card even
                 // though other tracks (and the detail view) have the cover.

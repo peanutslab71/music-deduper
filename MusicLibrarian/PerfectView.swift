@@ -1118,7 +1118,7 @@ struct PerfectView: View {
 
     // The album's tracks in a dialog (not stacked in the main frame).
     private func albumSheetView(_ id: String) -> some View {
-        let props = store.proposals.filter { $0.url.deletingLastPathComponent().path == id && $0.isActionable }
+        let props = store.proposals.filter { PerfectStore.albumGroupKey($0) == id && $0.isActionable }
         let a = store.albumChanges.first(where: { $0.id == id })
         return VStack(spacing: 0) {
             HStack(spacing: 12) {
