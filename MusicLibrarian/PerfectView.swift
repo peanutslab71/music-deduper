@@ -56,6 +56,9 @@ struct AlbumCover: View {
     /// higher-resolution service cover instead (fixes 60×50 pixelated cards).
     static func bestImage(key: String, sampleURL: URL?, mbid: String?,
                           artist: String, album: String, wantsArt: Bool) async -> NSImage? {
+        // a cover the user picked in the Artwork step (not yet written) previews first
+        if let d = await MainActor.run(body: { ArtworkChoices.shared.image(artist: artist, album: album) }),
+           let img = NSImage(data: d) { return img }
         let embedded = await ArtworkCache.shared.image(key: key, sampleURL: sampleURL)
         if let e = embedded, max(e.size.width, e.size.height) >= 180 { return e }
         if let f = await FoundArtCache.shared.image(mbid: mbid, artist: artist, album: album) { return f }
@@ -1758,6 +1761,8 @@ struct PerfectView: View {
         let acc = store.proposals.filter { $0.accepted }
         if store.applyNames { let n = acc.filter { $0.hasChange }.count; if n > 0 { rows.append(("Correct names on \(n) track(s)", .blue)) } }
         if store.applyArtwork { let n = acc.filter { $0.canAddArt }.count; if n > 0 { rows.append(("Add cover art to \(n) track(s)", .pink)) } }
+        let chosen = ArtworkChoices.shared.byKey.count
+        if chosen > 0 { rows.append(("Set your chosen cover on \(chosen) album(s)", .pink)) }
         if store.applyCredits { let n = acc.filter { !($0.enrichment?.isEmpty ?? true) }.count; if n > 0 { rows.append(("Fill credits on \(n) track(s)", Color(red: 0.13, green: 0.6, blue: 0.3))) } }
         let merges = store.artists.filter { $0.accepted }.reduce(0) { $0 + $1.folderMerges }
         if merges > 0 { rows.append(("Merge \(merges) duplicate artist folder(s)", .purple)) }
@@ -2037,7 +2042,7 @@ struct ArtworkReviewCard: View {
                 }
                 Spacer()
                 Button("Leave as-is") { store.skipArtworkReview(item) }.controlSize(.small)
-                Button("Accept") { if let s = selected { store.applyChosenArtwork(item: item, image: s) } }
+                Button("Accept") { if let s = selected { store.chooseArtwork(item: item, image: s) } }
                     .controlSize(.small).buttonStyle(.borderedProminent).tint(.orange)
                     .disabled(selected == nil || store.busy)
             }
@@ -2122,7 +2127,7 @@ struct ArtworkReviewCard: View {
         p.allowedContentTypes = [.image]; p.canChooseFiles = true; p.allowsMultipleSelection = false
         p.message = "Choose a cover image for \(item.album)"
         if p.runModal() == .OK, let u = p.url, let d = try? Data(contentsOf: u) {
-            store.applyChosenArtwork(item: item, image: d)   // explicit file pick → apply straight away
+            store.chooseArtwork(item: item, image: d)   // recorded, applied with the rest on Apply
         }
     }
 

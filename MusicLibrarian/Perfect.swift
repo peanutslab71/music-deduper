@@ -173,6 +173,7 @@ struct PerfectPlan: Codable {
     var artworkStageDone: Bool
     var dedupStageDone: Bool
     var organiseStageDone: Bool
+    var artworkChoices: [String: Data] = [:]   // covers picked in the Artwork step, not yet applied
 }
 
 /// One album's cover-art work: resolve a single image (from any of the album's
@@ -206,6 +207,21 @@ final class ArtRefresh: ObservableObject {
     static let shared = ArtRefresh()
     @Published private(set) var gen = 0
     func bump() { gen &+= 1 }
+}
+
+/// Cover choices made in the Artwork step, held until the final Apply embeds them
+/// all in ONE run (instead of one run per Accept). Previews read this so a chosen
+/// cover shows immediately even though nothing's written to disk yet. Keyed by a
+/// normalised artist + disc-stripped album, so all discs of a set share a choice.
+@MainActor
+final class ArtworkChoices: ObservableObject {
+    static let shared = ArtworkChoices()
+    @Published var byKey: [String: Data] = [:]
+    nonisolated static func key(artist: String, album: String) -> String {
+        "\(artist.lowercased())|\(Organiser.stripDiscSuffix(album).clean.lowercased())"
+    }
+    func image(artist: String, album: String) -> Data? { byKey[Self.key(artist: artist, album: album)] }
+    func clearAll() { byKey.removeAll() }
 }
 
 /// Previews the cover an album will get on Apply — the SAME resolution the commit
@@ -389,6 +405,7 @@ final class PerfectStore: ObservableObject {
         proposals = []; findings = []; artists = []; renames = []
         diagnosed = false; didIdentify = false; enriched = false
         artworkStagePlanned = false; artworkStageDone = false; artworkNeedsReview = []
+        ArtworkChoices.shared.clearAll()
         deduped = false; dedupStageDone = false; organised = false; organiseStageDone = false
         organiseStale = false
         organisePlans = []; dedupClusters = []; dedupTracks = []
@@ -584,7 +601,8 @@ final class PerfectStore: ObservableObject {
         let plan = PerfectPlan(rootPath: root.path, saved: Date(), totalFiles: totalFiles,
                                proposals: proposals, diagnosed: diagnosed, didIdentify: didIdentify,
                                enriched: enriched, artworkStageDone: artworkStageDone,
-                               dedupStageDone: dedupStageDone, organiseStageDone: organiseStageDone)
+                               dedupStageDone: dedupStageDone, organiseStageDone: organiseStageDone,
+                               artworkChoices: ArtworkChoices.shared.byKey)
         if let data = try? JSONEncoder().encode(plan) { try? data.write(to: url) }
     }
 
@@ -603,6 +621,7 @@ final class PerfectStore: ObservableObject {
         artworkStageDone = plan.artworkStageDone
         dedupStageDone = plan.dedupStageDone
         organiseStageDone = plan.organiseStageDone
+        ArtworkChoices.shared.byKey = plan.artworkChoices
         return true
     }
 
@@ -992,7 +1011,8 @@ final class PerfectStore: ObservableObject {
     // MARK: Commit — apply accepted removals + merges as a log of reversible moves
 
     var hasWork: Bool {
-        findings.contains { $0.accepted && $0.kind.safe }
+        !ArtworkChoices.shared.byKey.isEmpty          // covers picked in the Artwork step
+            || findings.contains { $0.accepted && $0.kind.safe }
             || renames.contains { $0.accepted && $0.newName != $0.oldName }
             || artists.contains { $0.accepted && artistHasApplicableWork($0) }
             || (tagWritingEnabled && proposals.contains { p in p.accepted && (
@@ -1736,6 +1756,18 @@ final class PerfectStore: ObservableObject {
             }
         }
         let albumArt = Array(artJobs.values)
+        // cover choices from the Artwork step → apply each chosen image to its
+        // album's files in THIS run (so all picked covers land in one apply, not
+        // one run per Accept). Files come from the proposals sharing the album key.
+        let artChoices = ArtworkChoices.shared.byKey
+        let chosenKeys = Set(artChoices.keys)
+        let artChoiceJobs: [(image: Data, files: [(URL, String)])] = artChoices.compactMap { (k, img) in
+            let files = proposals.filter {
+                ArtworkChoices.key(artist: $0.newArtist.isEmpty ? $0.curArtist : $0.newArtist,
+                                   album: $0.chosenAlbum.isEmpty ? $0.curAlbum : $0.chosenAlbum) == k
+            }.map { ($0.url, $0.relPath) }
+            return files.isEmpty ? nil : (img, files)
+        }
         // rough total for the progress bar (art files counted; merges/renames add a little)
         commitTotal = accTagEdits.count
             + accEnrich.reduce(0) { $0 + $1.2.count }
@@ -1758,7 +1790,7 @@ final class PerfectStore: ObservableObject {
             var perfEdits: [(rel: String, name: String, role: String)] = []  // recorded performer credits
             var artEdits: [String] = []                                      // rels where art was added
             var artPromotions: [(rel: String, oldType: Int)] = []            // rels whose art was retagged to front
-            let artReplacements: [(rel: String, backup: String, oldType: Int)] = []  // kept for run.json shape; keep-existing art no longer replaces, so always empty here
+            var artReplacements: [(rel: String, backup: String, oldType: Int)] = []  // covers replaced by a user choice (old art backed up)
             var flaggedArt: [(artist: String, album: String, files: [String], mbids: [String])] = []  // mixed albums with no cover found
             var log = "Music Librarian — change log \(Date())\nLibrary: \(root.path)\n\n"
 
@@ -1828,8 +1860,42 @@ final class PerfectStore: ObservableObject {
                 let d = Data(bytes: buf, count: Int(len)); free(buf)
                 return "\(len):" + String(d.prefix(64).reduce(UInt64(0)) { $0 &+ UInt64($1) })
             }
+
+            // (0) COVER CHOICES from the Artwork step — put each picked image on all
+            //     its album's tracks, backing up any existing art so it's reversible.
+            if !artChoiceJobs.isEmpty {
+                let artBackupDir = quarantine.appendingPathComponent("artwork-backups", isDirectory: true)
+                var bIdx = 0
+                for cj in artChoiceJobs {
+                    if box.cancelled { break }
+                    let mime = cj.image.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
+                    for (url, rel) in cj.files {
+                        if box.cancelled { break }
+                        await bump("Setting chosen cover art")
+                        if md_has_artwork(url.path) == 1 {
+                            var bl: Int32 = 0, bt: Int32 = 0
+                            if let bbuf = md_copy_artwork(url.path, &bl, &bt) {
+                                let bdata = Data(bytes: bbuf, count: Int(bl)); free(bbuf)
+                                try? fm.createDirectory(at: artBackupDir, withIntermediateDirectories: true)
+                                let name = "\(bIdx).img"; bIdx += 1
+                                try? bdata.write(to: artBackupDir.appendingPathComponent(name))
+                                artReplacements.append((rel, "artwork-backups/" + name, Int(bt)))
+                            }
+                        } else {
+                            artEdits.append(rel)   // was blank → undo just strips it
+                        }
+                        let rc = cj.image.withUnsafeBytes { buf in
+                            md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(cj.image.count), mime)
+                        }
+                        log += rc == 0 ? "ART: \(rel)  ← chosen cover (\(cj.image.count) bytes)\n" : "FAILED art \(rel): rc \(rc)\n"
+                    }
+                }
+            }
+
             for job in albumArt {
                 if box.cancelled { break }
+                // an album the user picked a cover for is already done above — skip it
+                if chosenKeys.contains(ArtworkChoices.key(artist: job.artist, album: job.album)) { continue }
                 // (i) promote non-front art to front cover
                 for (url, rel) in job.files {
                     if md_has_artwork(url.path) == 1 && md_has_front_cover(url.path) == 0 {
@@ -1987,6 +2053,7 @@ final class PerfectStore: ObservableObject {
         proposals.removeAll { $0.accepted && $0.hasChange }
         status = lastRunSummary ?? status
         ArtworkCache.shared.clear(); FoundArtCache.shared.clear()   // art on disk changed → drop stale thumbnails
+        if !cancelled { ArtworkChoices.shared.clearAll() }          // cover choices were embedded in this run
         if !cancelled && count > 0 { clearPlan() }   // the plan has been applied → consumed
         loadRuns()
     }
@@ -2047,6 +2114,17 @@ final class PerfectStore: ObservableObject {
             && ($0.newArtist.isEmpty ? $0.curArtist : $0.newArtist).lowercased() == ar
         }.compactMap { $0.enrichment?.releaseMBID }
         return Array(Set(ids))
+    }
+
+    /// Record a cover choice for an album (does NOT write to disk) — it's embedded
+    /// with everything else in the final Apply, so all the covers you pick land in
+    /// ONE run. Previews update immediately via ArtworkChoices + ArtRefresh.
+    func chooseArtwork(item: ArtworkReviewItem, image: Data) {
+        ArtworkChoices.shared.byKey[ArtworkChoices.key(artist: item.artist, album: item.album)] = image
+        artworkNeedsReview.removeAll { $0.id == item.id }
+        ArtRefresh.shared.bump()
+        status = "Cover chosen for \(item.album) — applies with the rest on Apply."
+        savePlan()
     }
 
     /// Apply a chosen cover to every track of a flagged album — backing up any
