@@ -37,6 +37,23 @@ private struct ACReleaseGroup: Decodable {
     let secondarytypes: [String]?
 }
 
+// MARK: - MusicBrainz text-search response (recording → releases → album)
+
+private struct MBRecordingSearch: Decodable {
+    let recordings: [Rec]?
+    struct Rec: Decodable { let releases: [Rel]? }
+    struct Rel: Decodable {
+        let title: String?
+        let releaseGroup: RG?
+        enum CodingKeys: String, CodingKey { case title; case releaseGroup = "release-group" }
+    }
+    struct RG: Decodable {
+        let title: String?
+        let primaryType: String?
+        enum CodingKeys: String, CodingKey { case title; case primaryType = "primary-type" }
+    }
+}
+
 // MARK: - Proposal
 
 /// One track's identification result — the current tags vs. what the acoustic
@@ -246,6 +263,41 @@ struct Identifier {
             curComposer: curComposer, curLabel: curLabel,
             enrichment: nil)
         return proposal
+    }
+
+    /// Text-search MusicBrainz for the album a recording appears on, for tracks the
+    /// audio fingerprint couldn't place. Best-effort: prefers a studio album over a
+    /// compilation/single, skips placeholder titles. Paced by the caller (~1/sec).
+    func searchAlbum(artist: String, title: String) async -> String? {
+        let a = artist.trimmingCharacters(in: .whitespaces)
+        let t = title.trimmingCharacters(in: .whitespaces)
+        guard !a.isEmpty, !t.isEmpty else { return nil }
+        var comps = URLComponents(string: "https://musicbrainz.org/ws/2/recording")!
+        comps.queryItems = [
+            URLQueryItem(name: "query", value: "recording:\"\(t)\" AND artist:\"\(a)\""),
+            URLQueryItem(name: "fmt", value: "json"),
+            URLQueryItem(name: "limit", value: "3"),
+        ]
+        guard let url = comps.url else { return nil }
+        var req = URLRequest(url: url)
+        req.setValue("MusicLibrarian ( \(APIKeys.contact) )", forHTTPHeaderField: "User-Agent")
+        guard let (data, _) = try? await session.data(for: req),
+              let res = try? JSONDecoder().decode(MBRecordingSearch.self, from: data) else { return nil }
+
+        var candidates: [(title: String, isAlbum: Bool)] = []
+        for rec in res.recordings ?? [] {
+            for rel in rec.releases ?? [] {
+                guard let name = rel.releaseGroup?.title ?? rel.title,
+                      !name.isEmpty, !Organiser.isPlaceholderAlbum(name) else { continue }
+                candidates.append((name, (rel.releaseGroup?.primaryType ?? "") == "Album"))
+            }
+        }
+        if let studio = candidates.first(where: { $0.isAlbum }) { return studio.title }   // prefer a studio album
+        let counts = Dictionary(grouping: candidates.map { $0.title }, by: { $0.lowercased() }).mapValues { $0.count }
+        if let top = counts.max(by: { $0.value < $1.value }) {
+            return candidates.first { $0.title.lowercased() == top.key }?.title
+        }
+        return nil
     }
 
     /// AcoustID lookup → (score, best recording). Own parser so a response shape

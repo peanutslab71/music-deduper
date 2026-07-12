@@ -1027,8 +1027,87 @@ final class PerfectStore: ObservableObject {
                 let waitMs = 340.0 - elapsedMs
                 if waitMs > 0 { try? await Task.sleep(nanoseconds: UInt64(waitMs * 1_000_000)) }
             }
-            await self.finishIdentify(proposals: found, total: total, cancelled: box.cancelled)
+            // Phase 3 — RECONCILE the tracks whose album is still unknown, rather
+            // than giving up on them (they'd otherwise land in an "Unknown Album").
+            let reconciled: [TrackProposal]
+            if box.cancelled { reconciled = found }
+            else {
+                reconciled = await Self.reconcileAlbums(ready: ready, found: found, id: id, box: box) { msg in
+                    await self.setIdentifyProgress(msg)
+                }
+            }
+            await self.finishIdentify(proposals: reconciled, total: total, cancelled: box.cancelled)
         }
+    }
+
+    /// After the AcoustID pass, work out the album for tracks it couldn't place,
+    /// instead of leaving them "Unknown":
+    ///   (1) FOLDER CONSENSUS — a track inherits the album its identified
+    ///       folder-mates agree on (auto-applied; folders are one album).
+    ///   (2) TEXT SEARCH — no consensus? ask MusicBrainz by artist+title and send
+    ///       the guess to Review (a song can be on several releases).
+    /// Only what neither can resolve stays unknown (and Organise leaves it put).
+    nonisolated private static func reconcileAlbums(
+        ready: [ReadyTrack], found: [TrackProposal], id: Identifier,
+        box: CancelBox, progress: @escaping @Sendable (String) async -> Void
+    ) async -> [TrackProposal] {
+        var byRel = Dictionary(found.map { ($0.relPath, $0) }, uniquingKeysWith: { a, _ in a })
+
+        func effectiveAlbum(_ r: ReadyTrack) -> String? {
+            if let p = byRel[r.rel], !Organiser.isPlaceholderAlbum(p.chosenAlbum) { return p.chosenAlbum }
+            return Organiser.isPlaceholderAlbum(r.album) ? nil : r.album
+        }
+        func effectiveArtist(_ r: ReadyTrack) -> String {
+            if let p = byRel[r.rel], !p.newArtist.isEmpty { return p.newArtist }; return r.artist
+        }
+        func effectiveTitle(_ r: ReadyTrack) -> String {
+            if let p = byRel[r.rel], !p.newTitle.isEmpty { return p.newTitle }; return r.title
+        }
+        func makeProposal(_ r: ReadyTrack, album: String, score: Double, accepted: Bool, reviewed: Bool) -> TrackProposal {
+            TrackProposal(url: r.url, relPath: r.rel, score: score,
+                curArtist: r.artist, curTitle: r.title, curAlbum: r.album,
+                newArtist: "", newTitle: "", albumCandidates: [album], chosenAlbum: album,
+                accepted: accepted, reviewed: reviewed, recordingID: nil, curHasArt: r.hasArt,
+                curComposer: r.composer, curLabel: r.label, enrichment: nil)
+        }
+
+        // (1) folder consensus — a track with no album inherits the folder's dominant one
+        let byFolder = Dictionary(grouping: ready) { ($0.rel as NSString).deletingLastPathComponent }
+        var toSearch: [ReadyTrack] = []
+        for (_, tracks) in byFolder {
+            let resolved = tracks.compactMap { effectiveAlbum($0) }
+            let consensus: String? = {
+                guard !resolved.isEmpty else { return nil }
+                let counts = Dictionary(grouping: resolved, by: { $0.lowercased() }).mapValues { $0.count }
+                guard let top = counts.max(by: { $0.value < $1.value }),
+                      Double(top.value) / Double(resolved.count) >= 0.6 else { return nil }   // clear majority only
+                return resolved.first { $0.lowercased() == top.key }
+            }()
+            for r in tracks where effectiveAlbum(r) == nil {
+                if let alb = consensus {   // auto-applied: same folder = same album
+                    if var p = byRel[r.rel] { p.chosenAlbum = alb; p.reviewed = true; p.accepted = true; byRel[r.rel] = p }
+                    else { byRel[r.rel] = makeProposal(r, album: alb, score: 1.0, accepted: true, reviewed: true) }
+                } else {
+                    toSearch.append(r)
+                }
+            }
+        }
+
+        // (2) text search the leftovers (paced to MusicBrainz's ~1 request/second)
+        for (i, r) in toSearch.enumerated() {
+            if box.cancelled { break }
+            await progress("Looking up album \(i + 1)/\(toSearch.count)…")
+            if let alb = await id.searchAlbum(artist: effectiveArtist(r), title: effectiveTitle(r)),
+               !Organiser.isPlaceholderAlbum(alb) {
+                // speculative — a song can be on several releases → send to Review,
+                // not accepted until the user confirms it in the queue.
+                if var p = byRel[r.rel] { p.chosenAlbum = alb; p.reviewed = false; p.accepted = false; byRel[r.rel] = p }
+                else { byRel[r.rel] = makeProposal(r, album: alb, score: 0.5, accepted: false, reviewed: false) }
+            }
+            try? await Task.sleep(nanoseconds: 1_050_000_000)
+        }
+
+        return Array(byRel.values)
     }
 
     /// A file that's been listened to (tags read + fingerprinted) and is ready for
