@@ -184,10 +184,9 @@ struct Identifier {
         return URLSession(configuration: c)
     }()
 
-    /// The AcoustID application key, injected at build time via Secrets.xcconfig.
-    static var configuredKey: String {
-        (Bundle.main.object(forInfoDictionaryKey: "ACOUSTID_API_KEY") as? String) ?? ""
-    }
+    /// The AcoustID key the run will use: the user's Keychain entry (Settings),
+    /// falling back to a value baked in via Secrets.xcconfig for dev builds.
+    static var configuredKey: String { APIKeys.acoustID }
 
     /// Fingerprint one file and look it up. Returns nil on no match. `current*`
     /// are the file's existing tags, used to pick the closest album.
@@ -441,11 +440,13 @@ actor MusicBrainzClient {
         c.waitsForConnectivity = false
         return URLSession(configuration: c)
     }()
-    private let userAgent = "MusicLibrarian ( neil.cottyincar@gmail.com )"
+    // Identify ourselves to MusicBrainz with the user's contact (Settings), or
+    // the app default when they haven't set one.
+    private let userAgent = "MusicLibrarian ( \(APIKeys.contact) )"
     private let discogsUA = "MusicLibrarian/1.4 +https://github.com/peanutslab71/music-librarian"
-    // Optional Discogs personal token (from Secrets.xcconfig). Present → 60/min
-    // and authenticated; blank → 25/min unauthenticated.
-    private let discogsToken = (Bundle.main.object(forInfoDictionaryKey: "DISCOGS_TOKEN") as? String) ?? ""
+    // Optional Discogs personal token (Settings → Keychain, or Secrets.xcconfig
+    // fallback). Present → 60/min and authenticated; blank → 25/min.
+    private let discogsToken = APIKeys.discogs
     private var releaseCache: [String: (label: String?, catalog: String?, date: String?, discogs: String?)] = [:]
     private var discogsCache: [String: DiscogsRelease?] = [:]
     // Counters so a run can report how many network calls it actually made.

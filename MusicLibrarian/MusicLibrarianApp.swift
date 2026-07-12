@@ -53,6 +53,10 @@ struct MusicLibrarianApp: App {
             }
         }
 
+        Settings {
+            SettingsView().environmentObject(APICredentials.shared)
+        }
+
         Window("About Music Librarian", id: "about") {
             AboutView()
         }
@@ -140,6 +144,9 @@ struct AboutView: View {
                 aboutLink("Help — performance & troubleshooting",
                           "https://github.com/peanutslab71/music-librarian/blob/main/HELP.md",
                           icon: "questionmark.circle")
+                aboutLink("API keys & the services it uses",
+                          "https://github.com/peanutslab71/music-librarian/blob/main/docs/API-KEYS.md",
+                          icon: "key")
                 aboutLink("Source code on GitHub",
                           "https://github.com/peanutslab71/music-librarian",
                           icon: "chevron.left.forwardslash.chevron.right")

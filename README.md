@@ -60,6 +60,21 @@ There's a full walkthrough in [USAGE.md](USAGE.md), and [HELP.md](HELP.md)
 covers performance tuning (including a fix for macOS's slow SMB defaults),
 troubleshooting, and uninstalling.
 
+## Setting up identification (API keys)
+
+To identify tracks and fill in tags, credits and cover art, Music Librarian
+looks your music up against free public databases. Most need no account, but:
+
+- **AcoustID** (track identification by sound) needs a **free key you provide**.
+- **Discogs** (extra credits) works better with a **free token** — optional.
+
+Open **Music Librarian ▸ Settings** (⌘,), paste your keys, and you're set — each
+row links straight to where you get it and explains the free-tier limits. Keys
+are stored in your Mac's Keychain, never in the app. Without an AcoustID key the
+app still cleans, de-duplicates and organises; it just skips identification.
+
+Full details, links and rate limits: **[docs/API-KEYS.md](docs/API-KEYS.md)**.
+
 ## Download
 
 A signed and notarized build is available from

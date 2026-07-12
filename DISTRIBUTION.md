@@ -6,6 +6,12 @@ That requires a paid Apple Developer account, signing with your **Developer ID**
 
 The project is already set up for this (Hardened Runtime is enabled, which notarization requires).
 
+> **Before you build a release: blank your API keys.** Any value in
+> `Secrets.xcconfig` is baked into the app's Info.plist and would be published
+> inside the shipped build. Set `ACOUSTID_API_KEY` and `DISCOGS_TOKEN` to empty
+> (or delete `Secrets.xcconfig`) before Archiving. Users supply their own keys in
+> **Settings** — see [docs/API-KEYS.md](docs/API-KEYS.md).
+
 ---
 
 ## 1. One-time setup

@@ -409,6 +409,18 @@ final class PerfectStore: ObservableObject {
         }
     }
     var hasAcoustIDKey: Bool { !Identifier.configuredKey.isEmpty }
+    var hasDiscogsToken: Bool { !APIKeys.discogs.isEmpty }
+
+    // One-time-per-launch reminder that identification needs a free AcoustID key.
+    @Published var showKeyReminder = false
+    private var remindedThisLaunch = false
+    /// Called when a Perfect run begins. If there's no AcoustID key, surface the
+    /// reminder dialog once — the run still proceeds (identification just skips).
+    func remindKeysIfNeeded() {
+        guard !hasAcoustIDKey, !remindedThisLaunch else { return }
+        remindedThisLaunch = true
+        showKeyReminder = true
+    }
 
     // Tag writing uses a surgical TagLib shim (MDTagShim) that changes only the
     // artist frame and preserves the ID3 version and every other frame — verified
@@ -442,6 +454,7 @@ final class PerfectStore: ObservableObject {
     /// One exploration pass: structure scan followed by the artist-tag scan.
     /// This is the single entry point — there are no per-check buttons.
     func explore() {
+        remindKeysIfNeeded()
         chainTags = true
         diagnose()
     }

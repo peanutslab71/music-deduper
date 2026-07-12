@@ -21,6 +21,29 @@ asking:
 You can stop after any step. Plenty of people only ever use it to find and
 remove duplicates and never copy anything anywhere.
 
+## Identification & API keys
+
+The **Perfect** side of the app identifies tracks and fills in tags, credits and
+cover art by looking your music up against free public databases. To do that it
+needs a couple of keys, which you enter once under **Music Librarian ▸ Settings**
+(⌘,):
+
+- **AcoustID** — *required for identification.* A free key that lets the app
+  recognise a track from its sound. It fingerprints each file on your Mac and
+  sends only the fingerprint, never the audio. Get one at
+  <https://acoustid.org/new-application>.
+- **Discogs** — *optional.* A free personal token that adds richer credits and
+  raises the lookup rate. Get one at <https://www.discogs.com/settings/developers>.
+- **MusicBrainz contact** — *optional.* An email or URL the app includes in its
+  requests; not a login.
+
+If the AcoustID key is missing you'll see an orange banner and a reminder before
+a run. That's fine — the app still cleans tags, removes duplicates and organises
+your library; it just can't identify unknown tracks or fetch missing artwork
+until you add the key, then **re-scan**. Keys live in your Mac's Keychain, not in
+the app. Each Settings row has a **?** button explaining the service and its
+free-tier rate limits. Full reference: [docs/API-KEYS.md](docs/API-KEYS.md).
+
 ## The built-in network engine (v1.3)
 
 From v1.3 the app has its own SMB networking — it discovers servers, lists

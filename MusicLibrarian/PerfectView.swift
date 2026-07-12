@@ -60,6 +60,8 @@ struct PerfectView: View {
     @State private var queueIndex = 0                // position in the step-through review queue
     @State private var savedFlash = false            // brief "Saved" toast after a queue decision
     @State private var showResetConfirm = false      // "Start over" confirmation
+    @ObservedObject private var creds = APICredentials.shared   // live API-key status
+    @State private var keysBannerDismissed = false   // per-launch dismiss of the "no key" banner
     @State private var proposalExtras: [UUID: [(label: String, value: String)]] = [:]  // current tags for the album sheet
     // One sheet driver. SwiftUI only honours the LAST `.sheet` modifier on a view,
     // so two stacked sheets meant Apply silently never opened — hence a single enum.
@@ -128,6 +130,10 @@ struct PerfectView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            if !creds.acoustIDIsSet && !keysBannerDismissed {
+                keysBanner
+                Divider()
+            }
             if store.root == nil {
                 intro
             } else {
@@ -145,6 +151,12 @@ struct PerfectView: View {
             case .applying: applyingSheet
             case .done: doneSheet
             }
+        }
+        .alert("Set up track identification?", isPresented: $store.showKeyReminder) {
+            Button("Open Settings…") { openAppSettings() }
+            Button("Continue without identification", role: .cancel) { }
+        } message: {
+            Text("Music Librarian identifies tracks by their sound using AcoustID — a free service. Without a key it still cleans tags, removes duplicates and organises your library, but it can't identify unknown tracks, fill credits, or fetch missing cover art.\n\nAdd a free key in Settings, then re-scan.")
         }
         .onChange(of: store.root) { _ in currentStep = 1 }   // new library → back to Scan
         // show/hide the progress dialog as any apply (commit/organise/dedup) runs;
@@ -167,6 +179,25 @@ struct PerfectView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Persistent (per-launch dismissible) notice when identification can't run
+    /// because there's no AcoustID key. One click opens Settings to add one.
+    private var keysBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "waveform.slash").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Track identification is off").font(.callout).fontWeight(.medium)
+                Text("Add a free AcoustID key to identify unknown tracks, fill credits and fetch missing artwork. Cleaning, de-duplication and organising still work without it.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button("Add key in Settings…") { openAppSettings() }
+            Button { keysBannerDismissed = true } label: { Image(systemName: "xmark") }
+                .buttonStyle(.borderless).help("Dismiss")
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(Color.orange.opacity(0.10))
     }
 
     /// A normal progress dialog shown while a commit/organise/dedup runs, so the
@@ -426,7 +457,9 @@ struct PerfectView: View {
         } else if step == 1 {
             passButton(stepDone ? "Re-scan" : "Scan library", "magnifyingglass") { store.explore() }
         } else if step == 2 && !store.hasAcoustIDKey {
-            Text("needs an AcoustID key").font(.caption).foregroundStyle(.orange)
+            Button("Add AcoustID key…") { openAppSettings() }
+                .controlSize(.large)
+                .help("Identification needs a free AcoustID key — add it in Settings, then re-scan.")
         } else if step == 2 {
             passButton(stepDone ? "Re-identify" : "Identify tracks", "waveform.and.magnifyingglass") { store.identify() }
         } else if step == 3 {
