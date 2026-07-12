@@ -64,6 +64,25 @@ static const char *frameIdFor(const char *field) {
     return nullptr;
 }
 
+// Map a field name to a TagLib PropertyMap key (works for MP4/FLAC/Ogg etc., which
+// have no per-frame accessors like ID3). Covers disc/genre/composer/… that the plain
+// Tag interface can't reach.
+static const char *propKeyFor(const char *field) {
+    if (std::strcmp(field, "artist") == 0)      return "ARTIST";
+    if (std::strcmp(field, "album") == 0)       return "ALBUM";
+    if (std::strcmp(field, "albumartist") == 0) return "ALBUMARTIST";
+    if (std::strcmp(field, "title") == 0)       return "TITLE";
+    if (std::strcmp(field, "track") == 0)       return "TRACKNUMBER";
+    if (std::strcmp(field, "disc") == 0)        return "DISCNUMBER";
+    if (std::strcmp(field, "genre") == 0)       return "GENRE";
+    if (std::strcmp(field, "composer") == 0)    return "COMPOSER";
+    if (std::strcmp(field, "lyricist") == 0)    return "LYRICIST";
+    if (std::strcmp(field, "conductor") == 0)   return "CONDUCTOR";
+    if (std::strcmp(field, "label") == 0)       return "LABEL";
+    if (std::strcmp(field, "date") == 0)        return "DATE";
+    return nullptr;
+}
+
 // Read a field from the generic tag (works for any format via FileRef).
 static TagLib::String genericGet(const TagLib::Tag *t, const char *field) {
     if (std::strcmp(field, "artist") == 0)      return t->artist();
@@ -98,6 +117,13 @@ extern "C" char *md_get_field(const char *path, const char *field) {
     }
     TagLib::FileRef f(path);
     if (!f.isNull() && f.tag()) {
+        // property map first — reaches disc/genre/composer/… on MP4/FLAC/Ogg
+        if (const char *pk = propKeyFor(field)) {
+            TagLib::PropertyMap props = f.tag()->properties();
+            auto it = props.find(TagLib::String(pk));
+            if (it != props.end() && !it->second.isEmpty() && !it->second.front().isEmpty())
+                return dupString(it->second.front());
+        }
         TagLib::String s = genericGet(f.tag(), field);
         if (!s.isEmpty()) return dupString(s);
     }
@@ -132,9 +158,18 @@ extern "C" int md_set_field(const char *path, const char *field, const char *val
         return ok ? 0 : -2;
     }
 
-    // Other formats: generic setter changes only that field; TagLib preserves the rest.
+    // Other formats: change the one field via the property map (reaches disc/genre/
+    // composer/… on MP4/FLAC), preserving everything else including cover art.
     TagLib::FileRef f(path);
     if (f.isNull() || !f.tag()) return -1;
+    if (const char *pk = propKeyFor(field)) {
+        TagLib::PropertyMap props = f.tag()->properties();
+        TagLib::String key(pk);
+        if (v.isEmpty()) props.erase(key);
+        else props.replace(key, TagLib::StringList(v));
+        f.tag()->setProperties(props);
+        return f.save() ? 0 : -2;
+    }
     genericSet(f.tag(), field, v);
     return f.save() ? 0 : -2;
 }
@@ -144,6 +179,23 @@ static bool saveMpeg(TagLib::MPEG::File &f, TagLib::ID3v2::Tag *tag) {
     unsigned int mv = tag->header()->majorVersion();
     TagLib::ID3v2::Version ver = (mv >= 4) ? TagLib::ID3v2::v4 : TagLib::ID3v2::v3;
     return f.save(TagLib::MPEG::File::ID3v2, TagLib::File::StripNone, ver, TagLib::File::DoNotDuplicate);
+}
+
+// Some iTunes-authored APIC frames parse with a stray leading byte (a NUL) before
+// the real image header, which corrupts the JPEG when re-saved. Trim any leading
+// bytes so the data starts at a genuine image magic (JPEG/PNG/GIF). No-op if the
+// data already starts correctly.
+static TagLib::ByteVector sanitizePicture(const TagLib::ByteVector &in) {
+    const unsigned char *d = (const unsigned char *)in.data();
+    unsigned int n = in.size();
+    for (unsigned int i = 0; i < 8 && i + 1 < n; i++) {
+        if (d[i] == 0xFF && d[i + 1] == 0xD8) return i ? in.mid(i) : in;   // JPEG
+        if (i + 3 < n && d[i] == 0x89 && d[i + 1] == 0x50 && d[i + 2] == 0x4E && d[i + 3] == 0x47)
+            return i ? in.mid(i) : in;                                     // PNG
+        if (i + 2 < n && d[i] == 0x47 && d[i + 1] == 0x49 && d[i + 2] == 0x46)
+            return i ? in.mid(i) : in;                                     // GIF
+    }
+    return in;
 }
 
 // Add/remove a performer credit, using each format's own convention:
@@ -290,6 +342,8 @@ extern "C" int md_set_artwork_type(const char *path, int type) {
         if (frames.isEmpty()) return -1;
         auto *pic = dynamic_cast<TagLib::ID3v2::AttachedPictureFrame *>(frames.front());
         if (!pic) return -1;
+        TagLib::ByteVector clean = sanitizePicture(pic->picture());
+        if (clean.size() != pic->picture().size()) pic->setPicture(clean);   // heal a corrupt frame
         pic->setType((TagLib::ID3v2::AttachedPictureFrame::Type)type);
         return saveMpeg(f, f.ID3v2Tag()) ? 0 : -2;
     }
@@ -297,7 +351,10 @@ extern "C" int md_set_artwork_type(const char *path, int type) {
     case MD_FLAC: {
         TagLib::FLAC::File f(path);
         if (!f.isValid() || f.pictureList().isEmpty()) return -1;
-        f.pictureList().front()->setType((TagLib::FLAC::Picture::Type)type);
+        auto *pic = f.pictureList().front();
+        TagLib::ByteVector clean = sanitizePicture(pic->data());
+        if (clean.size() != pic->data().size()) pic->setData(clean);
+        pic->setType((TagLib::FLAC::Picture::Type)type);
         return f.save() ? 0 : -2;
     }
     default: return -4;
@@ -323,7 +380,7 @@ extern "C" char *md_copy_artwork(const char *path, int *outLen, int *outType) {
         if (frames.isEmpty()) return nullptr;
         auto *pic = dynamic_cast<TagLib::ID3v2::AttachedPictureFrame *>(frames.front());
         if (!pic) return nullptr;
-        TagLib::ByteVector bv = pic->picture();
+        TagLib::ByteVector bv = sanitizePicture(pic->picture());
         if (outLen) *outLen = (int)bv.size();
         if (outType) *outType = (int)pic->type();
         return copyBytes(bv);
@@ -333,7 +390,7 @@ extern "C" char *md_copy_artwork(const char *path, int *outLen, int *outType) {
         if (!f.isValid() || !f.tag() || !f.tag()->contains("covr")) return nullptr;
         auto list = f.tag()->item("covr").toCoverArtList();
         if (list.isEmpty()) return nullptr;
-        TagLib::ByteVector bv = list.front().data();
+        TagLib::ByteVector bv = sanitizePicture(list.front().data());
         if (outLen) *outLen = (int)bv.size();
         if (outType) *outType = 3;
         return copyBytes(bv);
@@ -342,7 +399,7 @@ extern "C" char *md_copy_artwork(const char *path, int *outLen, int *outType) {
         TagLib::FLAC::File f(path);
         if (!f.isValid() || f.pictureList().isEmpty()) return nullptr;
         auto *pic = f.pictureList().front();
-        TagLib::ByteVector bv = pic->data();
+        TagLib::ByteVector bv = sanitizePicture(pic->data());
         if (outLen) *outLen = (int)bv.size();
         if (outType) *outType = (int)pic->type();
         return copyBytes(bv);
@@ -355,7 +412,7 @@ extern "C" char *md_copy_artwork(const char *path, int *outLen, int *outType) {
 extern "C" int md_set_artwork(const char *path, const char *data, int len, const char *mime) {
     if (path == nullptr || data == nullptr || len <= 0) return -3;
     const char *m = (mime != nullptr) ? mime : "image/jpeg";
-    TagLib::ByteVector bytes(data, (unsigned int)len);
+    TagLib::ByteVector bytes = sanitizePicture(TagLib::ByteVector(data, (unsigned int)len));
     switch (kindOf(path)) {
     case MD_MP3: {
         TagLib::MPEG::File f(path);

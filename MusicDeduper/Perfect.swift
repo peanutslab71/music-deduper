@@ -1574,23 +1574,27 @@ final class PerfectStore: ObservableObject {
                         }
                     }
                 }
-                // (ii) assess consistency across the album
-                await bump("Checking cover art")
-                let prints = job.files.map { (f: $0, p: artFingerprint($0.url)) }
-                let hasGap = prints.contains { $0.p == nil }
-                let distinct = Set(prints.compactMap { $0.p })
-                if !hasGap && distinct.count <= 1 { continue }   // already consistent → leave alone
-                // (iii) mixed / gaps → get the album's real cover
+                // (ii) fetch the album's canonical cover (Cover Art Archive by release,
+                //      else iTunes by title-matched album). We PREFER this over whatever
+                //      is embedded, because ripped files often carry a consistent-but-
+                //      WRONG cover (e.g. "Aretha's Gold" showing a different compilation).
+                await bump("Fetching cover art")
                 let cover = await artClient.albumCover(releaseMBIDs: job.mbids, artist: job.artist, album: job.album)
                 guard let data = cover else {
-                    flaggedArt.append((job.artist, job.album, job.files.map { $0.rel }))
-                    log += "ART: album '\(job.artist) — \(job.album)' is mixed/missing but no cover was found → flagged for manual review\n"
+                    // No canonical cover found — keep the existing art if it's consistent,
+                    // flag the album for manual review only if it's mixed or has gaps.
+                    let prints = job.files.map { artFingerprint($0.url) }
+                    let hasGap = prints.contains { $0 == nil }
+                    if hasGap || Set(prints.compactMap { $0 }).count > 1 {
+                        flaggedArt.append((job.artist, job.album, job.files.map { $0.rel }))
+                        log += "ART: album '\(job.artist) — \(job.album)' is mixed/missing but no cover was found → flagged for manual review\n"
+                    }
                     continue
                 }
                 let mime = data.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
                 let coverPrint = "\(data.count):" + String(data.prefix(64).reduce(UInt64(0)) { $0 &+ UInt64($1) })
                 for (url, rel) in job.files {
-                    await bump("Unifying cover art")
+                    await bump("Setting cover art")
                     let cur = artFingerprint(url)
                     if cur == coverPrint { continue }            // already the album cover
                     // back up any existing art so the replace is reversible

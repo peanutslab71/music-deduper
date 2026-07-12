@@ -688,7 +688,7 @@ actor CoverArtClient {
         if let c = cache[releaseMBID] { return c }
         var result: Data? = nil
         // 500px front cover; the archive redirects to storage, URLSession follows it
-        if let url = URL(string: "https://coverartarchive.org/release/\(releaseMBID)/front-500") {
+        if let url = URL(string: "https://coverartarchive.org/release/\(releaseMBID)/front-1200") {
             var req = URLRequest(url: url)
             req.setValue("MusicDeduper ( neil.cottyincar@gmail.com )", forHTTPHeaderField: "User-Agent")
             if let (data, resp) = try? await session.data(for: req),
@@ -736,7 +736,7 @@ actor CoverArtClient {
             }.sorted { $0.0 > $1.0 }
             for (_, r) in ranked {
                 guard let art = r["artworkUrl100"] as? String else { continue }
-                let big = art.replacingOccurrences(of: "100x100bb", with: "600x600bb")
+                let big = art.replacingOccurrences(of: "100x100bb", with: "1200x1200bb")
                 if let iu = URL(string: big),
                    let (d, ir) = try? await session.data(from: iu),
                    (ir as? HTTPURLResponse)?.statusCode == 200, !d.isEmpty {

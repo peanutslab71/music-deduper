@@ -56,11 +56,12 @@ enum Organiser {
             // Album Artist for the whole group: an explicit album-artist tag wins;
             // else if the folder holds several different track artists it's a
             // compilation → "Various Artists"; else the single track artist.
-            let taggedAA = tracks.compactMap { $0.albumArtist.isEmpty ? nil : $0.albumArtist }.first
-            let distinctArtists = Set(tracks.map { fold($0.artist) }.filter { !$0.isEmpty })
-            let groupAlbumArtist = taggedAA
-                ?? (distinctArtists.count >= 2 ? "Various Artists"
-                    : tracks.first(where: { !$0.artist.isEmpty })?.artist ?? "")
+            let groupAlbumArtist = deriveAlbumArtist(tracks)
+            // Canonical album name for the whole group (most common disc-stripped title)
+            // so every disc/track of one album shares a folder even if casing differs.
+            let albumNames = tracks.map { stripDiscSuffix($0.album).clean }.filter { !$0.isEmpty }
+            let groupAlbum = Dictionary(grouping: albumNames, by: { fold($0) })
+                .max(by: { $0.value.count < $1.value.count })?.value.first ?? (albumNames.first ?? "")
             // Multi-disc if any track carries a disc number ≥ 2 (tag or album-name).
             let multiDisc = tracks.contains { t in
                 if t.discNo >= 2 { return true }
@@ -82,13 +83,44 @@ enum Organiser {
             }
 
             for t in tracks {
-                plans.append(planOne(t, groupAlbumArtist: groupAlbumArtist,
+                plans.append(planOne(t, groupAlbumArtist: groupAlbumArtist, groupAlbum: groupAlbum,
                                      multiDisc: multiDisc,
                                      composerFirst: composerFirstForClassical,
                                      forcedTrackNo: forced[t.rel]))
             }
         }
         return plans.sorted { $0.rel < $1.rel }
+    }
+
+    /// The primary artist of a possibly-collaborative credit ("Queen & David Bowie"
+    /// → "Queen"), so a comp of mostly one artist isn't fooled by a few guest tracks.
+    static func primaryArtist(_ s: String) -> String {
+        var t = s
+        for sep in [" & ", " feat. ", " feat ", " featuring ", " with ", " / ", " vs ", " vs. ", " x "] {
+            if let r = t.range(of: sep, options: .caseInsensitive) { t = String(t[..<r.lowerBound]); break }
+        }
+        return t.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Album artist for a group: a single consistent (non-"Various Artists") tag wins;
+    /// else if one artist clearly dominates the track credits use them (so a Bowie
+    /// best-of with a stray "Various Artists" tag files under David Bowie); else a
+    /// present tag; else Various when the artists are genuinely mixed.
+    static func deriveAlbumArtist(_ tracks: [OrganiseInput]) -> String {
+        let aaTags = tracks.compactMap { $0.albumArtist.isEmpty ? nil : $0.albumArtist }
+        let aaFolded = Set(aaTags.map { fold($0) })
+        if aaFolded.count == 1, let aa = aaTags.first, fold(aa) != "various artists" { return aa }
+
+        let primaries = tracks.map { primaryArtist($0.artist) }.filter { !$0.isEmpty }
+        let counts = Dictionary(grouping: primaries, by: { fold($0) }).mapValues { $0.count }
+        if let dom = counts.max(by: { $0.value < $1.value }),
+           Double(dom.value) / Double(max(1, primaries.count)) >= 0.6,
+           let name = primaries.first(where: { fold($0) == dom.key }) {
+            return name
+        }
+        if let aa = aaTags.first { return aa }
+        let distinct = Set(tracks.map { fold($0.artist) }.filter { !$0.isEmpty })
+        return distinct.count >= 2 ? "Various Artists" : (tracks.first(where: { !$0.artist.isEmpty })?.artist ?? "")
     }
 
     /// The disc a track belongs to (tag → album-name suffix → 1).
@@ -103,28 +135,27 @@ enum Organiser {
         return (n, (t.rel as NSString).lastPathComponent.lowercased())
     }
 
-    private static func planOne(_ t: OrganiseInput, groupAlbumArtist: String,
+    private static func planOne(_ t: OrganiseInput, groupAlbumArtist: String, groupAlbum: String,
                                 multiDisc: Bool, composerFirst: Bool,
                                 forcedTrackNo: Int? = nil) -> OrganisePlan {
         var writes: [(String, String)] = []
 
+        // Use the GROUP's album artist + album name for every track, so all discs/tracks
+        // of one album agree (a stray "Various Artists" on one disc no longer splits it).
+        let albumArtist = groupAlbumArtist.isEmpty ? t.albumArtist : groupAlbumArtist
+        let cleanAlbum = groupAlbum.isEmpty ? Organiser.stripDiscSuffix(t.album).clean : groupAlbum
         // Can't place a file with no album or no artist of any kind — flag, leave put.
-        let albumArtist = t.albumArtist.isEmpty ? groupAlbumArtist : t.albumArtist
-        if t.album.isEmpty || (albumArtist.isEmpty && t.artist.isEmpty) {
+        if cleanAlbum.isEmpty || (albumArtist.isEmpty && t.artist.isEmpty) {
             return OrganisePlan(rel: t.rel, targetRel: nil,
-                                flag: "missing \(t.album.isEmpty ? "album" : "artist") tag",
+                                flag: "missing \(cleanAlbum.isEmpty ? "album" : "artist") tag",
                                 tagWrites: [])
         }
-        // Write the album-artist tag if we derived one the file didn't carry.
-        if t.albumArtist.isEmpty && !albumArtist.isEmpty {
-            writes.append(("albumartist", albumArtist))
-        }
-
-        // Collapse a multi-disc set into ONE album: strip a "[Disc 2]" suffix from
-        // the album name (the disc belongs in the disc tag, which we also fill). So
-        // both discs share a folder and the same cover, per the standard.
-        let (cleanAlbum, discFromName) = Organiser.stripDiscSuffix(t.album)
+        // Write the album-artist / album tags where the file's differ from the group's.
+        if !albumArtist.isEmpty && albumArtist != t.albumArtist { writes.append(("albumartist", albumArtist)) }
         if cleanAlbum != t.album { writes.append(("album", cleanAlbum)) }
+
+        // Multi-disc: fill the disc-number tag if it was only in the album name.
+        let discFromName = Organiser.stripDiscSuffix(t.album).disc
         let discNo = t.discNo > 0 ? t.discNo : (discFromName ?? 0)
         if t.discNo == 0, let d = discFromName { writes.append(("disc", String(d))) }
 
