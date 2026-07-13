@@ -990,6 +990,7 @@ final class PlayerBarController {
 /// whole checklist is a single reversible run that shows up in the Runs window.
 struct AlbumFix: Identifiable {
     enum Kind: String {
+        case identify = "Identify"
         case album = "Album name"
         case albumArtist = "Album artist"
         case compilation = "Compilation"
@@ -1010,6 +1011,7 @@ struct AlbumFix: Identifiable {
 
     var systemImage: String {
         switch kind {
+        case .identify: return "waveform"
         case .album: return "textformat"
         case .albumArtist: return "person.2"
         case .compilation: return "person.3.sequence"
@@ -1027,6 +1029,16 @@ struct AlbumFix: Identifiable {
 /// full Perfect wizard uses, but scoped to one folder. Identify-by-sound (AcoustID)
 /// is a later addition; everything here works from the files already on disk.
 enum AlbumPerfect {
+
+    /// A proposed name is worth writing when it's non-empty and either the current
+    /// value is a placeholder/junk (fill it) or genuinely differs (ignoring case,
+    /// punctuation and "the" — the same fold the wizard uses so cosmetic noise is quiet).
+    private static func nameChanged(_ old: String, _ new: String) -> Bool {
+        let n = new.trimmingCharacters(in: .whitespaces)
+        guard !n.isEmpty else { return false }
+        if Identifier.isJunkValue(old) { return true }
+        return normText(old) != normText(n)
+    }
 
     private static func artInfo(_ url: URL) -> (data: Data, pixels: Int, mime: String)? {
         var len: Int32 = 0, ty: Int32 = 0
@@ -1063,7 +1075,40 @@ enum AlbumPerfect {
 
         var fixes: [AlbumFix] = []
 
-        // ---- 1. Duplicates first, so removed files are excluded from every later fix.
+        // ---- 1. Identify by sound — the SAME AcoustID→MusicBrainz pipeline the wizard
+        // uses (Identifier.fingerprint → .resolve), scoped to this album. The corrected
+        // names update the in-memory tracks so the dedup/consensus/tidy below see them,
+        // exactly like the wizard's Identify → Duplicates → Organise order. Skipped with
+        // no AcoustID key (Settings ⌘,) — the offline fixes still run.
+        var idWrites: [(rel: String, field: String, value: String)] = []
+        var idLines: [String] = []
+        let acoustIDKey = Identifier.configuredKey
+        if !acoustIDKey.isEmpty {
+            let ident = Identifier(apiKey: acoustIDKey)
+            for i in tracks.indices {
+                let t = tracks[i]
+                if t.url.pathExtension.lowercased() == "m4p" { continue }   // DRM: can't decode/fingerprint
+                guard let fp = ident.fingerprint(t.url) else { continue }
+                let hasArt = md_has_artwork(t.url.path) == 1
+                let comp = PerfectStore.readField(t.url, "composer") ?? ""
+                let label = PerfectStore.readField(t.url, "label") ?? ""
+                guard let p = try? await ident.resolve(url: t.url, relPath: rel(t.url), fingerprint: fp,
+                                                       curArtist: t.artist, curTitle: t.title, curAlbum: t.album,
+                                                       curHasArt: hasArt, curComposer: comp, curLabel: label) else { continue }
+                if nameChanged(t.title, p.newTitle) {
+                    idWrites.append((rel(t.url), "title", p.newTitle))
+                    idLines.append("“\(t.title.isEmpty ? t.url.lastPathComponent : t.title)” → “\(p.newTitle)”")
+                    tracks[i].title = p.newTitle
+                }
+                if nameChanged(t.artist, p.newArtist) {
+                    idWrites.append((rel(t.url), "artist", p.newArtist))
+                    idLines.append("artist: \(t.artist.isEmpty ? "—" : t.artist) → \(p.newArtist)")
+                    tracks[i].artist = p.newArtist
+                }
+            }
+        }
+
+        // ---- 2. Duplicates (on the identified names), so removed files are excluded below.
         var clTracks = tracks
         let clusters = buildClusters(&clTracks, mode: .balanced, tol: 2.0, crossAlbum: false)
         var removed = Set<String>()
@@ -1077,6 +1122,15 @@ enum AlbumPerfect {
                 removed.insert(rel(t.url))
                 dupLines.append("remove “\(t.url.lastPathComponent)” — keeping “\(keeper.url.lastPathComponent)”")
             }
+        }
+
+        // Identify fix goes first in the checklist; drop any writes to files we're
+        // about to remove as duplicates (no point retagging a file headed to quarantine).
+        let liveIdWrites = idWrites.filter { !removed.contains($0.rel) }
+        if !liveIdWrites.isEmpty {
+            let n = Set(liveIdWrites.map { $0.rel }).count
+            fixes.append(AlbumFix(kind: .identify, summary: "Identify \(n) track\(n == 1 ? "" : "s") by sound (AcoustID)",
+                                  lines: idLines, enabled: true, applyable: true, tagWrites: liveIdWrites))
         }
         if !dupMoves.isEmpty {
             fixes.append(AlbumFix(kind: .duplicate,
@@ -1241,8 +1295,11 @@ struct PerfectAlbumSheet: View {
             header
             Divider()
             if loading {
-                VStack(spacing: 10) { ProgressView(); Text("Checking the album…").foregroundStyle(.secondary) }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("Checking the album…").foregroundStyle(.secondary)
+                    Text("Identifying tracks by sound can take a moment.").font(.caption).foregroundStyle(.tertiary)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if fixes.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "checkmark.seal").font(.system(size: 40, weight: .light)).foregroundStyle(.teal)
