@@ -2765,6 +2765,9 @@ final class PerfectStore: ObservableObject {
         Task {   // @MainActor-isolated (this method is on the store); disk work suspends off-main
             await Self.performLibraryOps(root: root, summary: summary,
                                          tagWrites: tagWrites, moves: moves, artEmbeds: artEmbeds)
+            // Cover art / paths on disk just changed — drop the cached thumbnails so the
+            // grid and album covers reload from the files (clear() bumps ArtRefresh).
+            ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
             self.busy = false; self.status = ""; self.loadRuns(); then?()
         }
     }
