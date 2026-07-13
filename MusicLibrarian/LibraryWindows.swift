@@ -1467,6 +1467,12 @@ private struct CoverThumb: View {
     let data: Data
     let selected: Bool
     var badge: String? = nil
+    @State private var showFull = false
+
+    private var pixels: (w: Int, h: Int)? {
+        guard let r = NSBitmapImageRep(data: data) else { return nil }
+        return (r.pixelsWide, r.pixelsHigh)
+    }
 
     var body: some View {
         VStack(spacing: 3) {
@@ -1483,6 +1489,16 @@ private struct CoverThumb: View {
             .overlay(alignment: .topTrailing) {
                 if selected { Image(systemName: "checkmark.circle.fill").foregroundStyle(.teal).background(Circle().fill(.white)).padding(2) }
             }
+            // "+" opens the cover at full size so it can be validated before selecting.
+            .overlay(alignment: .bottomTrailing) {
+                Button { showFull = true } label: {
+                    Image(systemName: "plus.magnifyingglass").font(.system(size: 11, weight: .bold))
+                        .padding(3).background(Circle().fill(.black.opacity(0.55))).foregroundStyle(.white)
+                }
+                .buttonStyle(.plain).padding(3)
+                .help("View this cover full size")
+                .popover(isPresented: $showFull, arrowEdge: .top) { fullPreview }
+            }
             if let b = badge {
                 Text(b).font(.system(size: 8, weight: .medium)).foregroundStyle(.secondary)
             } else {
@@ -1490,6 +1506,20 @@ private struct CoverThumb: View {
             }
         }
         .contentShape(Rectangle())
+    }
+
+    private var fullPreview: some View {
+        VStack(spacing: 8) {
+            if let img = NSImage(data: data) {
+                Image(nsImage: img).resizable().aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: 460, maxHeight: 460).cornerRadius(8)
+            } else {
+                Image(systemName: "photo").font(.system(size: 40)).foregroundStyle(.tertiary).frame(width: 200, height: 200)
+            }
+            Text(pixels.map { "\($0.w) × \($0.h) · \(fmtBytes(Int64(data.count)))" } ?? fmtBytes(Int64(data.count)))
+                .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+        }
+        .padding(14)
     }
 }
 
