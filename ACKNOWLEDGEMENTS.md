@@ -22,17 +22,20 @@ repository (including the build configuration that produces the app) is
 public, so anyone can rebuild the app with a modified version of the
 library. The app's *own* code remains MIT.
 
-## Tag reading and writing (Perfect)
+## Tag reading and writing (Perfect and the Library inspector)
 
-The **Perfect** feature reads and writes the artist tags stored inside music
-files. This is done directly with **[TagLib](https://taglib.org/)**, the
-open-source tag reader/writer, dual-licensed under **LGPL 2.1 / MPL 1.1**:
+The **Perfect** cleanup and the **Library** tab's Album Inspector read and write the
+tags stored inside music files — title, artist, album, album artist, track, disc,
+composer, genre, year, the compilation flag, and embedded cover art. This is done
+directly with **[TagLib](https://taglib.org/)**, the open-source tag reader/writer,
+dual-licensed under **LGPL 2.1 / MPL 1.1**:
 
 - TagLib is bundled as source via
   **[CXXTagLib](https://github.com/sbooth/CXXTagLib)** (© Stephen F. Booth).
-- A small in-repo shim, `MDTagShim`, wraps TagLib to change only the one tag
-  field (the artist) while preserving the tag version and every other frame —
-  a surgical, lossless edit.
+- A small in-repo shim, `MDTagShim`, wraps TagLib with a C-callable interface to read
+  and write individual fields (and artwork) while preserving the tag version and every
+  other frame — surgical, lossless edits. It also reads older ID3 v2.2 files that
+  AVFoundation doesn't handle reliably.
 
 As with the SMB engine above, the combined binary satisfies these licenses:
 this complete source repository and its build configuration are public, so
@@ -52,8 +55,9 @@ names. This uses:
 - The **[AcoustID](https://acoustid.org/)** web service maps a fingerprint to a
   MusicBrainz recording, and **[MusicBrainz](https://musicbrainz.org/)** (data
   under CC0) provides the canonical names. Both are contacted over the network
-  only when you run identify. The AcoustID application key is supplied at build
-  time via a local `Secrets.xcconfig` (not committed).
+  only when you run identify. The AcoustID application key is supplied by the user in
+  **Settings** and stored in the macOS Keychain (a local `Secrets.xcconfig` can provide a
+  key for development builds; Release builds always ship blank).
 
 ## SMB network engine
 
