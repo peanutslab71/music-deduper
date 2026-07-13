@@ -71,13 +71,41 @@ enum Organiser {
             groups[key, default: []].append(t)
         }
 
+        // Album-artist consensus: tally the album-artist across every track of each
+        // album (edition-folded), library-wide, so a track whose album-artist is a
+        // collaboration/superset of the album's dominant one ("Benny Goodman & Martha
+        // Tilton" on an otherwise "Benny Goodman" album) can be filed under — and
+        // retagged to — the dominant, instead of splitting into its own folder.
+        var aaByAlbum: [String: [String: Int]] = [:]
+        for t in inputs {
+            guard !albumOrEmpty(t.album).isEmpty, !t.albumArtist.isEmpty else { continue }
+            aaByAlbum[canonicalAlbumKey(t.album), default: [:]][t.albumArtist, default: 0] += 1
+        }
+        func dominantAA(_ canon: String) -> String? {
+            aaByAlbum[canon]?.max(by: { ($0.value, $1.key.count) < ($1.value, $0.key.count) })?.key
+        }
+        // two album-artists are the "same core artist" when their primary name matches
+        // ("Benny Goodman & Martha Tilton" → "Benny Goodman") or one prefixes the other.
+        func relatedAA(_ a: String, _ b: String) -> Bool {
+            let pa = fold(primaryArtist(a)), pb = fold(primaryArtist(b))
+            guard !pa.isEmpty, !pb.isEmpty else { return false }
+            return pa == pb || fold(a).hasPrefix(pb) || fold(b).hasPrefix(pa)
+        }
+
         var plans: [OrganisePlan] = []
         for (key, tracks) in groups {
             let isCompGroup = key.hasPrefix("\u{0}VA\u{0}")
             let isMergeGroup = key.contains("\u{0}#M#\u{0}")
             // Album Artist for the whole group: a compilation is "Various Artists";
-            // else an explicit album-artist tag wins; else the dominant/only artist.
-            let groupAlbumArtist = isCompGroup ? "Various Artists" : deriveAlbumArtist(tracks)
+            // else the group's own dominant — unless the album has a library-wide
+            // dominant album-artist this group is merely a collaboration of, in which
+            // case adopt that (keeps a guest-credited track with the rest of the album).
+            let derivedAA = deriveAlbumArtist(tracks)
+            let canonAA = canonicalAlbumKey(tracks.first?.album ?? "")
+            var groupAlbumArtist = isCompGroup ? "Various Artists" : derivedAA
+            if !isCompGroup, let dom = dominantAA(canonAA), dom != derivedAA, relatedAA(derivedAA, dom) {
+                groupAlbumArtist = dom
+            }
             // Canonical album name for the whole group. A merge group uses the cleanest
             // edition-stripped name ("The Very Best Of Curtis Mayfield", not "…[Castle]");
             // otherwise the most common disc-stripped title (so casing/format agree).

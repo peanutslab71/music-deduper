@@ -491,11 +491,13 @@ final class PerfectStore: ObservableObject {
     func planArtworkStage() {
         var byAlbum: [String: (artist: String, album: String, files: [String], anyBlank: Bool)] = [:]
         for p in proposals {
-            let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
             // strip "[Disc N]" so ALL discs of one set are a single review row —
             // otherwise a 3-disc album is 3 rows and 3× the work, and one cover
             // can't be applied across the discs.
             let album = Organiser.stripDiscSuffix(p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum).clean
+            // a compilation collapses to "Various Artists" so the whole album is ONE row
+            // and its cover is found by album name, not each track's differing artist.
+            let artist = artArtistFor(album: album, artist: p.newArtist.isEmpty ? p.curArtist : p.newArtist)
             let key = "\(artist.lowercased())|\(album.lowercased())"
             var e = byAlbum[key] ?? (artist, album, [], false)
             e.files.append(p.relPath)
@@ -769,15 +771,26 @@ final class PerfectStore: ObservableObject {
     /// tracks' folder; each carries which kinds of change it will get.
     /// The album a proposal belongs to — artist + disc-stripped album — so the grid
     /// shows ONE card per album even when its tracks are split across folders/discs.
-    static func albumGroupKey(_ p: TrackProposal) -> String {
-        ArtworkChoices.key(artist: p.newArtist.isEmpty ? p.curArtist : p.newArtist,
-                           album: p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum)
+    func albumGroupKey(_ p: TrackProposal) -> String {
+        artKey(artist: p.newArtist.isEmpty ? p.curArtist : p.newArtist,
+               album: p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum)
+    }
+
+    /// The artist a cover is keyed/looked-up under. A confirmed compilation collapses to
+    /// "Various Artists" so ONE cover — found by album name, not any single track's
+    /// artist — applies across every track, instead of fragmenting per track artist.
+    func artArtistFor(album: String, artist: String) -> String {
+        confirmedCompilations.contains(Organiser.fold(Organiser.stripDiscSuffix(album).clean))
+            ? "Various Artists" : artist
+    }
+    func artKey(artist: String, album: String) -> String {
+        ArtworkChoices.key(artist: artArtistFor(album: album, artist: artist), album: album)
     }
 
     var albumChanges: [AlbumChange] {
         var byAlbum: [String: [TrackProposal]] = [:]
         for p in proposals where p.isActionable {
-            byAlbum[Self.albumGroupKey(p), default: []].append(p)
+            byAlbum[albumGroupKey(p), default: []].append(p)
         }
         return byAlbum.map { (key, props) -> AlbumChange in
             let p0 = props.first!
@@ -1927,10 +1940,10 @@ final class PerfectStore: ObservableObject {
         var artJobs: [String: AlbumArtJob] = [:]
         if tagWritingEnabled && applyArtwork {
             for p in proposals where p.accepted {
-                let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
-                let rawAlbum = p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum
                 // group by the disc-stripped album so both discs of a set share one cover
-                let album = Organiser.stripDiscSuffix(rawAlbum).clean
+                let album = Organiser.stripDiscSuffix(p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum).clean
+                // compilations collapse to Various Artists so one cover covers all tracks
+                let artist = artArtistFor(album: album, artist: p.newArtist.isEmpty ? p.curArtist : p.newArtist)
                 let key = Self.foldKey(artist) + "|" + (album.isEmpty ? "single:" + p.relPath : Self.foldKey(album))
                 var job = artJobs[key] ?? AlbumArtJob(artist: artist, album: album, mbids: [], files: [])
                 if let m = p.enrichment?.releaseMBID, !job.mbids.contains(m) { job.mbids.append(m) }
@@ -1946,8 +1959,8 @@ final class PerfectStore: ObservableObject {
         let chosenKeys = Set(artChoices.keys)
         let artChoiceJobs: [(image: Data, files: [(URL, String)])] = artChoices.compactMap { (k, img) in
             let files = proposals.filter {
-                ArtworkChoices.key(artist: $0.newArtist.isEmpty ? $0.curArtist : $0.newArtist,
-                                   album: $0.chosenAlbum.isEmpty ? $0.curAlbum : $0.chosenAlbum) == k
+                self.artKey(artist: $0.newArtist.isEmpty ? $0.curArtist : $0.newArtist,
+                            album: $0.chosenAlbum.isEmpty ? $0.curAlbum : $0.chosenAlbum) == k
             }.map { ($0.url, $0.relPath) }
             return files.isEmpty ? nil : (img, files)
         }

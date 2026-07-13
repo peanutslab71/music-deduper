@@ -1176,7 +1176,7 @@ struct PerfectView: View {
 
     // The album's tracks in a dialog (not stacked in the main frame).
     private func albumSheetView(_ id: String) -> some View {
-        let props = store.proposals.filter { PerfectStore.albumGroupKey($0) == id && $0.isActionable }
+        let props = store.proposals.filter { store.albumGroupKey($0) == id && $0.isActionable }
         let a = store.albumChanges.first(where: { $0.id == id })
         return VStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -1503,10 +1503,12 @@ struct PerfectView: View {
 
     private func playButton(_ url: URL) -> some View {
         let playing = audio.playingURL == url
-        return Button { audio.toggle(url) } label: {
-            Image(systemName: playing ? "stop.circle.fill" : "play.circle")
-                .font(.system(size: 18)).foregroundStyle(playing ? .red : .teal)
-        }.buttonStyle(.plain).help(playing ? "Stop" : "Listen")
+        let drm = url.pathExtension.lowercased() == "m4p"
+        return Button { if !drm { audio.toggle(url) } } label: {
+            Image(systemName: drm ? "lock.circle" : (playing ? "stop.circle.fill" : "play.circle"))
+                .font(.system(size: 18)).foregroundStyle(drm ? Color.secondary : (playing ? Color.red : Color.teal))
+        }.buttonStyle(.plain).disabled(drm)
+        .help(drm ? "Protected (DRM) — this file can't be played or re-encoded" : (playing ? "Stop" : "Listen"))
     }
 
     /// A seek bar so you can skip through the track while reviewing it.

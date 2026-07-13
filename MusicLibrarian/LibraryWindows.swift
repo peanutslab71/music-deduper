@@ -198,6 +198,7 @@ struct LibraryAlbumSheet: View {
     let album: LibAlbum
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var audio = AudioPreview.shared
+    @ObservedObject private var prog = AudioProgress.shared   // the playhead ticks here; observe it or the bar never moves
     @State private var tracks: [Track] = []
     @State private var loading = true
     @State private var extras: [Int: [(label: String, value: String)]] = [:]   // track.id → all extra tag chips
@@ -266,16 +267,18 @@ struct LibraryAlbumSheet: View {
 
     private func playButton(_ url: URL) -> some View {
         let playing = audio.playingURL == url
-        return Button { audio.toggle(url) } label: {
-            Image(systemName: playing ? "stop.circle.fill" : "play.circle")
-                .font(.system(size: 18)).foregroundStyle(playing ? .red : .teal)
-        }.buttonStyle(.plain).help(playing ? "Stop" : "Listen")
+        let drm = url.pathExtension.lowercased() == "m4p"
+        return Button { if !drm { audio.toggle(url) } } label: {
+            Image(systemName: drm ? "lock.circle" : (playing ? "stop.circle.fill" : "play.circle"))
+                .font(.system(size: 18)).foregroundStyle(drm ? Color.secondary : (playing ? Color.red : Color.teal))
+        }.buttonStyle(.plain).disabled(drm)
+        .help(drm ? "Protected (DRM) — this file can't be played or re-encoded" : (playing ? "Stop" : "Listen"))
     }
 
     private var scrubBar: some View {
         HStack(spacing: 8) {
-            Text(fmtTime(audio.currentTime)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-            Slider(value: Binding(get: { audio.progress }, set: { audio.seek(to: $0) }), in: 0...1)
+            Text(fmtTime(prog.progress * audio.duration)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+            Slider(value: Binding(get: { prog.progress }, set: { audio.seek(to: $0) }), in: 0...1)
                 .controlSize(.mini).tint(.teal)
             Text(fmtTime(audio.duration)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
         }
