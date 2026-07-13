@@ -14,6 +14,7 @@
 
 import Foundation
 import AVFoundation
+import Accelerate
 import MDTagShim
 import ChromaSwift
 import SwiftUI
@@ -342,6 +343,108 @@ struct PlayItem: Equatable, Sendable {
 
 enum RepeatMode { case off, all, one }
 
+/// A real-time frequency spectrum for the floating player. Rather than tap the audio
+/// output (which AVAudioPlayer can't do), it reads a window of decoded samples from the
+/// playing file at the current playhead every frame and runs an FFT (Accelerate/vDSP),
+/// grouping the magnitudes into log-spaced bands. Freezes when paused; no effect on
+/// transport.
+final class SpectrumAnalyzer: ObservableObject {
+    static let shared = SpectrumAnalyzer()
+    static let bandCount = 28
+
+    @Published var bands: [Float] = Array(repeating: 0, count: bandCount)
+
+    private let fftSize = 2048
+    private let half = 1024
+    private let log2n: vDSP_Length
+    private let setup: FFTSetup?
+    private var window: [Float]
+    private var smoothed = [Float](repeating: 0, count: bandCount)
+
+    private var file: AVAudioFile?
+    private var buffer: AVAudioPCMBuffer?
+    private var timer: Timer?
+
+    init() {
+        log2n = vDSP_Length(log2(Double(fftSize)))
+        setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
+        window = [Float](repeating: 0, count: fftSize)
+        vDSP_hann_window(&window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
+    }
+
+    func open(_ url: URL) {
+        close()
+        guard AudioPreview.isPlayable(url), let f = try? AVAudioFile(forReading: url) else { return }
+        file = f
+        buffer = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: AVAudioFrameCount(fftSize))
+        let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(t, forMode: .common)   // keep ticking while menus/scrolling
+        timer = t
+    }
+
+    func close() {
+        timer?.invalidate(); timer = nil; file = nil; buffer = nil
+        smoothed = Array(repeating: 0, count: Self.bandCount)
+        bands = smoothed
+    }
+
+    private func tick() {
+        guard let file, let buffer, let setup,
+              AudioPreview.shared.playingURL != nil, !AudioPreview.shared.paused else { return }
+        let sr = file.processingFormat.sampleRate
+        let total = file.length
+        let frame = AVAudioFramePosition(AudioPreview.shared.currentTime * sr)
+        guard total > AVAudioFramePosition(fftSize) else { return }
+        file.framePosition = max(0, min(frame, total - AVAudioFramePosition(fftSize)))
+        buffer.frameLength = 0
+        do { try file.read(into: buffer, frameCount: AVAudioFrameCount(fftSize)) } catch { return }
+        guard let ch = buffer.floatChannelData, buffer.frameLength > 0 else { return }
+
+        // windowed mono samples
+        var windowed = [Float](repeating: 0, count: fftSize)
+        let n = Int(buffer.frameLength)
+        let chans = Int(buffer.format.channelCount)
+        for i in 0..<min(n, fftSize) {
+            var s = ch[0][i]
+            if chans > 1 { s = (s + ch[1][i]) * 0.5 }
+            windowed[i] = s
+        }
+        vDSP_vmul(windowed, 1, window, 1, &windowed, 1, vDSP_Length(fftSize))
+
+        var real = [Float](repeating: 0, count: half)
+        var imag = [Float](repeating: 0, count: half)
+        var mags = [Float](repeating: 0, count: half)
+        real.withUnsafeMutableBufferPointer { rp in
+            imag.withUnsafeMutableBufferPointer { ip in
+                var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                windowed.withUnsafeBufferPointer { wp in
+                    wp.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: half) { cp in
+                        vDSP_ctoz(cp, 2, &split, 1, vDSP_Length(half))
+                    }
+                }
+                vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+                vDSP_zvmags(&split, 1, &mags, 1, vDSP_Length(half))
+            }
+        }
+
+        // group into log-spaced bands, convert to a normalized dB-ish height, smooth
+        let nb = Self.bandCount
+        var out = [Float](repeating: 0, count: nb)
+        for b in 0..<nb {
+            let lo = max(1, Int(pow(Double(half), Double(b) / Double(nb))))
+            let hi = max(lo + 1, Int(pow(Double(half), Double(b + 1) / Double(nb))))
+            var sum: Float = 0; var c: Float = 0
+            for k in lo..<min(hi, half) { sum += mags[k]; c += 1 }
+            let avg = c > 0 ? sum / c : 0
+            let db = 10 * log10(avg + 1e-9)                 // magnitude² → dB
+            out[b] = min(1, max(0, (db + 70) / 70))         // ~[-70,0] dB → [0,1]
+        }
+        for i in 0..<nb { smoothed[i] = smoothed[i] * 0.55 + out[i] * 0.45 }
+        let snapshot = smoothed
+        DispatchQueue.main.async { self.bands = snapshot }
+    }
+}
+
 final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
     static let shared = AudioPreview()
     private var player: AVAudioPlayer?
@@ -375,6 +478,7 @@ final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
             p.volume = volume
             p.play()
             player = p; playingURL = item.url; paused = false; AudioProgress.shared.progress = 0
+            SpectrumAnalyzer.shared.open(item.url)
             timer?.invalidate()
             timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
                 guard let self, let p = self.player, p.duration > 0, p.isPlaying else { return }
@@ -454,6 +558,7 @@ final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
         timer?.invalidate(); timer = nil
         player?.stop(); player = nil; playingURL = nil; paused = false; AudioProgress.shared.progress = 0
         playlist = []; order = []; index = 0
+        SpectrumAnalyzer.shared.close()
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {

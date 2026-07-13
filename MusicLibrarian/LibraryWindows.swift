@@ -827,7 +827,9 @@ struct PlayerBar: View {
                 Text(infoLine).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 scrubber.padding(.top, 1)
             }
-            .frame(minWidth: 220, alignment: .leading)
+            .frame(minWidth: 200, alignment: .leading)
+
+            SpectrumView().frame(width: 132, height: 44)
 
             HStack(spacing: 7) {
                 Image(systemName: "speaker.fill").font(.system(size: 9)).foregroundStyle(.secondary)
@@ -839,7 +841,7 @@ struct PlayerBar: View {
             }
         }
         .padding(.horizontal, 18).padding(.vertical, 11)
-        .frame(width: 640, height: 76)
+        .frame(width: 786, height: 76)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(.white.opacity(0.10)))
         .task(id: audio.current?.url) { await loadArt(audio.current?.url) }
@@ -883,6 +885,31 @@ struct PlayerBar: View {
     }
 }
 
+/// Frequency spectrum bars for the player, driven by SpectrumAnalyzer (FFT of the
+/// playing file at the playhead). Drawn with Canvas so 30fps updates stay cheap.
+struct SpectrumView: View {
+    @ObservedObject private var an = SpectrumAnalyzer.shared
+    var body: some View {
+        Canvas { ctx, size in
+            let bands = an.bands
+            let n = bands.count
+            guard n > 0 else { return }
+            let gap: CGFloat = 2
+            let bw = (size.width - gap * CGFloat(n - 1)) / CGFloat(n)
+            for i in 0..<n {
+                let h = max(2, CGFloat(bands[i]) * size.height)
+                let x = CGFloat(i) * (bw + gap)
+                let rect = CGRect(x: x, y: size.height - h, width: bw, height: h)
+                // low freqs teal → highs a lighter tint, brighter as they peak
+                let t = Double(i) / Double(max(1, n - 1))
+                let color = Color(hue: 0.47 - 0.08 * t, saturation: 0.55, brightness: 0.7 + 0.3 * Double(bands[i]))
+                ctx.fill(Path(roundedRect: rect, cornerRadius: min(bw / 2, 2)), with: .color(color))
+            }
+        }
+        .drawingGroup()
+    }
+}
+
 /// Owns the floating panel: shows it whenever something is playing, hides it on stop.
 @MainActor
 final class PlayerBarController {
@@ -906,7 +933,7 @@ final class PlayerBarController {
     private func hide() { panel?.orderOut(nil) }
 
     private func makePanel() -> NSPanel {
-        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 640, height: 76),
+        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 786, height: 76),
                         styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel, .utilityWindow],
                         backing: .buffered, defer: false)
         p.isFloatingPanel = true
