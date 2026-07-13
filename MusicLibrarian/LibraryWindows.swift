@@ -899,26 +899,31 @@ final class PlayerBarController {
     private func show() {
         if panel == nil { panel = makePanel() }
         guard let p = panel else { return }
-        if !p.isVisible { position(p); p.orderFrontRegardless() }
+        position(p)
+        p.orderFrontRegardless()
+        p.makeKeyAndOrderFront(nil)
     }
     private func hide() { panel?.orderOut(nil) }
 
     private func makePanel() -> NSPanel {
         let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 640, height: 76),
-                        styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
+                        styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel, .utilityWindow],
                         backing: .buffered, defer: false)
         p.isFloatingPanel = true
         p.level = .floating
-        p.hidesOnDeactivate = false
+        p.titleVisibility = .hidden
+        p.titlebarAppearsTransparent = true
+        p.standardWindowButton(.closeButton)?.isHidden = true
+        p.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        p.standardWindowButton(.zoomButton)?.isHidden = true
         p.isMovableByWindowBackground = true
         p.backgroundColor = .clear
         p.isOpaque = false
         p.hasShadow = true
+        p.isReleasedWhenClosed = false
+        p.hidesOnDeactivate = false
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .moveToActiveSpace]
-        let host = NSHostingView(rootView: PlayerBar())
-        host.frame = NSRect(x: 0, y: 0, width: 640, height: 76)
-        host.autoresizingMask = [.width, .height]
-        p.contentView = host
+        p.contentView = NSHostingView(rootView: PlayerBar())
         return p
     }
 
