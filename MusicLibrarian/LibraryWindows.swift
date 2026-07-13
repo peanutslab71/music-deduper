@@ -9,6 +9,7 @@
 
 import SwiftUI
 import AppKit
+import MDTagShim
 
 // MARK: - Library browser (a mini-iTunes album grid over any folder)
 
@@ -49,7 +50,10 @@ struct LibraryBrowserView: View {
                 albumGrid
             }
         }
-        .sheet(item: $selectedAlbum) { a in LibraryAlbumSheet(album: a) }
+        .sheet(item: $selectedAlbum) { a in
+            LibraryAlbumSheet(album: a, root: root ?? a.dir.deletingLastPathComponent().deletingLastPathComponent(),
+                              onChanged: { load() })
+        }
         .onAppear { if root == nil && !savedRoot.isEmpty { open(URL(fileURLWithPath: savedRoot)) } }
     }
 
@@ -191,80 +195,211 @@ struct LibraryBrowserView: View {
     }
 }
 
-/// Album "pop-up" for the Library browser — matches Perfect's Review dialog: a play
-/// button + scrubber per track (same AudioPreview) and the file's actual tags, for
-/// reviewing a library before/after.
+/// Album Inspector — a Roon-style dialog for one album: cover + editable album
+/// details, a track table with tags, play by album or track, inline rename, and
+/// reversible delete. "Perfect this album" (one-shot per-album cleanup) is wired in
+/// a later pass; the button is present but parked.
 struct LibraryAlbumSheet: View {
     let album: LibAlbum
+    let root: URL
+    var onChanged: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: PerfectStore
     @ObservedObject private var audio = AudioPreview.shared
     @ObservedObject private var prog = AudioProgress.shared   // the playhead ticks here; observe it or the bar never moves
+
     @State private var tracks: [Track] = []
     @State private var loading = true
-    @State private var extras: [Int: [(label: String, value: String)]] = [:]   // track.id → all extra tag chips
+    @State private var extras: [Int: [(label: String, value: String)]] = [:]
+    @State private var artless: Set<Int> = []        // track ids with no embedded cover
+    @State private var selectedID: Int?
+    @State private var draft: [String: String] = [:] // editable tags for the selected track
+    @State private var albumName = ""
+    @State private var albumArtist = ""
+    @State private var confirmDeleteAlbum = false
+
+    private var selected: Track? { tracks.first { $0.id == selectedID } }
+    private var protectedCount: Int { tracks.filter { $0.url.pathExtension.lowercased() == "m4p" }.count }
+    private var totalSeconds: Double { tracks.reduce(0) { $0 + $1.duration } }
+    private var playableURLs: [URL] {
+        tracks.sorted { ($0.discNo, $0.trackNo) < ($1.discNo, $1.trackNo) }.map { $0.url }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                AlbumCover(key: album.id, sampleURL: album.sampleURL, foundMBID: nil, size: 52, corner: 8)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(album.album).font(.headline)
-                    Text("\(album.artist) · \(album.files.count) track(s)")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
-            .padding(16)
+            header
             Divider()
             if loading {
                 VStack(spacing: 10) { ProgressView(); Text("Reading tags…").foregroundStyle(.secondary) }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(tracks, id: \.id) { t in trackRow(t) }
-                    }
-                    .padding(16)
+                HStack(spacing: 0) {
+                    trackTable
+                    Divider()
+                    tagInspector.frame(width: 322)
                 }
             }
         }
-        .frame(width: 620, height: 560)
-        .onAppear(perform: loadTracks)
+        .frame(width: 940, height: 640)
+        .onAppear { loadTracks() }
         .onDisappear { audio.stop() }
+        .alert("Delete this whole album?", isPresented: $confirmDeleteAlbum) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete album", role: .destructive) { deleteAlbum() }
+        } message: { Text("\(tracks.count) track(s) move to quarantine — reversible from Runs.") }
     }
 
-    // Mirrors proposalRow: play button + info line + scrubber (when playing) + tags.
-    private func trackRow(_ t: Track) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            playButton(t.url)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(t.url.lastPathComponent).font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
-                    Spacer()
-                    Text("\(fmtDur(t.duration)) · \(t.formatLabel)")
-                        .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+    // MARK: header
+    private var header: some View {
+        HStack(alignment: .top, spacing: 16) {
+            AlbumCover(key: album.id, sampleURL: album.sampleURL, foundMBID: nil, size: 116, corner: 8)
+            VStack(alignment: .leading, spacing: 6) {
+                TextField("Album", text: $albumName)
+                    .textFieldStyle(.plain).font(.system(size: 22, weight: .bold))
+                HStack(spacing: 4) {
+                    Text("by").foregroundStyle(.secondary)
+                    TextField("Album artist", text: $albumArtist).textFieldStyle(.plain).font(.system(size: 14))
                 }
-                if audio.playingURL == t.url { scrubBar }
-                tagRow("Artist", t.displayArtist)
-                tagRow("Title", t.title)
-                tagRow("Album", t.album)
-                TagChipsView(pairs: extras[t.id] ?? [])
+                Text(factsLine).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                HStack(spacing: 8) {
+                    Button { audio.playAlbum(playableURLs) } label: { Label("Play album", systemImage: "play.fill") }
+                        .buttonStyle(.borderedProminent).tint(.teal).controlSize(.small)
+                    Button { audio.stop() } label: { Label("Stop", systemImage: "stop.fill") }
+                        .controlSize(.small).disabled(audio.playingURL == nil)
+                    Button { } label: { Label("Perfect this album", systemImage: "wand.and.stars") }
+                        .controlSize(.small).disabled(true)
+                        .help("Coming next: one-shot identify, artwork, dedup & tidy for this album.")
+                    Spacer()
+                    if albumDetailsDirty {
+                        Button("Save details") { saveAlbumDetails() }.controlSize(.small).tint(.teal)
+                    }
+                    Button(role: .destructive) { confirmDeleteAlbum = true } label: { Image(systemName: "trash") }
+                        .controlSize(.small).help("Delete album")
+                    Button("Done") { dismiss() }.controlSize(.small).keyboardShortcut(.defaultAction)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+    }
+
+    private var factsLine: String {
+        var bits = ["\(tracks.count) track(s)"]
+        if totalSeconds > 0 { bits.append(fmtLong(totalSeconds)) }
+        let fmts = Set(tracks.map { $0.formatLabel }); if !fmts.isEmpty { bits.append(fmts.sorted().joined(separator: " / ")) }
+        if protectedCount > 0 { bits.append("\(protectedCount) protected") }
+        if !artless.isEmpty { bits.append("\(artless.count) need a cover") }
+        return bits.joined(separator: " · ")
+    }
+    private var albumDetailsDirty: Bool { albumName != album.album || albumArtist != album.artist }
+
+    // MARK: track table
+    private var trackTable: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(tracks, id: \.id) { t in trackRow(t) }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func trackRow(_ t: Track) -> some View {
+        let isSel = selectedID == t.id
+        let drm = t.url.pathExtension.lowercased() == "m4p"
+        return HStack(spacing: 10) {
+            Text(t.trackNo > 0 ? "\(t.trackNo)" : "–")
+                .font(.system(size: 12, design: .monospaced)).foregroundStyle(.tertiary)
+                .frame(width: 24, alignment: .trailing)
+            playButton(t.url)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(t.title.isEmpty ? t.url.lastPathComponent : t.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                    if drm { badge("protected", .secondary) }
+                    if artless.contains(t.id) { badge("no cover", .orange) }
+                }
+                if t.displayArtist.lowercased() != albumArtist.lowercased() && !t.displayArtist.isEmpty {
+                    Text(t.displayArtist).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
             }
             Spacer()
+            Text(fmtDur(t.duration)).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+            Text(t.formatLabel).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color.secondary.opacity(0.25)))
+            Button { NSWorkspace.shared.activateFileViewerSelecting([t.url]) } label: { Image(systemName: "arrow.up.forward.square") }
+                .buttonStyle(.plain).foregroundStyle(.tertiary).help("Reveal in Finder")
+            Button { deleteTrack(t) } label: { Image(systemName: "trash") }
+                .buttonStyle(.plain).foregroundStyle(.tertiary).help("Delete track")
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, 14).padding(.vertical, 7)
+        .background(isSel ? Color.teal.opacity(0.14) : Color.clear)
+        .overlay(alignment: .leading) { if isSel { Rectangle().fill(Color.teal).frame(width: 2) } }
+        .contentShape(Rectangle())
+        .onTapGesture { select(t) }
+        if audio.playingURL == t.url { scrubBar.padding(.horizontal, 14).padding(.bottom, 6) }
     }
 
-    private func tagRow(_ label: String, _ value: String) -> some View {
-        HStack(spacing: 6) {
-            Text(label).font(.caption2).foregroundStyle(.secondary).frame(width: 42, alignment: .leading)
-            Text(value.isEmpty ? "—" : value).font(.caption2)
-                .foregroundStyle(value.isEmpty ? .tertiary : .primary).lineLimit(1)
-        }
+    private func badge(_ text: String, _ color: Color) -> some View {
+        Text(text).font(.system(size: 9, weight: .semibold))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(Capsule().fill(color.opacity(0.18))).foregroundStyle(color)
     }
 
+    // MARK: tag inspector
+    private var tagInspector: some View {
+        Group {
+            if let t = selected {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Track tags").font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary)
+                            .textCase(.uppercase)
+                        VStack(spacing: 1) {
+                            tagField("Title", "title")
+                            tagField("Artist", "artist")
+                            tagField("Album", "album")
+                            tagField("Album Artist", "albumartist")
+                            HStack(spacing: 1) { tagField("Track", "track"); tagField("Disc", "disc") }
+                            HStack(spacing: 1) { tagField("Year", "date"); tagField("Genre", "genre") }
+                            tagField("Composer", "composer")
+                        }
+                        HStack(spacing: 8) {
+                            Button("Save tags") { saveTrackTags(t) }
+                                .buttonStyle(.borderedProminent).tint(.teal).controlSize(.small)
+                                .disabled(!trackDirty(t))
+                            Spacer()
+                            Text(t.formatLabel).font(.caption2).foregroundStyle(.tertiary)
+                        }
+                        Text(rel(t.url)).font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.tertiary).textSelection(.enabled)
+                        if let ex = extras[t.id], !ex.isEmpty {
+                            Divider()
+                            Text("Other tags").font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary).textCase(.uppercase)
+                            TagChipsView(pairs: ex)
+                        }
+                    }
+                    .padding(14)
+                }
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: "music.note.list").font(.system(size: 30, weight: .light)).foregroundStyle(.tertiary)
+                    Text("Select a track to see and edit its tags").font(.callout).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity).padding()
+            }
+        }
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
+    }
+
+    private func tagField(_ label: String, _ key: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.system(size: 10)).foregroundStyle(.tertiary).textCase(.uppercase)
+            TextField(label, text: Binding(get: { draft[key] ?? "" }, set: { draft[key] = $0 }))
+                .textFieldStyle(.roundedBorder).controlSize(.small).font(.system(size: 12))
+        }
+        .padding(6).background(Color.primary.opacity(0.03))
+    }
+
+    // MARK: player bits
     private func playButton(_ url: URL) -> some View {
         let playing = audio.playingURL == url
         let drm = url.pathExtension.lowercased() == "m4p"
@@ -282,23 +417,94 @@ struct LibraryAlbumSheet: View {
                 .controlSize(.mini).tint(.teal)
             Text(fmtTime(audio.duration)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
         }
-        .padding(.vertical, 2)
     }
 
     private func fmtTime(_ s: Double) -> String {
         guard s.isFinite, s >= 0 else { return "0:00" }
         return String(format: "%d:%02d", Int(s) / 60, Int(s) % 60)
     }
+    private func fmtLong(_ s: Double) -> String {
+        let t = Int(s); let h = t / 3600, m = (t % 3600) / 60, sec = t % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
+    }
 
-    /// Read the album's tracks CONCURRENTLY (bounded) — the network round-trips
-    /// overlap instead of running one-by-one, which is what made loading the whole
-    /// library over SMB crawl. Only this album's handful of files are read.
-    private func loadTracks() {
-        guard tracks.isEmpty else { return }
+    // MARK: selection + edits
+    private func select(_ t: Track) {
+        selectedID = t.id
+        draft = ["title": t.title, "artist": t.artist, "album": t.album, "albumartist": t.albumArtist,
+                 "track": t.trackNo > 0 ? String(t.trackNo) : "", "disc": t.discNo > 0 ? String(t.discNo) : "",
+                 "date": readTag(t.url, "date"), "genre": readTag(t.url, "genre"), "composer": readTag(t.url, "composer")]
+    }
+    private func readTag(_ u: URL, _ f: String) -> String { PerfectStore.readField(u, f) ?? "" }
+
+    private func trackDirty(_ t: Track) -> Bool {
+        let cur = ["title": t.title, "artist": t.artist, "album": t.album, "albumartist": t.albumArtist,
+                   "track": t.trackNo > 0 ? String(t.trackNo) : "", "disc": t.discNo > 0 ? String(t.discNo) : "",
+                   "date": readTag(t.url, "date"), "genre": readTag(t.url, "genre"), "composer": readTag(t.url, "composer")]
+        return draft.contains { cur[$0.key] ?? "" != $0.value }
+    }
+
+    private func saveTrackTags(_ t: Track) {
+        var writes: [(rel: String, field: String, value: String)] = []
+        for (k, v) in draft where (readTag(t.url, k) != v) { writes.append((rel(t.url), k, v)) }
+        guard !writes.isEmpty else { return }
+        store.applyLibraryRun(root: root, summary: "Edited tags — \(t.title)", tagWrites: writes) {
+            reloadPreservingSelection()
+        }
+    }
+
+    private func saveAlbumDetails() {
+        var writes: [(rel: String, field: String, value: String)] = []
+        for t in tracks {
+            if albumName != album.album { writes.append((rel(t.url), "album", albumName)) }
+            if albumArtist != album.artist { writes.append((rel(t.url), "albumartist", albumArtist)) }
+        }
+        // rename the album folder too so the library tree matches
+        var moves: [(from: String, to: String)] = []
+        if albumName != album.album {
+            let parent = (rel(album.dir) as NSString).deletingLastPathComponent
+            let newRel = parent.isEmpty ? sanitizeName(albumName) : parent + "/" + sanitizeName(albumName)
+            moves.append((rel(album.dir), newRel))
+        }
+        guard !writes.isEmpty || !moves.isEmpty else { return }
+        store.applyLibraryRun(root: root, summary: "Renamed album — \(albumName)", tagWrites: writes, moves: moves) {
+            onChanged(); dismiss()
+        }
+    }
+
+    private func deleteTrack(_ t: Track) {
+        if audio.playingURL == t.url { audio.stop() }
+        store.applyLibraryRun(root: root, summary: "Deleted track — \(t.title)", moves: [(rel(t.url), "")]) {
+            tracks.removeAll { $0.id == t.id }
+            if selectedID == t.id { selectedID = nil }
+            onChanged()
+        }
+    }
+
+    private func deleteAlbum() {
+        audio.stop()
+        store.applyLibraryRun(root: root, summary: "Deleted album — \(album.album)", moves: [(rel(album.dir), "")]) {
+            onChanged(); dismiss()
+        }
+    }
+
+    private func rel(_ url: URL) -> String {
+        let rp = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        return url.path.hasPrefix(rp) ? String(url.path.dropFirst(rp.count)) : url.lastPathComponent
+    }
+
+    private func reloadPreservingSelection() {
+        let keep = selectedID
+        tracks = []; loading = true; artless = []
+        loadTracks { if let k = keep, let t = tracks.first(where: { $0.id == k }) { select(t) } }
+    }
+
+    /// Read the album's tracks CONCURRENTLY (bounded). Also notes which have no cover.
+    private func loadTracks(_ done: (() -> Void)? = nil) {
         let urls = album.files
         Task.detached(priority: .userInitiated) {
-            var byIndex = [Int: (Track, [(label: String, value: String)])]()
-            await withTaskGroup(of: (Int, Track, [(label: String, value: String)]).self) { group in
+            var byIndex = [Int: (Track, [(label: String, value: String)], Bool)]()
+            await withTaskGroup(of: (Int, Track, [(label: String, value: String)], Bool).self) { group in
                 let limit = 10
                 var next = 0
                 func launch() {
@@ -309,22 +515,28 @@ struct LibraryAlbumSheet: View {
                         var t = await readMetadata(url: u, size: size)
                         t.id = i
                         if t.title.isEmpty { t.title = u.deletingPathExtension().lastPathComponent }
-                        return (i, t, TagReader.chips(u))
+                        let hasArt = md_has_artwork(u.path) != 0
+                        return (i, t, TagReader.chips(u), hasArt)
                     }
                 }
                 for _ in 0..<min(limit, urls.count) { launch() }
-                while let (i, t, ex) = await group.next() {
-                    byIndex[i] = (t, ex)
+                while let (i, t, ex, hasArt) = await group.next() {
+                    byIndex[i] = (t, ex, hasArt)
                     if next < urls.count { launch() }
                 }
             }
             var built: [Track] = []
             var ex: [Int: [(label: String, value: String)]] = [:]
-            for i in 0..<urls.count { if let (t, e) = byIndex[i] { built.append(t); ex[i] = e } }
+            var noArt = Set<Int>()
+            for i in 0..<urls.count { if let (t, e, hasArt) = byIndex[i] { built.append(t); ex[i] = e; if !hasArt { noArt.insert(i) } } }
             let sorted = built.sorted {
                 ($0.discNo, $0.trackNo, $0.title.lowercased()) < ($1.discNo, $1.trackNo, $1.title.lowercased())
             }
-            await MainActor.run { tracks = sorted; extras = ex; loading = false }
+            await MainActor.run {
+                tracks = sorted; extras = ex; artless = noArt; loading = false
+                if albumName.isEmpty { albumName = album.album }; if albumArtist.isEmpty { albumArtist = album.artist }
+                done?()
+            }
         }
     }
 }

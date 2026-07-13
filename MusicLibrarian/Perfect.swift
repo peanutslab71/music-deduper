@@ -339,24 +339,55 @@ final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
     static let shared = AudioPreview()
     private var player: AVAudioPlayer?
     private var timer: Timer?
+    private var queue: [URL] = []              // album playback: remaining tracks after the current one
     @Published var playingURL: URL?            // changes only on play/stop — cheap to observe
+    @Published var albumMode = false           // true while playing through a queued album
     var progress: Double { AudioProgress.shared.progress }
     var duration: Double { player?.duration ?? 0 }
     var currentTime: Double { player?.currentTime ?? 0 }
 
-    func toggle(_ url: URL) {
-        if playingURL == url { stop(); return }
-        stop()
+    /// A .m4p is FairPlay-protected: AVAudioPlayer can't decode it, so skip rather
+    /// than fail silently (album playback jumps to the next playable track).
+    static func isPlayable(_ url: URL) -> Bool { url.pathExtension.lowercased() != "m4p" }
+
+    @discardableResult
+    private func start(_ url: URL) -> Bool {
         do {
             let p = try AVAudioPlayer(contentsOf: url)
             p.delegate = self
             p.play()
             player = p; playingURL = url; AudioProgress.shared.progress = 0
+            timer?.invalidate()
             timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
                 guard let self, let p = self.player, p.duration > 0 else { return }
                 AudioProgress.shared.progress = p.currentTime / p.duration
             }
-        } catch { playingURL = nil }
+            return true
+        } catch { playingURL = nil; return false }
+    }
+
+    func toggle(_ url: URL) {
+        if playingURL == url { stop(); return }
+        stop()
+        start(url)
+    }
+
+    /// Play an album start to finish, skipping protected tracks.
+    func playAlbum(_ urls: [URL], from index: Int = 0) {
+        stop()
+        var list = Array(urls.dropFirst(index)).filter { Self.isPlayable($0) }
+        guard let first = list.first else { return }
+        list.removeFirst()
+        queue = list; albumMode = true
+        start(first)
+    }
+
+    private func advance() {
+        while let next = queue.first {
+            queue.removeFirst()
+            if start(next) { return }
+        }
+        stop()   // queue drained
     }
 
     func seek(to frac: Double) {
@@ -368,10 +399,13 @@ final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func stop() {
         timer?.invalidate(); timer = nil
         player?.stop(); player = nil; playingURL = nil; AudioProgress.shared.progress = 0
+        queue = []; albumMode = false
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        DispatchQueue.main.async { self.stop() }
+        DispatchQueue.main.async {
+            if self.albumMode && !self.queue.isEmpty { self.advance() } else { self.stop() }
+        }
     }
 }
 
@@ -2539,6 +2573,72 @@ final class PerfectStore: ObservableObject {
     static func rememberRoot(_ url: URL) {
         var roots = UserDefaults.standard.stringArray(forKey: rootsKey) ?? []
         if !roots.contains(url.path) { roots.append(url.path); UserDefaults.standard.set(roots, forKey: rootsKey) }
+    }
+
+    /// Apply inspector edits (tag rewrites, renames, deletes) as ONE reversible run,
+    /// recorded in the same run.json the wizard writes — so it appears in Runs and
+    /// undoes exactly. `moves` are (fromRel, toRel); an empty `to` sends the file or
+    /// folder to quarantine (a delete). Tag writes happen first, while files are still
+    /// at their original paths. `then` runs on the main actor when done.
+    func applyLibraryRun(root: URL, summary: String,
+                         tagWrites: [(rel: String, field: String, value: String)] = [],
+                         moves: [(from: String, to: String)] = [],
+                         then: (@MainActor () -> Void)? = nil) {
+        busy = true; status = "Applying…"
+        Task {   // @MainActor-isolated (this method is on the store); disk work suspends off-main
+            await Self.performLibraryOps(root: root, summary: summary, tagWrites: tagWrites, moves: moves)
+            self.busy = false; self.status = ""; self.loadRuns(); then?()
+        }
+    }
+
+    /// The disk side of a library edit — runs off the main actor. Writes tags, moves
+    /// files (empty `to` = quarantine), and records a run.json + changelog so the whole
+    /// thing is one undoable entry in Runs.
+    nonisolated static func performLibraryOps(root: URL, summary: String,
+                                              tagWrites: [(rel: String, field: String, value: String)],
+                                              moves: [(from: String, to: String)]) async {
+        let fm = FileManager.default
+        let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
+        let qRel = "Music Librarian Quarantine/\(stamp)"
+        let quarantine = root.appendingPathComponent(qRel, isDirectory: true)
+        try? fm.createDirectory(at: quarantine, withIntermediateDirectories: true)
+        var ops: [(from: String, to: String)] = []
+        var tagEdits: [(rel: String, field: String, old: String)] = []
+        var log = "Music Librarian — change log \(Date())\nLibrary: \(root.path)\n\n"
+
+        for w in tagWrites {
+            let url = root.appendingPathComponent(w.rel)
+            let old = readField(url, w.field) ?? ""
+            if old == w.value { continue }
+            do { try writeField(url, w.field, to: w.value); tagEdits.append((w.rel, w.field, old))
+                 log += "TAG: \(w.rel)  \(w.field) '\(old)' → '\(w.value)'\n" } catch {}
+        }
+        // longest source path first so a folder's files move before the folder
+        for m in moves.sorted(by: { $0.from.count > $1.from.count }) {
+            let toRel = m.to.isEmpty ? qRel + "/" + m.from : m.to
+            let from = root.appendingPathComponent(m.from), to = root.appendingPathComponent(toRel)
+            guard fm.fileExists(atPath: from.path) else { continue }
+            if !m.to.isEmpty && fm.fileExists(atPath: to.path) { log += "SKIP (target exists): \(toRel)\n"; continue }
+            do {
+                try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fm.moveItem(at: from, to: to)
+                ops.append((m.from, toRel))
+                log += "\(m.to.isEmpty ? "DELETE → quarantine" : "MOVE"): \(m.from) → \(toRel)\n"
+            } catch { log += "FAILED \(m.from): \(error.localizedDescription)\n" }
+        }
+        let total = ops.count + tagEdits.count
+        log += "\n\(total) change(s). Restore with 'Undo this run'.\n"
+        try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
+        let record: [String: Any] = [
+            "date": ISO8601DateFormatter().string(from: Date()),
+            "root": root.path, "summary": summary,
+            "ops": ops.map { ["from": $0.from, "to": $0.to] },
+            "tagEdits": tagEdits.map { ["rel": $0.rel, "field": $0.field, "old": $0.old] },
+            "perfEdits": [], "artEdits": [], "artPromotions": [], "artReplacements": []
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: record) {
+            try? data.write(to: quarantine.appendingPathComponent("run.json"))
+        }
     }
 
     /// Load runs from EVERY remembered library (plus the current one), not just the
