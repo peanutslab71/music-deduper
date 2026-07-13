@@ -21,6 +21,49 @@ asking:
 You can stop after any step. Plenty of people only ever use it to find and
 remove duplicates and never copy anything anywhere.
 
+## The Library tab — browse, edit, play
+
+The **Library** tab opens any folder as an album grid. Click an album to get the
+**Album Inspector**: its track list, each track's tags, and controls to play, edit,
+rename and delete.
+
+- **Playing.** Click a track, or **Play album** in the header. A player bar appears at
+  the bottom of the window — shuffle, previous, play/pause, next, repeat, a scrubber,
+  a volume slider, and a live frequency spectrum (28 bars, ~30 Hz to 16 kHz). It keeps
+  playing after you close the album; its **✕** stops and hides it. Protected `.m4p`
+  files show a lock and can't be played (see below).
+- **Editing tags.** Select a track to see its tags in the right-hand panel and change
+  any of them, then **Save**.
+- **Renaming and deleting.** Rename an album (retags every track and renames the
+  folder) from the header, or delete a track or album. Deletes go to the app's
+  quarantine folder — not the Trash — and every edit is recorded as a run you can undo
+  from **Library ▸ Runs**.
+
+## Protected (DRM) files
+
+Old iTunes Store purchases are `.m4p` files with Apple FairPlay DRM. The app reads
+their tags normally and organises them like any other file, but macOS cannot decode the
+protected audio, so they can't be played or re-encoded. In the Album Inspector they show
+a lock instead of a play button.
+
+## What "Perfect" changes, and how to undo it
+
+Perfect applies its identify / duplicate / organise / artwork steps to the library in
+one pass, and records everything so it can be reversed. A few specifics worth knowing:
+
+- **Duplicates** keeps the best copy of each track. Beyond identical files and matching
+  title/length, it treats two files with the same album and track number as duplicates
+  even when a title has a typo, and treats a much shorter copy of a track as a
+  truncated/partial of the full one (it keeps the full-length file). Very short tracks
+  that have no full-length twin are left alone — plenty of real interludes are short.
+- **Organise** builds an `Album Artist / Album / ## Title` tree. Compilations are filed
+  under **Various Artists**; the ones it isn't sure about are listed for you to confirm
+  before they're moved. Differently-named editions of one album can be merged, and a
+  stray album-artist tag on one track (e.g. a guest credit) is filed with the album.
+- **Undo.** Open **Library ▸ Runs**, pick a run, and revert it — files come back out of
+  quarantine and tags are written back. Nothing Perfect does is permanent until you
+  empty the quarantine folder yourself.
+
 ## Identification & API keys
 
 The **Perfect** side of the app identifies tracks and fills in tags, credits and
@@ -298,7 +341,7 @@ The app is a single self-contained bundle:
 3. Optionally remove its settings (window positions, recent folders, saved
    share address) — open Terminal and run:
    ```
-   defaults delete com.local.musicdeduper
+   defaults delete com.local.musiclibrarian
    ```
 4. If you ran `tune-smb.sh` and want that undone too:
    `sudo rm /etc/nsmb.conf` (your previous config, if any, is at

@@ -144,6 +144,20 @@ raises this to 60/min and enables search. A `User-Agent` header is required. If
 used, the token lives in the gitignored `Secrets.xcconfig` like the AcoustID key.
 Per-release caching keeps it to one Discogs read per album.
 
+## Reading existing tags
+
+Tags are read with AVFoundation, with a TagLib fallback for any field AVFoundation
+returns empty. This matters for old iTunes files written as **ID3 v2.2** (three-letter
+frame IDs — `TT2`, `TP1`, `TRK`, `PIC` — rather than the four-letter v2.3/v2.4 frames):
+AVFoundation does not reliably map v2.2 frames, so without the fallback such tracks come
+back with no track number (and sometimes no title/artist), which mis-sorts and
+mis-organises them. The TagLib fallback fills track, disc, title, artist, album and
+album-artist when AVFoundation leaves them blank, so v2.2 files read correctly.
+
+Protected `.m4p` (FairPlay) files have readable tags — DRM only encrypts the audio — so
+they identify and organise like any other file; only playback and re-encoding are
+blocked.
+
 ## Known bug to fix (current code)
 
 `Identify.swift` builds the artist as

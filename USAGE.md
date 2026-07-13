@@ -138,6 +138,34 @@ Two other behaviours worth knowing:
   (as **guest** — ROCK's Data share allows that out of the box). The address is
   remembered between launches.
 
+## The Library tab — browse, play and edit
+
+Separate from the copy wizard, the **Library** tab is for looking through a library and
+tidying individual albums by hand.
+
+Point it at a folder and it shows an album grid (covers from the files' own tags).
+Click an album to open the **Album Inspector**:
+
+- The header has the cover, the album title and album artist (click to edit), a summary
+  line (track count, total time, formats, how many tracks are protected or missing a
+  cover), and buttons to **Play album**, **Save details** and **Delete album**.
+- The track list shows each track's number, title, per-track artist (when it differs
+  from the album artist, as on a compilation), duration and format. A track with no
+  embedded cover, or a protected `.m4p`, is badged.
+- Click a track to load its tags into the right-hand panel — title, artist, album, album
+  artist, track, disc, year, genre, composer — edit and **Save**.
+- Reveal a track in Finder or delete it from the row. Deleting a track or album moves it
+  to the app's quarantine folder (not the Trash), so it can be undone.
+
+**Playing.** Click a track's play button (or **Play album**) and a player bar appears at
+the bottom of the window: shuffle, previous, play/pause, next, repeat, a scrubber,
+volume, and a live frequency spectrum. Clicking a track plays the album from that point,
+so previous/next move through it. The bar keeps playing when you close the album; its
+**✕** stops it.
+
+**Undoing edits.** Every tag edit, rename and delete here is written as a run, listed in
+**Library ▸ Runs**, where you can revert any of them.
+
 ## Suggested first run
 
 1. Back up (or at least know you have last night's backup).

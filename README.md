@@ -56,6 +56,43 @@ around the server itself), delete, and export a folder as a zip. It's
 faster and steadier than Finder against an old Roon ROCK, and mounts
 nothing.
 
+## Browsing, editing and playing your library (the Library tab)
+
+The **Library** tab shows any folder as an album grid. Click an album to open the
+**Album Inspector**, which lists its tracks and their tags:
+
+- **Play** a whole album or a single track. Playback runs in a **player bar** at the
+  bottom of the window with the usual transport (shuffle, previous, play/pause, next,
+  repeat), a scrubber, volume, and a real-time **frequency spectrum** of what's
+  playing. Playback continues when you close the album — the bar stays.
+- **Edit tags** in a side panel: title, artist, album, album artist, track, disc,
+  year, genre and composer.
+- **Rename** an album (which retags its tracks and renames the folder) or **delete** a
+  track or a whole album. Deletes go to the app's quarantine folder, not the Trash, so
+  every change is reversible from the **Runs** window (Library ▸ Runs).
+- Protected iTunes files (`.m4p`, FairPlay DRM) show a lock — their tags read fine and
+  they organise normally, but macOS can't decode the audio, so they can't be played.
+
+## Perfect — clean up a library in place
+
+The **Perfect** tab works on the library itself rather than copying it out. It runs as
+a sequence of steps you review before anything is written, then applies everything in
+one reversible pass:
+
+- **Identify** unknown or mistagged tracks by sound (AcoustID) and fill missing tags.
+- **Duplicates** — removes copies, keeping the best one. As well as identical files and
+  same-title/length matches, it catches two files that share an album and track number
+  (even if one title has a typo), and truncated/partial copies of a track you already
+  have in full.
+- **Organise** into a clean `Album Artist / Album / ## Title` tree. Various-artists
+  compilations are filed under **Various Artists** instead of split across each guest
+  artist; differently-named editions of the same album (e.g. a `[Sony]` or `[Castle]`
+  reissue) can be merged into one; and a track whose album-artist tag disagrees with the
+  rest of its album is filed with the album rather than on its own.
+- **Artwork** — find and fill missing covers.
+
+Everything Perfect does is recorded so a whole run can be undone from the Runs window.
+
 There's a full walkthrough in [USAGE.md](USAGE.md), and [HELP.md](HELP.md)
 covers performance tuning (including a fix for macOS's slow SMB defaults),
 troubleshooting, and uninstalling.
