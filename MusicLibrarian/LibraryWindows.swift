@@ -1024,10 +1024,21 @@ struct AlbumFix: Identifiable {
     var changeCount: Int { tagWrites.count + moves.count + artEmbeds.count }
 }
 
-/// The offline, album-scoped analysis behind "Perfect this album". No network — it
-/// reuses the same tag reader, duplicate clustering and canonical-album helpers the
-/// full Perfect wizard uses, but scoped to one folder. Identify-by-sound (AcoustID)
-/// is a later addition; everything here works from the files already on disk.
+/// Cover-art context for the interactive chooser in the sheet: each kept track's
+/// current cover fingerprint, the album's distinct embedded covers (best first), and
+/// the artist/album used to look up more covers online.
+struct AlbumArtContext {
+    var artist: String
+    var album: String
+    var rels: [String]                                // all kept-track rels, in order
+    var relArt: [String: (pixels: Int, bytes: Int)]   // current cover per rel (absent = none)
+    var ownCovers: [Data]                             // distinct embedded covers, highest-res first
+}
+
+/// The album-scoped analysis behind "Perfect this album". It reuses the full Perfect
+/// wizard's own pieces scoped to one folder — the AcoustID→MusicBrainz identifier, the
+/// duplicate clustering, the canonical-album helpers and the cover-art client — so the
+/// result matches what the wizard would do to the same album.
 enum AlbumPerfect {
 
     /// A proposed name is worth writing when it's non-empty and either the current
@@ -1049,7 +1060,7 @@ enum AlbumPerfect {
         return (d, pixels, mime)
     }
 
-    static func analyze(root: URL, files: [URL]) async -> [AlbumFix] {
+    static func analyze(root: URL, files: [URL]) async -> (fixes: [AlbumFix], art: AlbumArtContext) {
         // Read every track's tags (bounded concurrency, same as the inspector).
         var tracks = [Track](repeating: Track(id: 0, url: root, name: "", relDir: "", size: 0, ext: "",
                                               title: "", artist: "", album: "", albumArtist: "",
@@ -1138,8 +1149,11 @@ enum AlbumPerfect {
                                   lines: dupLines, enabled: true, applyable: true, moves: dupMoves))
         }
 
+        let fallbackAlbum = files.first?.deletingLastPathComponent().lastPathComponent ?? ""
         let kept = tracks.filter { !removed.contains(rel($0.url)) }
-        guard !kept.isEmpty else { return fixes }
+        guard !kept.isEmpty else {
+            return (fixes, AlbumArtContext(artist: "", album: fallbackAlbum, rels: [], relArt: [:], ownCovers: []))
+        }
 
         // ---- 2. Album name consensus.
         let albumRaw = kept.map { $0.album }
@@ -1201,38 +1215,25 @@ enum AlbumPerfect {
             }
         }
 
-        // ---- 4. Cover-art unify: stamp the highest-resolution cover across tracks that
-        // lack one or carry a different image. Offline only (best of the album's own art).
-        var best: (data: Data, pixels: Int, mime: String)? = nil
-        var artByRel: [String: (pixels: Int, bytes: Int)] = [:]
+        // ---- 4. Cover-art context. The interactive chooser lives in the sheet (it also
+        // fetches online candidates), so here we only gather each track's current cover
+        // fingerprint and the album's distinct embedded covers, best first.
+        var relArt: [String: (pixels: Int, bytes: Int)] = [:]
+        var coverByFP: [String: (data: Data, pixels: Int)] = [:]
         for t in kept {
             if let a = artInfo(t.url) {
-                artByRel[rel(t.url)] = (a.pixels, a.data.count)
-                if best == nil || a.pixels > best!.pixels || (a.pixels == best!.pixels && a.data.count > best!.data.count) {
-                    best = a
-                }
+                relArt[rel(t.url)] = (a.pixels, a.data.count)
+                let fp = "\(a.pixels)-\(a.data.count)"
+                if coverByFP[fp] == nil { coverByFP[fp] = (a.data, a.pixels) }
             }
         }
-        if let b = best {
-            let bestFP = (b.pixels, b.data.count)
-            var embeds: [(rel: String, image: Data, mime: String)] = []
-            var lines: [String] = []
-            for t in kept {
-                let r = rel(t.url)
-                let cur = artByRel[r]
-                if cur == nil {
-                    embeds.append((r, b.data, b.mime)); lines.append("“\(t.title)” — was missing a cover")
-                } else if cur!.pixels != bestFP.0 || cur!.bytes != bestFP.1 {
-                    embeds.append((r, b.data, b.mime)); lines.append("“\(t.title)” — had a different cover")
-                }
-            }
-            if !embeds.isEmpty {
-                let dim = Int(Double(b.pixels).squareRoot().rounded())
-                fixes.append(AlbumFix(kind: .artwork,
-                                      summary: "Unify cover art on \(embeds.count) track\(embeds.count == 1 ? "" : "s") (best is ~\(dim)×\(dim))",
-                                      lines: lines, enabled: true, applyable: true, artEmbeds: embeds))
-            }
-        }
+        let ownCovers = coverByFP.values.sorted { $0.pixels > $1.pixels }.map { $0.data }
+        let mostCommonArtist = Dictionary(grouping: kept.map { $0.artist }.filter { !$0.isEmpty }, by: { $0 })
+            .mapValues { $0.count }.max(by: { $0.value < $1.value })?.key ?? ""
+        let fetchArtist = looksCompilation ? "Various Artists" : (dominantAA.isEmpty ? mostCommonArtist : dominantAA)
+        let art = AlbumArtContext(artist: fetchArtist,
+                                  album: dominantAlbum.isEmpty ? fallbackAlbum : dominantAlbum,
+                                  rels: kept.map { rel($0.url) }, relArt: relArt, ownCovers: ownCovers)
 
         // ---- 5. File-name tidy → "## Title.ext" (disc-prefixed on multi-disc sets).
         let multiDisc = kept.contains { $0.discNo > 1 }
@@ -1268,7 +1269,7 @@ enum AlbumPerfect {
                                   lines: damagedLines, enabled: false, applyable: false))
         }
 
-        return fixes
+        return (fixes, art)
     }
 }
 
@@ -1284,11 +1285,37 @@ struct PerfectAlbumSheet: View {
     @EnvironmentObject private var store: PerfectStore
 
     @State private var fixes: [AlbumFix] = []
+    @State private var art: AlbumArtContext?
+    @State private var serviceCovers: [Data] = []
+    @State private var selectedCover: Data?        // cover to apply across the album (nil = leave as is)
+    @State private var coversLoading = false
     @State private var loading = true
     @State private var applying = false
 
     private var applyable: [AlbumFix] { fixes.filter { $0.applyable && $0.enabled } }
-    private var totalChanges: Int { applyable.reduce(0) { $0 + $1.changeCount } }
+
+    /// Covers offered in the chooser: the album's own distinct covers first, then the
+    /// online candidates that aren't byte-identical to one we already have.
+    private var candidateCovers: [Data] {
+        guard let a = art else { return [] }
+        let ownKeys = Set(a.ownCovers.map { coverKey($0) })
+        return a.ownCovers + serviceCovers.filter { !ownKeys.contains(coverKey($0)) }
+    }
+    private func coverKey(_ d: Data) -> String { "\(d.count):" + String(d.prefix(48).reduce(UInt64(0)) { $0 &+ UInt64($1) }) }
+
+    /// The artwork embeds for the chosen cover: stamp it on every track whose current
+    /// cover is missing or different. Empty when nothing is selected or all already match.
+    private var artEmbeds: [(rel: String, image: Data, mime: String)] {
+        guard let a = art, let sel = selectedCover else { return [] }
+        let mime = sel.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
+        let px = NSBitmapImageRep(data: sel).map { $0.pixelsWide * $0.pixelsHigh } ?? 0
+        let selFP = (pixels: px, bytes: sel.count)
+        return a.rels.compactMap { r in
+            let cur = a.relArt[r]
+            return (cur == nil || cur! != selFP) ? (r, sel, mime) : nil
+        }
+    }
+    private var totalChanges: Int { applyable.reduce(0) { $0 + $1.changeCount } + artEmbeds.count }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1300,17 +1327,19 @@ struct PerfectAlbumSheet: View {
                     Text("Checking the album…").foregroundStyle(.secondary)
                     Text("Identifying tracks by sound can take a moment.").font(.caption).foregroundStyle(.tertiary)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if fixes.isEmpty {
-                VStack(spacing: 10) {
-                    Image(systemName: "checkmark.seal").font(.system(size: 40, weight: .light)).foregroundStyle(.teal)
-                    Text("This album already looks clean.").font(.title3)
-                    Text("Nothing to fix — tags are consistent, no duplicates, covers match.")
-                        .foregroundStyle(.secondary).font(.callout)
-                }.frame(maxWidth: .infinity, maxHeight: .infinity).padding()
             } else {
                 ScrollView {
                     VStack(spacing: 0) {
-                        ForEach($fixes) { $fix in FixRow(fix: $fix) }
+                        if let a = art { coverPanel(a) }
+                        if fixes.isEmpty {
+                            HStack(spacing: 8) {
+                                Image(systemName: "checkmark.seal").foregroundStyle(.teal)
+                                Text("Tags are consistent and there are no duplicates — only the cover art above to adjust if you want.")
+                                    .font(.callout).foregroundStyle(.secondary)
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(14)
+                        } else {
+                            ForEach($fixes) { $fix in FixRow(fix: $fix) }
+                        }
                     }
                 }
             }
@@ -1356,29 +1385,111 @@ struct PerfectAlbumSheet: View {
         .padding(14)
     }
 
+    @ViewBuilder private func coverPanel(_ a: AlbumArtContext) -> some View {
+        let cands = candidateCovers
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "photo").foregroundStyle(.teal)
+                Text("Cover art").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary).textCase(.uppercase)
+                if coversLoading { ProgressView().controlSize(.small).scaleEffect(0.7) }
+                Spacer()
+                if selectedCover != nil, !a.ownCovers.isEmpty {
+                    Button("Keep current") { selectedCover = a.ownCovers.first }.controlSize(.small).buttonStyle(.plain).foregroundStyle(.teal)
+                }
+            }
+            if cands.isEmpty {
+                Text(coversLoading ? "Looking up covers…" : "No cover found in the files or online.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(Array(cands.enumerated()), id: \.offset) { idx, data in
+                            CoverThumb(data: data,
+                                       selected: selectedCover.map { coverKey($0) == coverKey(data) } ?? false,
+                                       badge: idx < a.ownCovers.count ? (idx == 0 ? "in files" : nil) : "online")
+                                .onTapGesture { selectedCover = data }
+                        }
+                    }.padding(.vertical, 2)
+                }
+            }
+            Text(coverStatus(a)).font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func coverStatus(_ a: AlbumArtContext) -> String {
+        guard selectedCover != nil else { return "Pick a cover to apply it across the album, or leave the files as they are." }
+        let n = artEmbeds.count
+        if n == 0 { return "Every track already uses this cover." }
+        return "Will set this cover on \(n) of \(a.rels.count) track\(a.rels.count == 1 ? "" : "s")."
+    }
+
     private func runAnalysis() {
         loading = true
         let root = self.root, files = album.files
         Task {
-            let result = await AlbumPerfect.analyze(root: root, files: files)
-            await MainActor.run { fixes = result; loading = false }
+            let (result, ctx) = await AlbumPerfect.analyze(root: root, files: files)
+            await MainActor.run {
+                fixes = result; art = ctx
+                selectedCover = ctx.ownCovers.first   // default: the album's best own cover
+                loading = false
+            }
+            // Look up more covers online so one can be chosen even when art already exists.
+            if !ctx.album.isEmpty {
+                await MainActor.run { coversLoading = true }
+                let found = await CoverArtClient().candidates(releaseMBIDs: [], artist: ctx.artist, album: ctx.album)
+                await MainActor.run { serviceCovers = found; coversLoading = false }
+            }
         }
     }
 
     private func apply() {
+        guard totalChanges > 0 else { return }
         let chosen = applyable
-        guard !chosen.isEmpty else { return }
         applying = true
         let tagWrites = chosen.flatMap { $0.tagWrites }
         let moves = chosen.flatMap { $0.moves }
-        let artEmbeds = chosen.flatMap { $0.artEmbeds }
+        let embeds = chosen.flatMap { $0.artEmbeds } + artEmbeds   // checklist art (none now) + the chosen cover
         let name = album.album.isEmpty ? album.dir.lastPathComponent : album.album
         store.applyLibraryRun(root: root, summary: "Perfected album — \(name)",
-                              tagWrites: tagWrites, moves: moves, artEmbeds: artEmbeds) {
+                              tagWrites: tagWrites, moves: moves, artEmbeds: embeds) {
             applying = false
             dismiss()
             onApplied()
         }
+    }
+}
+
+/// A selectable cover thumbnail in the chooser: the image, a teal ring when picked,
+/// and a small source badge ("in files" / "online").
+private struct CoverThumb: View {
+    let data: Data
+    let selected: Bool
+    var badge: String? = nil
+
+    var body: some View {
+        VStack(spacing: 3) {
+            ZStack {
+                if let img = NSImage(data: data) {
+                    Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    Image(systemName: "photo").foregroundStyle(.tertiary)
+                }
+            }
+            .frame(width: 72, height: 72).clipped().cornerRadius(6)
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(selected ? Color.teal : Color.secondary.opacity(0.25), lineWidth: selected ? 3 : 1))
+            .overlay(alignment: .topTrailing) {
+                if selected { Image(systemName: "checkmark.circle.fill").foregroundStyle(.teal).background(Circle().fill(.white)).padding(2) }
+            }
+            if let b = badge {
+                Text(b).font(.system(size: 8, weight: .medium)).foregroundStyle(.secondary)
+            } else {
+                Text(" ").font(.system(size: 8))
+            }
+        }
+        .contentShape(Rectangle())
     }
 }
 
