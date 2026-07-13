@@ -529,8 +529,12 @@ struct LibraryAlbumSheet: View {
             var ex: [Int: [(label: String, value: String)]] = [:]
             var noArt = Set<Int>()
             for i in 0..<urls.count { if let (t, e, hasArt) = byIndex[i] { built.append(t); ex[i] = e; if !hasArt { noArt.insert(i) } } }
+            // number-less tracks sort to the BOTTOM, not the top (a missing track number
+            // shouldn't jump a track above track 1) — like Apple Music.
             let sorted = built.sorted {
-                ($0.discNo, $0.trackNo, $0.title.lowercased()) < ($1.discNo, $1.trackNo, $1.title.lowercased())
+                let a = ($0.discNo == 0 ? Int.max : $0.discNo, $0.trackNo == 0 ? Int.max : $0.trackNo, $0.title.lowercased())
+                let b = ($1.discNo == 0 ? Int.max : $1.discNo, $1.trackNo == 0 ? Int.max : $1.trackNo, $1.title.lowercased())
+                return a < b
             }
             await MainActor.run {
                 tracks = sorted; extras = ex; artless = noArt; loading = false

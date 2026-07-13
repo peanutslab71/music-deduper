@@ -195,6 +195,18 @@ func readMetadata(url: URL, size: Int64) async -> Track {
         }
     }
 
+    // Fallback for tags AVFoundation misses — notably ID3 v2.2 (old iTunes: 3-letter
+    // frame IDs like TRK/TT2/TP1), where AVFoundation returns no track number and
+    // sometimes no title/artist. TagLib reads v2.2 correctly, so fill any gap from it.
+    if trackNo == 0, let s = PerfectStore.readField(url, "track"),
+       let n = Int(s.prefix(while: { $0.isNumber })), n > 0 { trackNo = n }
+    if discNo == 0, let s = PerfectStore.readField(url, "disc"),
+       let n = Int(s.prefix(while: { $0.isNumber })), n > 0 { discNo = n }
+    if title.isEmpty, let s = PerfectStore.readField(url, "title"), !s.isEmpty { title = s }
+    if artist.isEmpty, let s = PerfectStore.readField(url, "artist"), !s.isEmpty { artist = s }
+    if album.isEmpty, let s = PerfectStore.readField(url, "album"), !s.isEmpty { album = s }
+    if albumArtist.isEmpty, let s = PerfectStore.readField(url, "albumartist"), !s.isEmpty { albumArtist = s }
+
     if title.isEmpty {
         title = url.deletingPathExtension().lastPathComponent
     }
