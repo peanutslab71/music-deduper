@@ -842,8 +842,12 @@ struct PlayerBar: View {
         }
         .padding(.horizontal, 18).padding(.vertical, 11)
         .frame(width: 786, height: 76)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(.white.opacity(0.10)))
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Color(nsColor: .windowBackgroundColor))
+                .overlay(RoundedRectangle(cornerRadius: 18).fill(.ultraThinMaterial))
+        )
+        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(.white.opacity(0.12)))
         .task(id: audio.current?.url) { await loadArt(audio.current?.url) }
     }
 
@@ -917,10 +921,22 @@ final class PlayerBarController {
     private var panel: NSPanel?
     private var cancellable: AnyCancellable?
 
+    private var manual = false   // forced visible via the menu, ignores playback state
+
     func start() {
         cancellable = AudioPreview.shared.$playingURL
             .receive(on: RunLoop.main)
-            .sink { [weak self] url in url != nil ? self?.show() : self?.hide() }
+            .sink { [weak self] url in
+                guard let self else { return }
+                if url != nil { self.show() } else if !self.manual { self.hide() }
+            }
+    }
+
+    /// Menu command: force the bar visible (or hide it) regardless of playback, so we
+    /// can tell a panel-display problem apart from a playback-wiring one.
+    func toggleManual() {
+        manual.toggle()
+        if manual { show() } else if AudioPreview.shared.playingURL == nil { hide() }
     }
 
     private func show() {
@@ -928,7 +944,6 @@ final class PlayerBarController {
         guard let p = panel else { return }
         position(p)
         p.orderFrontRegardless()
-        p.makeKeyAndOrderFront(nil)
     }
     private func hide() { panel?.orderOut(nil) }
 

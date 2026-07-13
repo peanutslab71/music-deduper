@@ -44,6 +44,9 @@ struct MusicLibrarianApp: App {
             CommandMenu("Library") {
                 LibraryMenuButton("Runs", "runs", "r")
                 LibraryMenuButton("Logs", "logs", "g")
+                Divider()
+                Button("Show/Hide Player Bar") { PlayerBarController.shared.toggleManual() }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .help) {
                 Button("Music Librarian Help") {
