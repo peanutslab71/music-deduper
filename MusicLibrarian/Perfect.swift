@@ -360,6 +360,7 @@ final class SpectrumAnalyzer: ObservableObject {
     private let setup: FFTSetup?
     private var window: [Float]
     private var smoothed = [Float](repeating: 0, count: bandCount)
+    private var agc: Float = 1e-4   // rolling "full scale" so the display tracks volume
 
     private var file: AVAudioFile?
     private var buffer: AVAudioPCMBuffer?
@@ -427,19 +428,32 @@ final class SpectrumAnalyzer: ObservableObject {
             }
         }
 
-        // group into log-spaced bands, convert to a normalized dB-ish height, smooth
+        // group into log-spaced bands as NORMALIZED linear magnitude (the raw vDSP FFT
+        // is unscaled, so divide it back down), with a gentle treble tilt so highs read
+        // as more than a sliver against the bass.
         let nb = Self.bandCount
-        var out = [Float](repeating: 0, count: nb)
+        let norm = 2 / Float(fftSize)
+        var lin = [Float](repeating: 0, count: nb)
         for b in 0..<nb {
             let lo = max(1, Int(pow(Double(half), Double(b) / Double(nb))))
             let hi = max(lo + 1, Int(pow(Double(half), Double(b + 1) / Double(nb))))
             var sum: Float = 0; var c: Float = 0
-            for k in lo..<min(hi, half) { sum += mags[k]; c += 1 }
-            let avg = c > 0 ? sum / c : 0
-            let db = 10 * log10(avg + 1e-9)                 // magnitude² → dB
-            out[b] = min(1, max(0, (db + 70) / 70))         // ~[-70,0] dB → [0,1]
+            for k in lo..<min(hi, half) { sum += sqrt(mags[k]) * norm; c += 1 }
+            let tilt = 1 + 1.6 * Float(b) / Float(nb)        // lift higher bands a little
+            lin[b] = (c > 0 ? sum / c : 0) * tilt
         }
-        for i in 0..<nb { smoothed[i] = smoothed[i] * 0.55 + out[i] * 0.45 }
+        // Automatic gain control: scale to the recent loudest band (fast attack, slow
+        // release) so the picture auto-adjusts to volume instead of flooding, then a dB
+        // curve for the familiar EQ look.
+        let frameMax = lin.max() ?? 0
+        agc = max(frameMax, agc * 0.992)
+        let ref = max(agc, 1e-4)
+        var out = [Float](repeating: 0, count: nb)
+        for b in 0..<nb {
+            let db = 20 * log10(lin[b] / ref + 1e-6)         // ≤ 0 dB
+            out[b] = min(1, max(0, (db + 42) / 42))          // -42…0 dB → 0…1
+        }
+        for i in 0..<nb { smoothed[i] = smoothed[i] * 0.5 + out[i] * 0.5 }
         let snapshot = smoothed
         DispatchQueue.main.async { self.bands = snapshot }
     }
