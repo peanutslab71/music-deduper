@@ -428,15 +428,20 @@ final class SpectrumAnalyzer: ObservableObject {
             }
         }
 
-        // group into log-spaced bands as NORMALIZED linear magnitude (the raw vDSP FFT
-        // is unscaled, so divide it back down), with a gentle treble tilt so highs read
-        // as more than a sliver against the bass.
+        // Bands spaced by FREQUENCY (equal musical octaves, ~30 Hz → 20 kHz) rather than
+        // by raw FFT bin — even 1/3-octave-ish bars, so the low end isn't over-weighted
+        // by near-empty sub-bass bins. NORMALIZED linear magnitude (the raw vDSP FFT is
+        // unscaled), with a gentle treble tilt so highs read against the bass.
         let nb = Self.bandCount
         let norm = 2 / Float(fftSize)
+        let fLow = 30.0, fHigh = min(20_000.0, sr / 2)
+        let binPerHz = Double(fftSize) / sr
         var lin = [Float](repeating: 0, count: nb)
         for b in 0..<nb {
-            let lo = max(1, Int(pow(Double(half), Double(b) / Double(nb))))
-            let hi = max(lo + 1, Int(pow(Double(half), Double(b + 1) / Double(nb))))
+            let f0 = fLow * pow(fHigh / fLow, Double(b) / Double(nb))
+            let f1 = fLow * pow(fHigh / fLow, Double(b + 1) / Double(nb))
+            let lo = max(1, Int(f0 * binPerHz))
+            let hi = max(lo + 1, Int(f1 * binPerHz))
             var sum: Float = 0; var c: Float = 0
             for k in lo..<min(hi, half) { sum += sqrt(mags[k]) * norm; c += 1 }
             let tilt = 1 + 1.6 * Float(b) / Float(nb)        // lift higher bands a little
