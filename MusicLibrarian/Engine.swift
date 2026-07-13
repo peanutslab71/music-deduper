@@ -250,7 +250,19 @@ func buildClusters(_ tracks: inout [Track], mode: MatchMode, tol: Double,
     var used = Set<Int>()
 
     func make(_ ids: [Int], _ reason: String) -> Cluster {
-        let sorted = ids.sorted { tracks[$0].qualityScore > tracks[$1].qualityScore }
+        // A truncated/partial copy (much shorter than the fullest member) must never win
+        // the keeper contest — otherwise a 46s fragment at 320k beats the real 221s song
+        // at 160k, because qualityScore counts bitrate. Completeness comes first.
+        let maxDur = ids.compactMap { tracks[$0].duration > 0 ? tracks[$0].duration : nil }.max() ?? 0
+        func isPartial(_ i: Int) -> Bool {
+            let d = tracks[i].duration
+            return d > 0 && maxDur > 0 && (maxDur - d) > 5 && d < maxDur * 0.75
+        }
+        let sorted = ids.sorted { a, b in
+            let pa = isPartial(a), pb = isPartial(b)
+            if pa != pb { return !pa }                                  // full copies before partials
+            return tracks[a].qualityScore > tracks[b].qualityScore      // then best quality
+        }
         let keeper = sorted[0]
         let reclaim = sorted.dropFirst().reduce(Int64(0)) { $0 + tracks[$1].size }
         return Cluster(memberIDs: sorted, keeperID: keeper, reason: reason, reclaim: reclaim,
@@ -295,8 +307,12 @@ func buildClusters(_ tracks: inout [Track], mode: MatchMode, tol: Double,
         }
         // 2.5) same album (edition/case-folded) + same disc + same track number = a
         //      duplicate, even when the titles disagree — a typo ("Fingel" vs "Finger")
-        //      or a different filename format across folders. A loose duration check
-        //      guards against two genuinely different songs sharing a track number.
+        //      or a different filename format across folders. Two files are the same
+        //      track when their durations match OR their titles match; a same-title pair
+        //      whose durations differ is a full track + a truncated/partial copy (e.g. a
+        //      46s fragment of a 221s song) — still one track, keep the longer/better.
+        //      Only a title-AND-duration mismatch is treated as two different songs that
+        //      happen to share a track number, and left apart.
         var byNum: [String: [Int]] = [:]
         for t in tracks where !used.contains(t.id) && t.trackNo > 0 && !t.album.isEmpty {
             let key = normText(t.displayArtist) + "\u{0}" + Organiser.canonicalAlbumKey(t.album)
@@ -307,14 +323,20 @@ func buildClusters(_ tracks: inout [Track], mode: MatchMode, tol: Double,
             var remaining = ids.sorted()
             while let first = remaining.first {
                 let a = tracks[first]
-                var grp = [first]; var rest: [Int] = []
+                var grp = [first]; var rest: [Int] = []; var partial = false
                 for id in remaining.dropFirst() {
                     let b = tracks[id]
                     let durOK = (a.duration <= 0 || b.duration <= 0) ? true
                                 : abs(a.duration - b.duration) <= max(tol, 3.0)
-                    if durOK { grp.append(id) } else { rest.append(id) }
+                    let titleOK = !a.title.isEmpty && normText(a.title) == normText(b.title)
+                    if durOK || titleOK { grp.append(id); if !durOK { partial = true } }
+                    else { rest.append(id) }
                 }
-                if grp.count > 1 { clusters.append(make(grp, "same album & track number")); used.formUnion(grp) }
+                if grp.count > 1 {
+                    clusters.append(make(grp, partial ? "same track (one is a partial/short copy)"
+                                                      : "same album & track number"))
+                    used.formUnion(grp)
+                }
                 remaining = rest
             }
         }
