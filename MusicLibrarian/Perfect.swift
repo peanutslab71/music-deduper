@@ -2759,10 +2759,12 @@ final class PerfectStore: ObservableObject {
     func applyLibraryRun(root: URL, summary: String,
                          tagWrites: [(rel: String, field: String, value: String)] = [],
                          moves: [(from: String, to: String)] = [],
+                         artEmbeds: [(rel: String, image: Data, mime: String)] = [],
                          then: (@MainActor () -> Void)? = nil) {
         busy = true; status = "Applying…"
         Task {   // @MainActor-isolated (this method is on the store); disk work suspends off-main
-            await Self.performLibraryOps(root: root, summary: summary, tagWrites: tagWrites, moves: moves)
+            await Self.performLibraryOps(root: root, summary: summary,
+                                         tagWrites: tagWrites, moves: moves, artEmbeds: artEmbeds)
             self.busy = false; self.status = ""; self.loadRuns(); then?()
         }
     }
@@ -2772,7 +2774,8 @@ final class PerfectStore: ObservableObject {
     /// thing is one undoable entry in Runs.
     nonisolated static func performLibraryOps(root: URL, summary: String,
                                               tagWrites: [(rel: String, field: String, value: String)],
-                                              moves: [(from: String, to: String)]) async {
+                                              moves: [(from: String, to: String)],
+                                              artEmbeds: [(rel: String, image: Data, mime: String)] = []) async {
         let fm = FileManager.default
         let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
         let qRel = "Music Librarian Quarantine/\(stamp)"
@@ -2780,6 +2783,8 @@ final class PerfectStore: ObservableObject {
         try? fm.createDirectory(at: quarantine, withIntermediateDirectories: true)
         var ops: [(from: String, to: String)] = []
         var tagEdits: [(rel: String, field: String, old: String)] = []
+        var artEdits: [String] = []                                   // art added where there was none → undo strips it
+        var artReplacements: [(rel: String, backup: String, oldType: Int)] = []  // art replaced → undo restores backup
         var log = "Music Librarian — change log \(Date())\nLibrary: \(root.path)\n\n"
 
         for w in tagWrites {
@@ -2788,6 +2793,33 @@ final class PerfectStore: ObservableObject {
             if old == w.value { continue }
             do { try writeField(url, w.field, to: w.value); tagEdits.append((w.rel, w.field, old))
                  log += "TAG: \(w.rel)  \(w.field) '\(old)' → '\(w.value)'\n" } catch {}
+        }
+        // Embed artwork BEFORE any moves so the recorded rels are the files' original
+        // paths (undo reverses moves first, then restores art by rel). Existing art is
+        // backed up (artReplacements); a blank track's added art is recorded in artEdits.
+        if !artEmbeds.isEmpty {
+            let artBackupDir = quarantine.appendingPathComponent("artwork-backups", isDirectory: true)
+            var bIdx = 0
+            for e in artEmbeds {
+                let url = root.appendingPathComponent(e.rel)
+                guard fm.fileExists(atPath: url.path) else { continue }
+                if md_has_artwork(url.path) == 1 {
+                    var bl: Int32 = 0, bt: Int32 = 0
+                    if let bbuf = md_copy_artwork(url.path, &bl, &bt) {
+                        let bdata = Data(bytes: bbuf, count: Int(bl)); free(bbuf)
+                        try? fm.createDirectory(at: artBackupDir, withIntermediateDirectories: true)
+                        let name = "\(bIdx).img"; bIdx += 1
+                        try? bdata.write(to: artBackupDir.appendingPathComponent(name))
+                        artReplacements.append((e.rel, "artwork-backups/" + name, Int(bt)))
+                    }
+                } else {
+                    artEdits.append(e.rel)   // was blank → undo just strips it
+                }
+                let rc = e.image.withUnsafeBytes { buf in
+                    md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(e.image.count), e.mime)
+                }
+                log += rc == 0 ? "ART: \(e.rel)  ← unified cover (\(e.image.count) bytes)\n" : "FAILED art \(e.rel): rc \(rc)\n"
+            }
         }
         // longest source path first so a folder's files move before the folder
         for m in moves.sorted(by: { $0.from.count > $1.from.count }) {
@@ -2802,7 +2834,7 @@ final class PerfectStore: ObservableObject {
                 log += "\(m.to.isEmpty ? "DELETE → quarantine" : "MOVE"): \(m.from) → \(toRel)\n"
             } catch { log += "FAILED \(m.from): \(error.localizedDescription)\n" }
         }
-        let total = ops.count + tagEdits.count
+        let total = ops.count + tagEdits.count + artEdits.count + artReplacements.count
         log += "\n\(total) change(s). Restore with 'Undo this run'.\n"
         try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
         let record: [String: Any] = [
@@ -2810,7 +2842,8 @@ final class PerfectStore: ObservableObject {
             "root": root.path, "summary": summary,
             "ops": ops.map { ["from": $0.from, "to": $0.to] },
             "tagEdits": tagEdits.map { ["rel": $0.rel, "field": $0.field, "old": $0.old] },
-            "perfEdits": [], "artEdits": [], "artPromotions": [], "artReplacements": []
+            "perfEdits": [], "artEdits": artEdits, "artPromotions": [],
+            "artReplacements": artReplacements.map { ["rel": $0.rel, "backup": $0.backup, "oldType": String($0.oldType)] }
         ]
         if let data = try? JSONSerialization.data(withJSONObject: record) {
             try? data.write(to: quarantine.appendingPathComponent("run.json"))

@@ -218,6 +218,7 @@ struct LibraryAlbumSheet: View {
     @State private var albumName = ""
     @State private var albumArtist = ""
     @State private var confirmDeleteAlbum = false
+    @State private var showPerfect = false
 
     private var selected: Track? { tracks.first { $0.id == selectedID } }
     private var protectedCount: Int { tracks.filter { $0.url.pathExtension.lowercased() == "m4p" }.count }
@@ -259,6 +260,12 @@ struct LibraryAlbumSheet: View {
             Button("Cancel", role: .cancel) {}
             Button("Delete album", role: .destructive) { deleteAlbum() }
         } message: { Text("\(tracks.count) track(s) move to quarantine — reversible from Runs.") }
+        // Perfect this album — after a successful reversible Apply, close the inspector
+        // (files/tags/names may all have changed) and let the browser reload.
+        .sheet(isPresented: $showPerfect) {
+            PerfectAlbumSheet(album: album, root: root, onApplied: { onChanged(); dismiss() })
+                .environmentObject(store)
+        }
     }
 
     // MARK: header
@@ -278,9 +285,9 @@ struct LibraryAlbumSheet: View {
                         .buttonStyle(.borderedProminent).tint(.teal).controlSize(.small)
                     Button { audio.stop() } label: { Label("Stop", systemImage: "stop.fill") }
                         .controlSize(.small).disabled(audio.playingURL == nil)
-                    Button { } label: { Label("Perfect this album", systemImage: "wand.and.stars") }
-                        .controlSize(.small).disabled(true)
-                        .help("Coming next: one-shot identify, artwork, dedup & tidy for this album.")
+                    Button { showPerfect = true } label: { Label("Perfect this album", systemImage: "wand.and.stars") }
+                        .controlSize(.small).tint(.purple)
+                        .help("One-shot cleanup for this album: consistent tags, unified cover art, remove duplicates, tidy file names.")
                     Spacer()
                     if albumDetailsDirty {
                         Button("Save details") { saveAlbumDetails() }.controlSize(.small).tint(.teal)
@@ -972,5 +979,394 @@ final class PlayerBarController {
         guard let screen = NSScreen.main else { return }
         let vf = screen.visibleFrame
         p.setFrameOrigin(NSPoint(x: vf.midX - p.frame.width / 2, y: vf.minY + 26))
+    }
+}
+
+
+// MARK: - Perfect this album (offline, album-scoped, one reversible Apply)
+
+/// One proposed fix in the album checklist. The payloads feed straight into
+/// `PerfectStore.applyLibraryRun` (tag writes + moves + artwork), so applying the
+/// whole checklist is a single reversible run that shows up in the Runs window.
+struct AlbumFix: Identifiable {
+    enum Kind: String {
+        case album = "Album name"
+        case albumArtist = "Album artist"
+        case compilation = "Compilation"
+        case artwork = "Cover art"
+        case duplicate = "Duplicates"
+        case filename = "File names"
+        case damaged = "Possibly damaged"
+    }
+    let id = UUID()
+    let kind: Kind
+    let summary: String                  // one-line headline
+    var lines: [String] = []             // per-item detail
+    var enabled: Bool                    // checklist toggle
+    let applyable: Bool                  // false = information only (e.g. damaged)
+    var tagWrites: [(rel: String, field: String, value: String)] = []
+    var moves: [(from: String, to: String)] = []
+    var artEmbeds: [(rel: String, image: Data, mime: String)] = []
+
+    var systemImage: String {
+        switch kind {
+        case .album: return "textformat"
+        case .albumArtist: return "person.2"
+        case .compilation: return "person.3.sequence"
+        case .artwork: return "photo"
+        case .duplicate: return "doc.on.doc"
+        case .filename: return "character.cursor.ibeam"
+        case .damaged: return "exclamationmark.triangle"
+        }
+    }
+    var changeCount: Int { tagWrites.count + moves.count + artEmbeds.count }
+}
+
+/// The offline, album-scoped analysis behind "Perfect this album". No network — it
+/// reuses the same tag reader, duplicate clustering and canonical-album helpers the
+/// full Perfect wizard uses, but scoped to one folder. Identify-by-sound (AcoustID)
+/// is a later addition; everything here works from the files already on disk.
+enum AlbumPerfect {
+
+    private static func artInfo(_ url: URL) -> (data: Data, pixels: Int, mime: String)? {
+        var len: Int32 = 0, ty: Int32 = 0
+        guard let buf = md_copy_artwork(url.path, &len, &ty), len > 0 else { return nil }
+        let d = Data(bytes: buf, count: Int(len)); free(buf)
+        let mime = d.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
+        let pixels = NSBitmapImageRep(data: d).map { $0.pixelsWide * $0.pixelsHigh } ?? 0
+        return (d, pixels, mime)
+    }
+
+    static func analyze(root: URL, files: [URL]) async -> [AlbumFix] {
+        // Read every track's tags (bounded concurrency, same as the inspector).
+        var tracks = [Track](repeating: Track(id: 0, url: root, name: "", relDir: "", size: 0, ext: "",
+                                              title: "", artist: "", album: "", albumArtist: "",
+                                              trackNo: 0, discNo: 0, duration: 0, lossless: false,
+                                              bitrate: 0, codec: ""), count: files.count)
+        await withTaskGroup(of: (Int, Track).self) { group in
+            let limit = 8; var next = 0
+            func launch() {
+                let i = next; next += 1; let u = files[i]
+                group.addTask {
+                    let size = Int64((try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                    var t = await readMetadata(url: u, size: size); t.id = i
+                    if t.title.isEmpty { t.title = u.deletingPathExtension().lastPathComponent }
+                    return (i, t)
+                }
+            }
+            for _ in 0..<min(limit, files.count) { launch() }
+            while let (i, t) = await group.next() { tracks[i] = t; if next < files.count { launch() } }
+        }
+
+        let rp = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        func rel(_ u: URL) -> String { u.path.hasPrefix(rp) ? String(u.path.dropFirst(rp.count)) : u.lastPathComponent }
+
+        var fixes: [AlbumFix] = []
+
+        // ---- 1. Duplicates first, so removed files are excluded from every later fix.
+        var clTracks = tracks
+        let clusters = buildClusters(&clTracks, mode: .balanced, tol: 2.0, crossAlbum: false)
+        var removed = Set<String>()
+        var dupMoves: [(from: String, to: String)] = []
+        var dupLines: [String] = []
+        for c in clusters where c.memberIDs.count > 1 {
+            let keeper = tracks[c.keeperID]
+            for id in c.memberIDs where id != c.keeperID {
+                let t = tracks[id]
+                dupMoves.append((rel(t.url), ""))
+                removed.insert(rel(t.url))
+                dupLines.append("remove “\(t.url.lastPathComponent)” — keeping “\(keeper.url.lastPathComponent)”")
+            }
+        }
+        if !dupMoves.isEmpty {
+            fixes.append(AlbumFix(kind: .duplicate,
+                                  summary: "Remove \(dupMoves.count) duplicate track\(dupMoves.count == 1 ? "" : "s") (best copy kept)",
+                                  lines: dupLines, enabled: true, applyable: true, moves: dupMoves))
+        }
+
+        let kept = tracks.filter { !removed.contains(rel($0.url)) }
+        guard !kept.isEmpty else { return fixes }
+
+        // ---- 2. Album name consensus.
+        let albumRaw = kept.map { $0.album }
+        let realAlbums = albumRaw.filter { !$0.isEmpty && !Organiser.isPlaceholderAlbum($0) }
+        let dominantAlbum = Organiser.canonicalAlbumDisplay(realAlbums.isEmpty ? albumRaw : realAlbums)
+        if !dominantAlbum.isEmpty {
+            var writes: [(rel: String, field: String, value: String)] = []
+            var lines: [String] = []
+            for t in kept where t.album != dominantAlbum {
+                writes.append((rel(t.url), "album", dominantAlbum))
+                lines.append("“\(t.title)”: \(t.album.isEmpty ? "—" : t.album) → \(dominantAlbum)")
+            }
+            if !writes.isEmpty {
+                fixes.append(AlbumFix(kind: .album, summary: "Set album to “\(dominantAlbum)” on \(writes.count) track\(writes.count == 1 ? "" : "s")",
+                                      lines: lines, enabled: true, applyable: true, tagWrites: writes))
+            }
+        }
+
+        // ---- 3. Compilation vs album-artist consensus (mutually exclusive).
+        let primaryArtists = kept.map { normText($0.artist.isEmpty ? $0.albumArtist : $0.artist) }.filter { !$0.isEmpty }
+        let distinctArtists = Set(primaryArtists)
+        // most common album-artist and how much of the album agrees with it
+        let aaCounts = Dictionary(grouping: kept.map { $0.albumArtist }.filter { !$0.isEmpty }, by: { $0 }).mapValues { $0.count }
+        let dominantAA = aaCounts.max(by: { $0.value < $1.value })?.key ?? ""
+        let aaAgree = kept.filter { !$0.albumArtist.isEmpty && $0.albumArtist == dominantAA }.count
+        let looksCompilation = distinctArtists.count >= 2 &&
+            (dominantAA.isEmpty || normText(dominantAA) == "various artists" || Double(aaAgree) < Double(kept.count) * 0.6) &&
+            !dominantAlbum.isEmpty
+
+        if looksCompilation {
+            var writes: [(rel: String, field: String, value: String)] = []
+            var lines: [String] = []
+            for t in kept {
+                if normText(t.albumArtist) != "various artists" {
+                    writes.append((rel(t.url), "albumartist", "Various Artists"))
+                }
+                writes.append((rel(t.url), "compilation", "1"))
+                lines.append("“\(t.title)” — \(t.artist.isEmpty ? "—" : t.artist)")
+            }
+            fixes.append(AlbumFix(kind: .compilation,
+                                  summary: "Various-artists compilation — set album artist “Various Artists” + compilation flag (\(kept.count) tracks)",
+                                  lines: lines, enabled: true, applyable: true, tagWrites: writes))
+        } else {
+            // single act: file everything under the album's dominant album-artist
+            let target = dominantAA.isEmpty
+                ? (Dictionary(grouping: kept.map { $0.artist }.filter { !$0.isEmpty }, by: { $0 }).mapValues { $0.count }.max(by: { $0.value < $1.value })?.key ?? "")
+                : dominantAA
+            if !target.isEmpty {
+                var writes: [(rel: String, field: String, value: String)] = []
+                var lines: [String] = []
+                for t in kept where t.albumArtist != target {
+                    writes.append((rel(t.url), "albumartist", target))
+                    lines.append("“\(t.title)”: \(t.albumArtist.isEmpty ? "—" : t.albumArtist) → \(target)")
+                }
+                if !writes.isEmpty {
+                    fixes.append(AlbumFix(kind: .albumArtist, summary: "Set album artist to “\(target)” on \(writes.count) track\(writes.count == 1 ? "" : "s")",
+                                          lines: lines, enabled: true, applyable: true, tagWrites: writes))
+                }
+            }
+        }
+
+        // ---- 4. Cover-art unify: stamp the highest-resolution cover across tracks that
+        // lack one or carry a different image. Offline only (best of the album's own art).
+        var best: (data: Data, pixels: Int, mime: String)? = nil
+        var artByRel: [String: (pixels: Int, bytes: Int)] = [:]
+        for t in kept {
+            if let a = artInfo(t.url) {
+                artByRel[rel(t.url)] = (a.pixels, a.data.count)
+                if best == nil || a.pixels > best!.pixels || (a.pixels == best!.pixels && a.data.count > best!.data.count) {
+                    best = a
+                }
+            }
+        }
+        if let b = best {
+            let bestFP = (b.pixels, b.data.count)
+            var embeds: [(rel: String, image: Data, mime: String)] = []
+            var lines: [String] = []
+            for t in kept {
+                let r = rel(t.url)
+                let cur = artByRel[r]
+                if cur == nil {
+                    embeds.append((r, b.data, b.mime)); lines.append("“\(t.title)” — was missing a cover")
+                } else if cur!.pixels != bestFP.0 || cur!.bytes != bestFP.1 {
+                    embeds.append((r, b.data, b.mime)); lines.append("“\(t.title)” — had a different cover")
+                }
+            }
+            if !embeds.isEmpty {
+                let dim = Int(Double(b.pixels).squareRoot().rounded())
+                fixes.append(AlbumFix(kind: .artwork,
+                                      summary: "Unify cover art on \(embeds.count) track\(embeds.count == 1 ? "" : "s") (best is ~\(dim)×\(dim))",
+                                      lines: lines, enabled: true, applyable: true, artEmbeds: embeds))
+            }
+        }
+
+        // ---- 5. File-name tidy → "## Title.ext" (disc-prefixed on multi-disc sets).
+        let multiDisc = kept.contains { $0.discNo > 1 }
+        var renames: [(from: String, to: String)] = []
+        var renameLines: [String] = []
+        for t in kept where t.trackNo > 0 && !t.title.isEmpty {
+            let num = multiDisc && t.discNo > 0 ? "\(t.discNo)-" + String(format: "%02d", t.trackNo) : String(format: "%02d", t.trackNo)
+            let ideal = "\(num) \(Organiser.safe(t.title)).\(t.url.pathExtension.lowercased())"
+            if t.url.lastPathComponent != ideal {
+                let dir = (rel(t.url) as NSString).deletingLastPathComponent
+                let toRel = dir.isEmpty ? ideal : dir + "/" + ideal
+                // skip if that name is already taken by another kept track
+                if kept.contains(where: { $0.url.lastPathComponent == ideal && $0.id != t.id }) { continue }
+                renames.append((rel(t.url), toRel))
+                renameLines.append("“\(t.url.lastPathComponent)” → “\(ideal)”")
+            }
+        }
+        if !renames.isEmpty {
+            fixes.append(AlbumFix(kind: .filename, summary: "Tidy \(renames.count) file name\(renames.count == 1 ? "" : "s") to “## Title”",
+                                  lines: renameLines, enabled: true, applyable: true, moves: renames))
+        }
+
+        // ---- 6. Possibly-damaged flag: lone very-short files with no full-length twin.
+        // Information only — never auto-removed. Skipped if it's already a dedup loser.
+        let durs = kept.map { $0.duration }.filter { $0 > 0 }.sorted()
+        let median = durs.isEmpty ? 0 : durs[durs.count / 2]
+        var damagedLines: [String] = []
+        for t in kept where t.duration > 0 && t.duration <= 40 && median > 90 && t.duration < median * 0.5 {
+            damagedLines.append("“\(t.title)” — \(fmtDur(t.duration)) (album typical \(fmtDur(median)))")
+        }
+        if !damagedLines.isEmpty {
+            fixes.append(AlbumFix(kind: .damaged, summary: "\(damagedLines.count) track\(damagedLines.count == 1 ? "" : "s") look unusually short — check before keeping",
+                                  lines: damagedLines, enabled: false, applyable: false))
+        }
+
+        return fixes
+    }
+}
+
+
+/// "Perfect this album" — a checklist of the offline fixes AlbumPerfect finds for
+/// one album, each toggleable, applied as ONE reversible run (shows in Runs). Nothing
+/// is written until Apply; the whole run is undoable afterwards.
+struct PerfectAlbumSheet: View {
+    let album: LibAlbum
+    let root: URL
+    var onApplied: () -> Void = {}
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: PerfectStore
+
+    @State private var fixes: [AlbumFix] = []
+    @State private var loading = true
+    @State private var applying = false
+
+    private var applyable: [AlbumFix] { fixes.filter { $0.applyable && $0.enabled } }
+    private var totalChanges: Int { applyable.reduce(0) { $0 + $1.changeCount } }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            if loading {
+                VStack(spacing: 10) { ProgressView(); Text("Checking the album…").foregroundStyle(.secondary) }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if fixes.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "checkmark.seal").font(.system(size: 40, weight: .light)).foregroundStyle(.teal)
+                    Text("This album already looks clean.").font(.title3)
+                    Text("Nothing to fix — tags are consistent, no duplicates, covers match.")
+                        .foregroundStyle(.secondary).font(.callout)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity).padding()
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach($fixes) { $fix in FixRow(fix: $fix) }
+                    }
+                }
+            }
+            Divider()
+            footer
+        }
+        .frame(width: 680, height: 560)
+        .onAppear { runAnalysis() }
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 12) {
+            AlbumCover(key: album.id, sampleURL: album.sampleURL, foundMBID: nil, size: 52, corner: 6)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Perfect this album").font(.headline)
+                Text(album.album.isEmpty ? album.dir.lastPathComponent : album.album)
+                    .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                Text("Review the checklist, then apply everything in one reversible step.")
+                    .font(.caption).foregroundStyle(.tertiary)
+            }
+            Spacer()
+        }
+        .padding(14)
+    }
+
+    private var footer: some View {
+        HStack(spacing: 12) {
+            if applying {
+                ProgressView().controlSize(.small)
+                Text("Applying…").foregroundStyle(.secondary).font(.callout)
+            } else if !fixes.isEmpty {
+                Text(totalChanges == 0 ? "Nothing selected"
+                     : "\(totalChanges) change\(totalChanges == 1 ? "" : "s") selected · reversible from Runs")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Cancel") { dismiss() }.disabled(applying)
+            Button("Apply") { apply() }
+                .buttonStyle(.borderedProminent).tint(.teal)
+                .keyboardShortcut(.defaultAction)
+                .disabled(applying || totalChanges == 0)
+        }
+        .padding(14)
+    }
+
+    private func runAnalysis() {
+        loading = true
+        let root = self.root, files = album.files
+        Task {
+            let result = await AlbumPerfect.analyze(root: root, files: files)
+            await MainActor.run { fixes = result; loading = false }
+        }
+    }
+
+    private func apply() {
+        let chosen = applyable
+        guard !chosen.isEmpty else { return }
+        applying = true
+        let tagWrites = chosen.flatMap { $0.tagWrites }
+        let moves = chosen.flatMap { $0.moves }
+        let artEmbeds = chosen.flatMap { $0.artEmbeds }
+        let name = album.album.isEmpty ? album.dir.lastPathComponent : album.album
+        store.applyLibraryRun(root: root, summary: "Perfected album — \(name)",
+                              tagWrites: tagWrites, moves: moves, artEmbeds: artEmbeds) {
+            applying = false
+            dismiss()
+            onApplied()
+        }
+    }
+}
+
+/// One checklist row: a checkbox (or a warning marker for info-only items), the
+/// headline, and an expandable list of the exact per-track changes.
+private struct FixRow: View {
+    @Binding var fix: AlbumFix
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 10) {
+                if fix.applyable {
+                    Toggle("", isOn: $fix.enabled).labelsHidden().toggleStyle(.checkbox)
+                } else {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).frame(width: 16)
+                }
+                Image(systemName: fix.systemImage)
+                    .foregroundStyle(fix.applyable ? Color.teal : Color.orange)
+                    .frame(width: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(fix.kind.rawValue).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary).textCase(.uppercase)
+                    Text(fix.summary).font(.system(size: 13)).foregroundStyle(fix.enabled || !fix.applyable ? .primary : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                if !fix.lines.isEmpty {
+                    Button { withAnimation(.easeInOut(duration: 0.12)) { expanded.toggle() } } label: {
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.system(size: 11)).foregroundStyle(.tertiary)
+                    }.buttonStyle(.plain)
+                }
+            }
+            if expanded {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Array(fix.lines.enumerated()), id: \.offset) { _, line in
+                        Text(line).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.leading, 56).padding(.top, 6)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .overlay(alignment: .bottom) { Divider() }
+        .contentShape(Rectangle())
+        .onTapGesture { if !fix.lines.isEmpty { withAnimation(.easeInOut(duration: 0.12)) { expanded.toggle() } } }
     }
 }
