@@ -246,6 +246,10 @@ struct LibraryAlbumSheet: View {
                     tagInspector.frame(width: 322)
                 }
             }
+            if audio.playingURL != nil {
+                Divider()
+                PlayerBar()
+            }
         }
         .frame(width: 940, height: 640)
         .onAppear { loadTracks() }
@@ -840,14 +844,9 @@ struct PlayerBar: View {
                 }.buttonStyle(.plain).help("Stop and hide the player")
             }
         }
-        .padding(.horizontal, 18).padding(.vertical, 11)
-        .frame(width: 786, height: 76)
-        .background(
-            RoundedRectangle(cornerRadius: 18)
-                .fill(Color(nsColor: .windowBackgroundColor))
-                .overlay(RoundedRectangle(cornerRadius: 18).fill(.ultraThinMaterial))
-        )
-        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(.white.opacity(0.12)))
+        .padding(.horizontal, 18).padding(.vertical, 10)
+        .frame(height: 76).frame(maxWidth: 820)
+        .background(.ultraThinMaterial)
         .task(id: audio.current?.url) { await loadArt(audio.current?.url) }
     }
 
