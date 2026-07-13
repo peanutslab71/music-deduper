@@ -1,97 +1,117 @@
 # Music Librarian
 
-A small native Mac app that finds and removes duplicate tracks in a music library.
+A native Mac app for cleaning up a local music library: identify and tag tracks,
+fix cover art, remove duplicates, organise everything into a clean folder tree,
+browse and play it, and copy it out to a server or NAS. It works on your files in
+place, shows you every change before it's made, and keeps a full undo history — so
+nothing it does is permanent until you say so.
 
 I wrote it because my own library had years of accumulated mess in it — the same album
 ripped twice, MP3s sitting next to the FLAC versions that replaced them, "Track 01 (1).flac"
-copies from old backups. Cleaning that up by hand across thousands of files isn't realistic,
-and I didn't trust anything else to make the right call about which copy to keep. This does
-the tedious part: it scans the library, groups the copies together, picks the best one of
-each, and lets you review everything before a single file is touched.
+copies from old backups, half-tagged rips, missing cover art, compilations scattered across
+a dozen artist folders. Cleaning that up by hand across thousands of files isn't realistic,
+and I didn't trust anything else to make the right calls. This does the tedious part and
+lets you review everything before a single file is touched.
 
 ## What it does
 
-A four-step wizard: **Source → Review → Clean up → Copy.**
+The app is organised into a few tabs across the top; you can use any of them on their own.
 
-- Drop your music folder in and it scans every track — proper tags and durations
-  read via AVFoundation, not filename guessing.
-- Review lands where it should: duplicates grouped for review if there are any,
-  otherwise an **album-artwork grid** of your whole library. The best copy in each
-  group is marked **KEEP** — lossless beats lossy, then higher bitrate, then better
-  tags. Click any row if you disagree.
-- **Clean up** sends the duplicates to the Trash (or deletes permanently, if you
-  ask twice). Keepers are never touched.
-- **Copy** rebuilds a clean Artist/Album tree on a server or NAS share, as an
-  explicit sequence: locate the share → pick the folder → copy. Files that already
-  exist **ask first** (Overwrite / Skip, each or All — nothing silent). The copy is
-  built for flaky network shares: **three to four files copy in parallel**
-  (self-tuning — per-file round trips dominate on the old SMB dialects small
-  servers speak), existence checks are batched per album folder, macOS is told not
-  to throttle the app or sleep mid-run, the share is nudged every 30 seconds so
-  the connection can't idle out, every copied file is verified against the source,
-  and a file that fails is retried up to 5 times (re-mounting the share directly —
-  never through Finder — if it dropped) before being set aside, with a **Retry
-  failed** button at the end. If the server disappears entirely, the run **pauses
-  itself** and offers Resume rather than grinding through timeouts.
-- **Built-in network engine** (v1.3): the app finds servers on your network,
-  lists their shares, browses folders and copies files by talking SMB
-  **directly to the server** — macOS's own network mount (the thing that
-  beachballs Finder when a NAS hiccups) is not involved at any point, and
-  can even be ejected during copies. Old, fussy servers (Roon ROCK's
-  ten-year-old Samba very much included) get the patient timeouts,
-  instant reconnects and honest errors macOS refuses to give them. The
-  classic mount-based engine remains one toggle away.
-- **ROCK-aware copying** (v1.1): if the destination is a Roon ROCK server with Roon
-  Server running, the copy is blocked — copying under a live server can hang it. The
-  app offers to stop Roon Server for you, runs the copy, then offers to start it
-  again so it imports everything in one clean pass. Migrating a big library over
-  several runs? Leave Roon Server stopped **between** runs too — a NUC busy
-  importing thousands of fresh tracks can drop off the network entirely and
-  look like a hardware fault ([HELP.md](HELP.md) has the full story).
+### Perfect — revive a library in place
 
-There's also a **File Commander** (the Browse tab): a two-pane file manager
-that talks to your server directly through the built-in engine — browse,
-rename, make folders, move and copy between your Mac and the server (or
-around the server itself), delete, and export a folder as a zip. It's
-faster and steadier than Finder against an old Roon ROCK, and mounts
-nothing.
+The main event. Point **Perfect** at a folder and it works through the library step by
+step, showing what it proposes at each stage; nothing is written until a single final
+**Apply**, and the whole run can be undone afterwards.
 
-## Browsing, editing and playing your library (the Library tab)
+- **Identify** unknown or mistagged tracks by sound (AcoustID fingerprint → MusicBrainz),
+  and fill in missing tags, credits and details from free public databases.
+- **Duplicates** — remove copies, keeping the best one (lossless over lossy, then higher
+  bitrate, then more complete tags). As well as identical files and same-title/length
+  matches, it catches two files that share an album and track number even when a title has
+  a typo, and truncated/partial copies of a track you already have in full — while leaving
+  genuinely short tracks (interludes, intros) alone.
+- **Organise** into a clean `Album Artist / Album / ## Title` tree. Various-artists
+  compilations are filed under **Various Artists** rather than split across each guest
+  artist; differently-named editions of one album (a `[Sony]` or `[Castle]` reissue, a
+  `(Remastered)` version, multi-disc parts) can be merged into one; and a track whose
+  album-artist tag disagrees with the rest of its album (a guest credit, say) is filed
+  with the album instead of on its own. The compilations and merges it isn't certain
+  about are listed for you to confirm first.
+- **Artwork** — find and fill missing covers, from the file's own art or the cover
+  services.
+- An interrupted session is remembered: quit or cancel mid-run and it reopens the same
+  library at the same step next launch.
 
-The **Library** tab shows any folder as an album grid. Click an album to open the
-**Album Inspector**, which lists its tracks and their tags:
+### Library — browse, play and edit
+
+The **Library** tab shows any folder as an album grid (covers come from the files' own
+tags). Click an album to open the **Album Inspector**:
 
 - **Play** a whole album or a single track. Playback runs in a **player bar** at the
-  bottom of the window with the usual transport (shuffle, previous, play/pause, next,
-  repeat), a scrubber, volume, and a real-time **frequency spectrum** of what's
-  playing. Playback continues when you close the album — the bar stays.
-- **Edit tags** in a side panel: title, artist, album, album artist, track, disc,
-  year, genre and composer.
-- **Rename** an album (which retags its tracks and renames the folder) or **delete** a
-  track or a whole album. Deletes go to the app's quarantine folder, not the Trash, so
-  every change is reversible from the **Runs** window (Library ▸ Runs).
+  bottom of the window — shuffle, previous, play/pause, next, repeat, a scrubber, volume,
+  and a real-time **frequency spectrum** of what's playing (28 bands, ~30 Hz–16 kHz).
+  Playback continues when you close the album; the bar stays.
+- **Edit tags** in a side panel: title, artist, album, album artist, track, disc, year,
+  genre and composer.
+- **Rename** an album (retags its tracks and renames the folder) or **delete** a track or
+  a whole album. As everywhere else, deletes go to the app's quarantine folder, not the
+  Trash, and every edit is recorded so it can be undone.
 - Protected iTunes files (`.m4p`, FairPlay DRM) show a lock — their tags read fine and
   they organise normally, but macOS can't decode the audio, so they can't be played.
 
-## Perfect — clean up a library in place
+### Find duplicates and copy to a server
 
-The **Perfect** tab works on the library itself rather than copying it out. It runs as
-a sequence of steps you review before anything is written, then applies everything in
-one reversible pass:
+A four-step wizard — **Source → Review → Clean up → Copy** — for the specific job of
+de-duplicating a library and copying the keepers out to a server or NAS.
 
-- **Identify** unknown or mistagged tracks by sound (AcoustID) and fill missing tags.
-- **Duplicates** — removes copies, keeping the best one. As well as identical files and
-  same-title/length matches, it catches two files that share an album and track number
-  (even if one title has a typo), and truncated/partial copies of a track you already
-  have in full.
-- **Organise** into a clean `Album Artist / Album / ## Title` tree. Various-artists
-  compilations are filed under **Various Artists** instead of split across each guest
-  artist; differently-named editions of the same album (e.g. a `[Sony]` or `[Castle]`
-  reissue) can be merged into one; and a track whose album-artist tag disagrees with the
-  rest of its album is filed with the album rather than on its own.
-- **Artwork** — find and fill missing covers.
+- **Scan** every track (proper tags and durations via AVFoundation, plus content
+  fingerprints — not filename guessing).
+- **Review** the duplicate groups, or an album-artwork grid of the whole library if there
+  are none. The best copy in each group is marked **KEEP**; click any row to override.
+- **Clean up** sends the duplicates to the Trash, or deletes permanently if you ask twice.
+  Keepers are never touched.
+- **Copy** rebuilds a clean Artist/Album tree at a destination, as an explicit sequence:
+  locate the share → pick the folder → copy. Files that already exist **ask first**
+  (Overwrite / Skip, each or All — nothing silent). The copy is built for flaky network
+  shares: **three to four files in parallel** (self-tuning — per-file round trips dominate
+  on the old SMB dialects small servers speak), existence checks batched per album folder,
+  macOS told not to throttle the app or sleep mid-run, the share nudged every 30 seconds so
+  it can't idle out, every copied file verified against the source, and a file that fails
+  retried up to 5 times (re-mounting the share directly, never through Finder, if it
+  dropped) before being set aside, with a **Retry failed** button at the end. If the server
+  disappears entirely, the run **pauses itself** and offers Resume rather than grinding
+  through timeouts.
+- **ROCK-aware copying**: if the destination is a Roon ROCK with Roon Server running, the
+  copy is blocked — copying under a live server can hang it. The app offers to stop Roon
+  Server, runs the copy, then offers to start it again so it imports in one clean pass.
+  Migrating over several runs? Leave Roon Server stopped **between** runs too — a NUC busy
+  importing thousands of fresh tracks can drop off the network and look like a hardware
+  fault ([HELP.md](HELP.md) has the full story).
 
-Everything Perfect does is recorded so a whole run can be undone from the Runs window.
+### File Commander
+
+The **Browse** tab is a two-pane file manager that talks to your server directly through
+the built-in engine — browse, rename, make folders, move and copy between your Mac and the
+server (or around the server itself), delete, and export a folder as a zip. Faster and
+steadier than Finder against an old Roon ROCK, and mounts nothing.
+
+### Built-in network engine
+
+Underneath the copy and File Commander tabs, the app has its own SMB networking: it
+discovers servers, lists shares, browses folders and transfers files by talking to the
+server **directly**, without macOS's network mount in the path (the thing that beachballs
+Finder when a NAS hiccups). Old, fussy servers — Roon ROCK's ten-year-old Samba included —
+get patient timeouts, instant reconnects and honest errors macOS won't give them. The
+classic mount-based engine is one toggle away.
+
+### Everything is reversible
+
+Nothing the app writes goes straight to the Trash or is overwritten in place. Duplicate
+removals, organise moves, tag edits, renames and deletes all go to a dated **quarantine**
+folder inside the library, with a change log. The **Runs** window (Library ▸ Runs) lists
+every run across every library you've opened and reverts any of them — files come back out
+of quarantine and tags are written back. **Logs** (Library ▸ Logs) shows each run's change
+log. A change is only permanent once you empty the quarantine folder yourself.
 
 There's a full walkthrough in [USAGE.md](USAGE.md), and [HELP.md](HELP.md)
 covers performance tuning (including a fix for macOS's slow SMB defaults),
@@ -140,19 +160,22 @@ signing and notarization steps if you want a build other Macs will open without 
 
 ## Use at your own risk
 
-This app deletes files — that's its job. It's provided free, **as is, with no
-warranty of any kind, express or implied**, and no liability is accepted for any
-loss of data or other damage arising from its use. Deletes default to the Trash
-and are confirmed twice, but you should **back up your library before letting
-this (or any) tool loose on it**. See [LICENSE](LICENSE) for the full terms (MIT).
+This app moves, retags and deletes files — that's its job. It's provided free, **as is,
+with no warranty of any kind, express or implied**, and no liability is accepted for any
+loss of data or other damage arising from its use. It is careful — the duplicate wizard's
+deletes default to the Trash and are confirmed twice, and everything Perfect and the
+Library tab do is reversible from the Runs window — but you should **back up your library
+before letting this (or any) tool loose on it**. See [LICENSE](LICENSE) for the full terms
+(MIT).
 
 The app's own code is MIT; the built-in network engine uses the LGPL-licensed
 AMSMB2/libsmb2 libraries — see [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).
 
 ## Notes
 
-- The scanner never modifies your library. Nothing is written or deleted until you
-  explicitly run a delete or copy, and deletes are confirmed twice.
+- Scanning and previewing never modify your library. The duplicate wizard writes nothing
+  until you run a delete or copy (deletes confirmed twice); Perfect writes nothing until
+  the final Apply; and Library edits are applied when you make them but recorded for undo.
 - The app is not sandboxed, so it can read the folder you pick and delete files.
   macOS may prompt once for access to certain folders — click Allow.
 - If your source lives in iCloud with "Optimize Storage" on, download the files first
