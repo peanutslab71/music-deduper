@@ -9,6 +9,7 @@
 
 import SwiftUI
 import AppKit
+import Combine
 import MDTagShim
 
 // MARK: - Library browser (a mini-iTunes album grid over any folder)
@@ -221,8 +222,14 @@ struct LibraryAlbumSheet: View {
     private var selected: Track? { tracks.first { $0.id == selectedID } }
     private var protectedCount: Int { tracks.filter { $0.url.pathExtension.lowercased() == "m4p" }.count }
     private var totalSeconds: Double { tracks.reduce(0) { $0 + $1.duration } }
-    private var playableURLs: [URL] {
-        tracks.sorted { ($0.discNo, $0.trackNo) < ($1.discNo, $1.trackNo) }.map { $0.url }
+    private var playItems: [PlayItem] {
+        tracks.map { PlayItem(url: $0.url, title: $0.title.isEmpty ? $0.url.lastPathComponent : $0.title,
+                              artist: $0.displayArtist.isEmpty ? albumArtist : $0.displayArtist, album: albumName) }
+    }
+    private func playTrack(_ t: Track) {
+        if audio.playingURL == t.url { audio.playPause(); return }
+        let items = playItems
+        audio.play(items, startAt: items.firstIndex { $0.url == t.url } ?? 0)
     }
 
     var body: some View {
@@ -242,7 +249,8 @@ struct LibraryAlbumSheet: View {
         }
         .frame(width: 940, height: 640)
         .onAppear { loadTracks() }
-        .onDisappear { audio.stop() }
+        // NB: playback deliberately continues after the dialog closes — the floating
+        // player owns transport now; the bar's ✕ is how you stop.
         .alert("Delete this whole album?", isPresented: $confirmDeleteAlbum) {
             Button("Cancel", role: .cancel) {}
             Button("Delete album", role: .destructive) { deleteAlbum() }
@@ -262,7 +270,7 @@ struct LibraryAlbumSheet: View {
                 }
                 Text(factsLine).font(.caption).foregroundStyle(.secondary).monospacedDigit()
                 HStack(spacing: 8) {
-                    Button { audio.playAlbum(playableURLs) } label: { Label("Play album", systemImage: "play.fill") }
+                    Button { audio.play(playItems) } label: { Label("Play album", systemImage: "play.fill") }
                         .buttonStyle(.borderedProminent).tint(.teal).controlSize(.small)
                     Button { audio.stop() } label: { Label("Stop", systemImage: "stop.fill") }
                         .controlSize(.small).disabled(audio.playingURL == nil)
@@ -306,11 +314,16 @@ struct LibraryAlbumSheet: View {
     private func trackRow(_ t: Track) -> some View {
         let isSel = selectedID == t.id
         let drm = t.url.pathExtension.lowercased() == "m4p"
+        let playing = audio.playingURL == t.url
         return HStack(spacing: 10) {
             Text(t.trackNo > 0 ? "\(t.trackNo)" : "–")
                 .font(.system(size: 12, design: .monospaced)).foregroundStyle(.tertiary)
                 .frame(width: 24, alignment: .trailing)
-            playButton(t.url)
+            Button { if !drm { playTrack(t) } } label: {
+                Image(systemName: drm ? "lock.circle" : ((playing && !audio.paused) ? "pause.circle.fill" : "play.circle"))
+                    .font(.system(size: 18)).foregroundStyle(drm ? Color.secondary : (playing ? Color.teal : Color.teal))
+            }.buttonStyle(.plain).disabled(drm)
+            .help(drm ? "Protected (DRM) — can't play" : (playing ? "Pause" : "Play"))
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
                     Text(t.title.isEmpty ? t.url.lastPathComponent : t.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
@@ -774,5 +787,144 @@ struct FlowLayout: Layout {
             v.place(at: CGPoint(x: bounds.minX + x, y: bounds.minY + y), proposal: ProposedViewSize(s))
             x += s.width + spacing; rowH = max(rowH, s.height)
         }
+    }
+}
+
+
+// MARK: - Floating global player (Apple-Music-style transport bar)
+
+/// A floating transport that owns playback across the whole app. It stays above the
+/// windows and keeps playing even when the album dialog that started a track closes.
+struct PlayerBar: View {
+    @ObservedObject private var audio = AudioPreview.shared
+    @ObservedObject private var prog = AudioProgress.shared
+    @State private var art: NSImage?
+
+    var body: some View {
+        HStack(spacing: 16) {
+            HStack(spacing: 14) {
+                iconBtn("shuffle", size: 13, active: audio.shuffle) { audio.toggleShuffle() }
+                iconBtn("backward.fill", size: 15) { audio.prev() }
+                Button { audio.playPause() } label: {
+                    Image(systemName: audio.paused ? "play.fill" : "pause.fill")
+                        .font(.system(size: 21)).frame(width: 26)
+                }.buttonStyle(.plain)
+                iconBtn("forward.fill", size: 15) { audio.next() }
+                iconBtn(audio.repeatMode == .one ? "repeat.1" : "repeat", size: 13,
+                        active: audio.repeatMode != .off) { audio.cycleRepeat() }
+            }
+            .foregroundStyle(.primary)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.2))
+                if let a = art { Image(nsImage: a).resizable().aspectRatio(contentMode: .fill) }
+                else { Image(systemName: "music.note").foregroundStyle(.secondary) }
+            }
+            .frame(width: 46, height: 46).clipShape(RoundedRectangle(cornerRadius: 5))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(audio.current?.title ?? "—").font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                Text(infoLine).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                scrubber.padding(.top, 1)
+            }
+            .frame(minWidth: 220, alignment: .leading)
+
+            HStack(spacing: 7) {
+                Image(systemName: "speaker.fill").font(.system(size: 9)).foregroundStyle(.secondary)
+                Slider(value: Binding(get: { Double(audio.volume) }, set: { audio.volume = Float($0) }), in: 0...1)
+                    .frame(width: 68).controlSize(.mini).tint(.secondary)
+                Button { audio.stop() } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 15)).foregroundStyle(.secondary)
+                }.buttonStyle(.plain).help("Stop and hide the player")
+            }
+        }
+        .padding(.horizontal, 18).padding(.vertical, 11)
+        .frame(width: 640, height: 76)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(.white.opacity(0.10)))
+        .task(id: audio.current?.url) { await loadArt(audio.current?.url) }
+    }
+
+    private var infoLine: String {
+        guard let c = audio.current else { return "" }
+        let who = c.artist.isEmpty ? c.album : (c.album.isEmpty ? c.artist : "\(c.artist) — \(c.album)")
+        return who
+    }
+
+    private var scrubber: some View {
+        HStack(spacing: 7) {
+            Text(fmt(prog.progress * audio.duration)).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary).frame(width: 30, alignment: .trailing)
+            Slider(value: Binding(get: { prog.progress }, set: { audio.seek(to: $0) }), in: 0...1).controlSize(.mini).tint(.teal)
+            Text(fmt(audio.duration)).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary).frame(width: 30, alignment: .leading)
+        }
+    }
+
+    private func iconBtn(_ name: String, size: CGFloat, active: Bool = false, _ act: @escaping () -> Void) -> some View {
+        Button(action: act) {
+            Image(systemName: name).font(.system(size: size, weight: .medium))
+                .foregroundStyle(active ? Color.teal : Color.primary)
+        }.buttonStyle(.plain)
+    }
+
+    private func fmt(_ s: Double) -> String {
+        guard s.isFinite, s >= 0 else { return "0:00" }
+        return String(format: "%d:%02d", Int(s) / 60, Int(s) % 60)
+    }
+
+    private func loadArt(_ url: URL?) async {
+        guard let url else { await MainActor.run { art = nil }; return }
+        let img: NSImage? = await Task.detached { () -> NSImage? in
+            var len: Int32 = 0, ty: Int32 = 0
+            guard let b = md_copy_artwork(url.path, &len, &ty), len > 0 else { return nil }
+            let d = Data(bytes: b, count: Int(len)); free(b)
+            return NSImage(data: d)
+        }.value
+        await MainActor.run { art = img }
+    }
+}
+
+/// Owns the floating panel: shows it whenever something is playing, hides it on stop.
+@MainActor
+final class PlayerBarController {
+    static let shared = PlayerBarController()
+    private var panel: NSPanel?
+    private var cancellable: AnyCancellable?
+
+    func start() {
+        cancellable = AudioPreview.shared.$playingURL
+            .receive(on: RunLoop.main)
+            .sink { [weak self] url in url != nil ? self?.show() : self?.hide() }
+    }
+
+    private func show() {
+        if panel == nil { panel = makePanel() }
+        guard let p = panel else { return }
+        if !p.isVisible { position(p); p.orderFrontRegardless() }
+    }
+    private func hide() { panel?.orderOut(nil) }
+
+    private func makePanel() -> NSPanel {
+        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 640, height: 76),
+                        styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
+                        backing: .buffered, defer: false)
+        p.isFloatingPanel = true
+        p.level = .floating
+        p.hidesOnDeactivate = false
+        p.isMovableByWindowBackground = true
+        p.backgroundColor = .clear
+        p.isOpaque = false
+        p.hasShadow = true
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .moveToActiveSpace]
+        let host = NSHostingView(rootView: PlayerBar())
+        host.frame = NSRect(x: 0, y: 0, width: 640, height: 76)
+        host.autoresizingMask = [.width, .height]
+        p.contentView = host
+        return p
+    }
+
+    private func position(_ p: NSPanel) {
+        guard let screen = NSScreen.main else { return }
+        let vf = screen.visibleFrame
+        p.setFrameOrigin(NSPoint(x: vf.midX - p.frame.width / 2, y: vf.minY + 26))
     }
 }

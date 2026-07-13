@@ -33,6 +33,7 @@ struct MusicLibrarianApp: App {
     var body: some Scene {
         WindowGroup("Music Librarian") {
             ContentView().environmentObject(perfect)
+                .onAppear { PlayerBarController.shared.start() }   // floating transport bar
         }
         .windowResizability(.contentMinSize)
         .commands {

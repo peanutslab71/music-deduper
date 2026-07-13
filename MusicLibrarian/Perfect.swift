@@ -335,60 +335,114 @@ final class AudioProgress: ObservableObject {
     @Published var progress: Double = 0
 }
 
+/// One entry in the play queue, with the bits the floating player shows.
+struct PlayItem: Equatable, Sendable {
+    let url: URL; let title: String; let artist: String; let album: String
+}
+
+enum RepeatMode { case off, all, one }
+
 final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
     static let shared = AudioPreview()
     private var player: AVAudioPlayer?
     private var timer: Timer?
-    private var queue: [URL] = []              // album playback: remaining tracks after the current one
+
     @Published var playingURL: URL?            // changes only on play/stop — cheap to observe
-    @Published var albumMode = false           // true while playing through a queued album
+    @Published var paused = false
+    @Published var playlist: [PlayItem] = []   // the current queue (album, or a single track)
+    @Published var index = 0                   // position within `order`
+    @Published var shuffle = false
+    @Published var repeatMode: RepeatMode = .off
+    @Published var volume: Float = 1.0 { didSet { player?.volume = volume } }
+    private var order: [Int] = []              // play order into `playlist` (identity, or shuffled)
+
+    var current: PlayItem? { order.indices.contains(index) ? playlist[order[index]] : nil }
     var progress: Double { AudioProgress.shared.progress }
     var duration: Double { player?.duration ?? 0 }
     var currentTime: Double { player?.currentTime ?? 0 }
+    var hasNext: Bool { repeatMode != .off || index < order.count - 1 }
+    var hasPrev: Bool { index > 0 || repeatMode != .off }
 
     /// A .m4p is FairPlay-protected: AVAudioPlayer can't decode it, so skip rather
-    /// than fail silently (album playback jumps to the next playable track).
+    /// than fail silently (playback jumps to the next playable track).
     static func isPlayable(_ url: URL) -> Bool { url.pathExtension.lowercased() != "m4p" }
 
     @discardableResult
-    private func start(_ url: URL) -> Bool {
+    private func start(_ item: PlayItem) -> Bool {
         do {
-            let p = try AVAudioPlayer(contentsOf: url)
+            let p = try AVAudioPlayer(contentsOf: item.url)
             p.delegate = self
+            p.volume = volume
             p.play()
-            player = p; playingURL = url; AudioProgress.shared.progress = 0
+            player = p; playingURL = item.url; paused = false; AudioProgress.shared.progress = 0
             timer?.invalidate()
             timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-                guard let self, let p = self.player, p.duration > 0 else { return }
+                guard let self, let p = self.player, p.duration > 0, p.isPlaying else { return }
                 AudioProgress.shared.progress = p.currentTime / p.duration
             }
             return true
-        } catch { playingURL = nil; return false }
+        } catch { return false }
     }
 
+    private func rebuildOrder(currentPlaylistIndex: Int) {
+        let idxs = Array(playlist.indices)
+        if shuffle {
+            var rest = idxs.filter { $0 != currentPlaylistIndex }
+            rest.shuffle()
+            order = [currentPlaylistIndex] + rest
+            index = 0
+        } else {
+            order = idxs
+            index = currentPlaylistIndex
+        }
+    }
+
+    /// Start a queue (an album, or a single track) at `startAt`, skipping protected files.
+    func play(_ items: [PlayItem], startAt: Int = 0) {
+        let playable = items.enumerated().filter { Self.isPlayable($0.element.url) }
+        guard !playable.isEmpty else { return }
+        // remap startAt onto the filtered list
+        let startURL = items.indices.contains(startAt) ? items[startAt].url : playable.first!.element.url
+        playlist = playable.map { $0.element }
+        let pIndex = playlist.firstIndex { $0.url == startURL } ?? 0
+        timer?.invalidate(); player?.stop()
+        rebuildOrder(currentPlaylistIndex: pIndex)
+        _ = start(playlist[order[index]])
+    }
+
+    /// Legacy single-file toggle (review queue, tag inspector): a one-item queue.
     func toggle(_ url: URL) {
         if playingURL == url { stop(); return }
-        stop()
-        start(url)
+        play([PlayItem(url: url, title: url.deletingPathExtension().lastPathComponent, artist: "", album: "")])
     }
 
-    /// Play an album start to finish, skipping protected tracks.
-    func playAlbum(_ urls: [URL], from index: Int = 0) {
-        stop()
-        var list = Array(urls.dropFirst(index)).filter { Self.isPlayable($0) }
-        guard let first = list.first else { return }
-        list.removeFirst()
-        queue = list; albumMode = true
-        start(first)
+    func playPause() {
+        guard let p = player else { return }
+        if p.isPlaying { p.pause(); paused = true } else { p.play(); paused = false }
     }
 
-    private func advance() {
-        while let next = queue.first {
-            queue.removeFirst()
-            if start(next) { return }
-        }
-        stop()   // queue drained
+    func next() {
+        if repeatMode == .one, let c = current { _ = start(c); return }
+        if index < order.count - 1 { index += 1 }
+        else if repeatMode == .all { index = 0 }
+        else { stop(); return }
+        if !start(playlist[order[index]]) { next() }
     }
+
+    func prev() {
+        // restart the current track if we're more than 3s in, else go back one
+        if currentTime > 3, let c = current { _ = start(c); return }
+        if index > 0 { index -= 1 }
+        else if repeatMode == .all { index = order.count - 1 }
+        else if let c = current { _ = start(c); return }
+        if !start(playlist[order[index]]) { if index > 0 { index -= 1; _ = start(playlist[order[index]]) } }
+    }
+
+    func toggleShuffle() {
+        shuffle.toggle()
+        rebuildOrder(currentPlaylistIndex: order.indices.contains(index) ? order[index] : 0)
+    }
+    func cycleRepeat() { repeatMode = repeatMode == .off ? .all : (repeatMode == .all ? .one : .off) }
 
     func seek(to frac: Double) {
         guard let p = player, p.duration > 0 else { return }
@@ -398,14 +452,12 @@ final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     func stop() {
         timer?.invalidate(); timer = nil
-        player?.stop(); player = nil; playingURL = nil; AudioProgress.shared.progress = 0
-        queue = []; albumMode = false
+        player?.stop(); player = nil; playingURL = nil; paused = false; AudioProgress.shared.progress = 0
+        playlist = []; order = []; index = 0
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        DispatchQueue.main.async {
-            if self.albumMode && !self.queue.isEmpty { self.advance() } else { self.stop() }
-        }
+        DispatchQueue.main.async { self.next() }
     }
 }
 
