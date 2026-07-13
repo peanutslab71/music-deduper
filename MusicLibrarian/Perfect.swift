@@ -434,7 +434,7 @@ final class SpectrumAnalyzer: ObservableObject {
         // unscaled), with a gentle treble tilt so highs read against the bass.
         let nb = Self.bandCount
         let norm = 2 / Float(fftSize)
-        let fLow = 30.0, fHigh = min(20_000.0, sr / 2)
+        let fLow = 30.0, fHigh = min(16_000.0, sr / 2)
         let binPerHz = Double(fftSize) / sr
         var lin = [Float](repeating: 0, count: nb)
         for b in 0..<nb {
