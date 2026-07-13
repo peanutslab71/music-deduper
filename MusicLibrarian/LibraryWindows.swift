@@ -34,6 +34,21 @@ struct LibraryBrowserView: View {
     @State private var loading = false
     @State private var search = ""
     @State private var selectedAlbum: LibAlbum?
+    @State private var showMerge = false
+
+    /// Album folders that are the SAME release by the SAME artist — a "(Disc 2)"
+    /// split, or a differently-marked edition — so they can be merged into one.
+    /// Grouped by artist + canonical album key (disc suffix + edition markers removed).
+    private var mergeGroups: [[LibAlbum]] {
+        var byKey: [String: [LibAlbum]] = [:]
+        for a in albums {
+            let key = normText(a.artist) + "\u{0}" + Organiser.canonicalAlbumKey(a.album)
+            byKey[key, default: []].append(a)
+        }
+        return byKey.values.filter { $0.count >= 2 }
+            .map { $0.sorted { $0.album.localizedStandardCompare($1.album) == .orderedAscending } }
+            .sorted { ($0.first?.artist ?? "") < ($1.first?.artist ?? "") }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,6 +69,10 @@ struct LibraryBrowserView: View {
         .sheet(item: $selectedAlbum) { a in
             LibraryAlbumSheet(album: a, root: root ?? a.dir.deletingLastPathComponent().deletingLastPathComponent(),
                               onChanged: { load() })
+        }
+        .sheet(isPresented: $showMerge) {
+            MergeAlbumsSheet(groups: mergeGroups, root: root ?? URL(fileURLWithPath: savedRoot),
+                             onChanged: { load() })
         }
         .onAppear { if root == nil && !savedRoot.isEmpty { open(URL(fileURLWithPath: savedRoot)) } }
     }
@@ -96,9 +115,27 @@ struct LibraryBrowserView: View {
         return albums.filter { $0.album.lowercased().contains(q) || $0.artist.lowercased().contains(q) }
     }
 
+    private var mergeBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "square.stack.3d.down.right").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(mergeGroups.count) set\(mergeGroups.count == 1 ? "" : "s") of albums look like the same release")
+                    .fontWeight(.medium)
+                Text("A “(Disc 2)” folder or a differently-named edition split from its album — review and merge them into one.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Review & merge…") { showMerge = true }
+                .buttonStyle(.borderedProminent).tint(.orange).controlSize(.small)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.10)))
+    }
+
     private var albumGrid: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
+                if !mergeGroups.isEmpty { mergeBanner }
                 HStack(spacing: 8) {
                     Image(systemName: "square.grid.2x2").foregroundStyle(.purple)
                     Text("\(filtered.count) album(s)").fontWeight(.semibold)
@@ -192,6 +229,118 @@ struct LibraryBrowserView: View {
                 firstPublished = true
             }
             await MainActor.run { loading = false }
+        }
+    }
+}
+
+/// Merge folders that are the same release (a "(Disc 2)" split, or a differently
+/// named edition) into one album — reversibly. The extra folders' files move into the
+/// main folder, every track is retagged to the clean album name with the right disc
+/// number, and it all lands in one undoable run (Runs).
+struct MergeAlbumsSheet: View {
+    let groups: [[LibAlbum]]
+    let root: URL
+    var onChanged: () -> Void = {}
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: PerfectStore
+    @State private var merged = Set<Int>()
+    @State private var working: Int?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "square.stack.3d.down.right").foregroundStyle(.orange)
+                Text("Merge albums").font(.headline)
+                Text("Fold split disc/edition folders back into one album — reversible from Runs.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+            }.padding(14)
+            Divider()
+            if groups.isEmpty {
+                Text("Nothing to merge.").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView { VStack(spacing: 0) { ForEach(groups.indices, id: \.self) { i in groupRow(i) } } }
+            }
+            Divider()
+            HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }.padding(12)
+        }
+        .frame(width: 620, height: 520)
+    }
+
+    private func groupRow(_ i: Int) -> some View {
+        let g = groups[i]
+        let clean = Organiser.canonicalAlbumDisplay(g.map { $0.album })
+        let primary = primaryOf(g)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                AlbumCover(key: primary.id, sampleURL: primary.sampleURL, foundMBID: nil, size: 44, corner: 6)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(clean).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                    Text(g.first?.artist ?? "").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if merged.contains(i) {
+                    Label("Merged", systemImage: "checkmark.circle.fill").foregroundStyle(.teal).font(.callout)
+                } else if working == i {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Merge") { merge(i) }.buttonStyle(.borderedProminent).tint(.orange).controlSize(.small)
+                }
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(g, id: \.id) { a in
+                    HStack(spacing: 6) {
+                        Image(systemName: a.id == primary.id ? "folder.fill" : "folder")
+                            .font(.system(size: 10)).foregroundStyle(a.id == primary.id ? Color.orange : Color.secondary)
+                        Text(a.album).font(.system(size: 12)).lineLimit(1)
+                        Text("· \(a.files.count) track\(a.files.count == 1 ? "" : "s") · disc \(discOf(a))\(a.id == primary.id ? " · main folder" : "")")
+                            .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    }
+                }
+            }.padding(.leading, 54)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func discOf(_ a: LibAlbum) -> Int { Organiser.stripDiscSuffix(a.album).disc ?? 1 }
+
+    /// The folder that keeps its place: lowest disc number, then most tracks.
+    private func primaryOf(_ g: [LibAlbum]) -> LibAlbum {
+        g.sorted { a, b in
+            let da = discOf(a), db = discOf(b)
+            if da != db { return da < db }
+            return a.files.count > b.files.count
+        }.first!
+    }
+
+    private func rel(_ u: URL) -> String {
+        let rp = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        return u.path.hasPrefix(rp) ? String(u.path.dropFirst(rp.count)) : u.lastPathComponent
+    }
+
+    private func merge(_ i: Int) {
+        let g = groups[i]
+        let clean = Organiser.canonicalAlbumDisplay(g.map { $0.album })
+        let primary = primaryOf(g)
+        var tagWrites: [(rel: String, field: String, value: String)] = []
+        var moves: [(from: String, to: String)] = []
+        for a in g {
+            let disc = discOf(a)
+            for f in a.files {
+                tagWrites.append((rel(f), "album", clean))       // consistent album name
+                tagWrites.append((rel(f), "disc", String(disc))) // so tracks sort by disc
+                if a.id != primary.id {
+                    // disc-prefix the moved file so it can't collide with a same-numbered
+                    // track already in the main folder
+                    moves.append((rel(f), rel(primary.dir) + "/\(disc)-\(f.lastPathComponent)"))
+                }
+            }
+        }
+        working = i
+        store.applyLibraryRun(root: root, summary: "Merged album — \(clean)",
+                              tagWrites: tagWrites, moves: moves) {
+            working = nil; merged.insert(i); onChanged()
         }
     }
 }
