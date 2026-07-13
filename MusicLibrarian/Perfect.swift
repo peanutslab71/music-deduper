@@ -354,8 +354,8 @@ final class SpectrumAnalyzer: ObservableObject {
 
     @Published var bands: [Float] = Array(repeating: 0, count: bandCount)
 
-    private let fftSize = 2048
-    private let half = 1024
+    private let fftSize = 4096   // ~10.8 Hz/bin at 44.1kHz — sharper low-end resolution
+    private let half = 2048
     private let log2n: vDSP_Length
     private let setup: FFTSetup?
     private var window: [Float]
