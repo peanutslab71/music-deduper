@@ -390,11 +390,14 @@ enum AlbumReconcileStore {
 /// One row in the inspector's track list: a track we have (playable/editable) or a
 /// greyed placeholder for a track the album should contain but is missing.
 private enum InspectorRow: Identifiable {
-    case have(Track)
+    // slotTrack > 0 = the release's track number to show (the rows are ordered by the
+    // release, so a flattened set's wrong on-disk numbers would read scrambled); 0 = show
+    // the file's own number (an extra track, or the non-reconciled view).
+    case have(Track, slotTrack: Int)
     case missing(id: String, disc: Int, track: Int, title: String, lengthMs: Int?)
     var id: String {
         switch self {
-        case .have(let t): return "h\(t.id)"
+        case .have(let t, _): return "h\(t.id)"
         case .missing(let id, _, _, _, _): return "m\(id)"
         }
     }
@@ -529,7 +532,7 @@ struct LibraryAlbumSheet: View {
                     if showDiscHeaders { discHeader(section.disc, have: section.have, total: section.total) }
                     ForEach(section.rows) { row in
                         switch row {
-                        case .have(let t): trackRow(t)
+                        case .have(let t, let slotTrack): trackRow(t, slotTrack: slotTrack)
                         case .missing(_, let disc, let track, let title, let ms):
                             missingRow(disc: disc, track: track, title: title, lengthMs: ms)
                         }
@@ -563,7 +566,9 @@ struct LibraryAlbumSheet: View {
             for slot in e.tracks.sorted(by: { ($0.disc, $0.track) < ($1.disc, $1.track) }) {
                 let key = TrackProposal.typoFold(slot.title).lowercased()
                 if let t = byTitle[key], !used.contains(t.id) {
-                    used.insert(t.id); byDisc[slot.disc, default: []].append(.have(t))
+                    // Show the RELEASE's track number (rows are in release order); the file's
+                    // own number is meaningless for a flattened multi-disc set.
+                    used.insert(t.id); byDisc[slot.disc, default: []].append(.have(t, slotTrack: slot.track))
                 } else {
                     byDisc[slot.disc, default: []].append(.missing(id: "\(slot.disc)-\(slot.track)-\(key)",
                                                                    disc: slot.disc, track: slot.track,
@@ -574,7 +579,7 @@ struct LibraryAlbumSheet: View {
             // must still appear so they can be played, renamed, tagged or deleted here —
             // the release match only needs 60% title overlap, so up to 40% can be extras.
             for t in tracks where !used.contains(t.id) {
-                byDisc[t.discNo == 0 ? 1 : t.discNo, default: []].append(.have(t))
+                byDisc[t.discNo == 0 ? 1 : t.discNo, default: []].append(.have(t, slotTrack: 0))
             }
             return byDisc.keys.sorted().map { d in
                 let rows = byDisc[d]!
@@ -583,7 +588,7 @@ struct LibraryAlbumSheet: View {
             }
         } else {
             var byDisc: [Int: [InspectorRow]] = [:]
-            for t in tracks { byDisc[t.discNo == 0 ? 1 : t.discNo, default: []].append(.have(t)) }
+            for t in tracks { byDisc[t.discNo == 0 ? 1 : t.discNo, default: []].append(.have(t, slotTrack: 0)) }
             return byDisc.keys.sorted().map { d -> (disc: Int, rows: [InspectorRow], have: Int, total: Int) in
                 let rows = byDisc[d]!; return (d, rows, rows.count, rows.count)
             }
@@ -645,12 +650,13 @@ struct LibraryAlbumSheet: View {
             : "All \(m.tracks.count) tracks present — “\(m.title)”\(yr)"
     }
 
-    private func trackRow(_ t: Track) -> some View {
+    private func trackRow(_ t: Track, slotTrack: Int = 0) -> some View {
         let isSel = selectedID == t.id
         let drm = t.url.pathExtension.lowercased() == "m4p"
         let playing = audio.playingURL == t.url
+        let number = slotTrack > 0 ? slotTrack : t.trackNo   // release position when reconciled
         return HStack(spacing: 10) {
-            Text(t.trackNo > 0 ? "\(t.trackNo)" : "–")
+            Text(number > 0 ? "\(number)" : "–")
                 .font(.system(size: 12, design: .monospaced)).foregroundStyle(.tertiary)
                 .frame(width: 24, alignment: .trailing)
             Button { if !drm { playTrack(t) } } label: {
