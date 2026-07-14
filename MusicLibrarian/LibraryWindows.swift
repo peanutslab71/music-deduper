@@ -1383,7 +1383,7 @@ enum AlbumPerfect {
         return (d, pixels, mime)
     }
 
-    static func analyze(root: URL, files: [URL]) async -> (fixes: [AlbumFix], art: AlbumArtContext, reconcile: MBReleaseMatch?) {
+    static func analyze(root: URL, files: [URL], alreadyReconciled: Bool = false) async -> (fixes: [AlbumFix], art: AlbumArtContext, reconcile: MBReleaseMatch?) {
         // Read every track's tags (bounded concurrency, same as the inspector).
         var tracks = [Track](repeating: Track(id: 0, url: root, name: "", relDir: "", size: 0, ext: "",
                                               title: "", artist: "", album: "", albumArtist: "",
@@ -1667,9 +1667,12 @@ enum AlbumPerfect {
         // ---- 7. Missing tracks — reconcile against MusicBrainz (network). Runs as part
         // of the Perfect check so the result is remembered on Apply and the inspector can
         // keep showing the gaps. Declines rather than guess when nothing matches.
+        // Skip when the album's already been reconciled (result saved + shown in the
+        // inspector) — no point re-fetching and re-listing it every time Perfect opens.
         var reconcile: MBReleaseMatch? = nil
         let discCount = max(1, Set(kept.map { $0.discNo == 0 ? 1 : $0.discNo }).count)
-        if let match = await MusicBrainzClient().matchRelease(artist: art.artist, album: art.album,
+        if !alreadyReconciled,
+           let match = await MusicBrainzClient().matchRelease(artist: art.artist, album: art.album,
                                                               haveTitles: kept.map { $0.title }, discCount: discCount) {
             reconcile = match
             let haveFolded = Set(kept.map { TrackProposal.typoFold($0.title).lowercased() })
@@ -1845,8 +1848,10 @@ struct PerfectAlbumSheet: View {
     private func runAnalysis() {
         loading = true
         let root = self.root, files = album.files
+        let alreadyReconciled = AlbumReconcileStore.load(album.id) != nil
         Task {
-            let (result, ctx, rec) = await AlbumPerfect.analyze(root: root, files: files)
+            let (result, ctx, rec) = await AlbumPerfect.analyze(root: root, files: files,
+                                                                alreadyReconciled: alreadyReconciled)
             await MainActor.run {
                 fixes = result; art = ctx; reconcile = rec
                 selectedCover = ctx.ownCovers.first   // default: the album's best own cover
