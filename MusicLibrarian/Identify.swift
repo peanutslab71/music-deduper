@@ -467,6 +467,41 @@ private struct MBLabelInfo: Decodable {
     enum CodingKeys: String, CodingKey { case label; case catalogNumber = "catalog-number" }
 }
 
+// Reconcile: the full per-disc tracklist of a release, so a folder can be checked
+// against what the album SHOULD contain (missing-track detection).
+struct MBReleaseTrack: Sendable { let disc: Int; let track: Int; let title: String; let lengthMs: Int? }
+struct MBReleaseMatch: Sendable { let id: String; let title: String; let date: String?; let discCount: Int; let tracks: [MBReleaseTrack] }
+
+private struct MBSearchResult: Decodable { let releases: [MBSearchRelease]? }
+private struct MBSearchRelease: Decodable {
+    let id: String
+    let title: String?
+    let date: String?
+    let media: [MBSearchMedia]?
+}
+private struct MBSearchMedia: Decodable {
+    let position: Int?
+    let format: String?
+    let trackCount: Int?
+    enum CodingKeys: String, CodingKey { case position, format; case trackCount = "track-count" }
+}
+private struct MBTracklistRelease: Decodable {
+    let id: String?
+    let title: String?
+    let date: String?
+    let media: [MBTracklistMedia]?
+}
+private struct MBTracklistMedia: Decodable {
+    let position: Int?
+    let tracks: [MBTracklistTrack]?
+}
+private struct MBTracklistTrack: Decodable {
+    let position: Int?
+    let number: String?
+    let title: String?
+    let length: Int?   // milliseconds
+}
+
 // Minimal Discogs models
 private struct DiscogsRelease: Decodable {
     let extraartists: [DiscogsCredit]?
@@ -541,6 +576,53 @@ actor MusicBrainzClient {
         readCredits(rec.relations ?? [], into: &e)
         e.releaseMBID = rec.releases?.first?.id
         return e
+    }
+
+    /// Find the MusicBrainz release that best matches this album+artist and return its
+    /// full per-disc tracklist, so a folder can be reconciled against what the album
+    /// SHOULD contain. Picks a release whose disc count matches and whose tracklist
+    /// actually contains the songs we have (≥60% title overlap); returns nil when no
+    /// candidate lines up (so we never grey the wrong gaps).
+    func matchRelease(artist: String, album: String, haveTitles: [String], discCount: Int) async -> MBReleaseMatch? {
+        let lucene = "release:\"\(album)\" AND artist:\"\(artist)\""
+        guard let enc = lucene.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let search: MBSearchResult = await get("release?query=\(enc)&limit=15") else { return nil }
+        let cands = search.releases ?? []
+        guard !cands.isEmpty else { return nil }
+        func discs(_ r: MBSearchRelease) -> Int { r.media?.count ?? 0 }
+        func total(_ r: MBSearchRelease) -> Int { (r.media ?? []).reduce(0) { $0 + ($1.trackCount ?? 0) } }
+        let albumKey = TrackProposal.typoFold(album).lowercased()
+        let ranked = cands.sorted { a, b in
+            let da = discs(a) == discCount, db = discs(b) == discCount
+            if da != db { return da }                       // disc count match first
+            let ta = TrackProposal.typoFold(a.title ?? "").lowercased() == albumKey
+            let tb = TrackProposal.typoFold(b.title ?? "").lowercased() == albumKey
+            if ta != tb { return ta }                       // then exact title
+            return total(a) > total(b)                      // then the fuller pressing
+        }
+        let want = Set(haveTitles.map { TrackProposal.typoFold($0).lowercased() }.filter { !$0.isEmpty })
+        guard !want.isEmpty else { return nil }
+        for cand in ranked.prefix(4) {
+            guard let full: MBTracklistRelease = await get("release/\(cand.id)?inc=recordings") else { continue }
+            var out: [MBReleaseTrack] = []
+            for m in full.media ?? [] {
+                let disc = m.position ?? 1
+                for t in m.tracks ?? [] {
+                    let tn = t.position ?? Int(t.number ?? "") ?? 0
+                    out.append(MBReleaseTrack(disc: disc, track: tn, title: t.title ?? "", lengthMs: t.length))
+                }
+            }
+            guard !out.isEmpty else { continue }
+            let relTitles = Set(out.map { TrackProposal.typoFold($0.title).lowercased() })
+            let overlap = want.filter { relTitles.contains($0) }.count
+            if Double(overlap) / Double(want.count) >= 0.6 {
+                return MBReleaseMatch(id: cand.id, title: full.title ?? cand.title ?? album,
+                                      date: full.date ?? cand.date,
+                                      discCount: full.media?.count ?? (out.map { $0.disc }.max() ?? 1),
+                                      tracks: out)
+            }
+        }
+        return nil
     }
 
     /// Credits for an ENTIRE album in ~2 requests instead of one-per-track. Picks

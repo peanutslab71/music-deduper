@@ -358,10 +358,23 @@ struct MergeAlbumsSheet: View {
     }
 }
 
+/// One row in the inspector's track list: a track we have (playable/editable) or a
+/// greyed placeholder for a track the album should contain but is missing.
+private enum InspectorRow: Identifiable {
+    case have(Track)
+    case missing(id: String, disc: Int, track: Int, title: String, lengthMs: Int?)
+    var id: String {
+        switch self {
+        case .have(let t): return "h\(t.id)"
+        case .missing(let id, _, _, _, _): return "m\(id)"
+        }
+    }
+}
+
 /// Album Inspector — a Roon-style dialog for one album: cover + editable album
 /// details, a track table with tags, play by album or track, inline rename, and
-/// reversible delete. "Perfect this album" (one-shot per-album cleanup) is wired in
-/// a later pass; the button is present but parked.
+/// reversible delete. Multi-disc albums group under "Disc N" headers, and "Check for
+/// missing tracks" reconciles against MusicBrainz to grey out what's absent.
 struct LibraryAlbumSheet: View {
     let album: LibAlbum
     let root: URL
@@ -381,6 +394,9 @@ struct LibraryAlbumSheet: View {
     @State private var albumArtist = ""
     @State private var confirmDeleteAlbum = false
     @State private var showPerfect = false
+    @State private var expected: MBReleaseMatch?   // MusicBrainz tracklist, once reconciled
+    @State private var reconciling = false
+    @State private var reconcileNote: String?
 
     private var selected: Track? { tracks.first { $0.id == selectedID } }
     private var protectedCount: Int { tracks.filter { $0.url.pathExtension.lowercased() == "m4p" }.count }
@@ -450,6 +466,12 @@ struct LibraryAlbumSheet: View {
                     Button { showPerfect = true } label: { Label("Perfect this album", systemImage: "wand.and.stars") }
                         .controlSize(.small).tint(.purple)
                         .help("One-shot cleanup for this album: consistent tags, unified cover art, remove duplicates, tidy file names.")
+                    Button { reconcile() } label: {
+                        if reconciling { ProgressView().controlSize(.small).scaleEffect(0.7) }
+                        else { Label("Check for missing tracks", systemImage: "checklist") }
+                    }
+                    .controlSize(.small).disabled(reconciling)
+                    .help("Look this album up on MusicBrainz and grey out any tracks that are missing")
                     Spacer()
                     if albumDetailsDirty {
                         Button("Save details") { saveAlbumDetails() }.controlSize(.small).tint(.teal)
@@ -480,10 +502,126 @@ struct LibraryAlbumSheet: View {
     private var trackTable: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                ForEach(tracks, id: \.id) { t in trackRow(t) }
+                if let note = reconcileNote { reconcileBanner(note) }
+                ForEach(discSections, id: \.disc) { section in
+                    if showDiscHeaders { discHeader(section.disc, have: section.have, total: section.total) }
+                    ForEach(section.rows) { row in
+                        switch row {
+                        case .have(let t): trackRow(t)
+                        case .missing(_, let disc, let track, let title, let ms):
+                            missingRow(disc: disc, track: track, title: title, lengthMs: ms)
+                        }
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// True when the album spans more than one disc — either from the tracks' own disc
+    /// tags, or from a reconciled multi-disc release.
+    private var showDiscHeaders: Bool {
+        if let e = expected { return e.discCount > 1 }
+        return Set(tracks.map { $0.discNo }).subtracting([0]).count > 1 || tracks.contains { $0.discNo > 1 }
+    }
+
+    /// Tracks grouped by disc. Once reconciled, the full MusicBrainz tracklist drives
+    /// it — every slot is either a track we have or a greyed "missing" placeholder.
+    private var discSections: [(disc: Int, rows: [InspectorRow], have: Int, total: Int)] {
+        if let e = expected {
+            let byDiscTrack = Dictionary(tracks.map { ("\($0.discNo == 0 ? 1 : $0.discNo)-\($0.trackNo)", $0) },
+                                         uniquingKeysWith: { a, _ in a })
+            let byTitle = Dictionary(tracks.map { (TrackProposal.typoFold($0.title).lowercased(), $0) },
+                                     uniquingKeysWith: { a, _ in a })
+            var used = Set<Int>()
+            var byDisc: [Int: [InspectorRow]] = [:]
+            for slot in e.tracks.sorted(by: { ($0.disc, $0.track) < ($1.disc, $1.track) }) {
+                let key = TrackProposal.typoFold(slot.title).lowercased()
+                let cand = byDiscTrack["\(slot.disc)-\(slot.track)"] ?? byTitle[key]
+                if let t = cand, !used.contains(t.id) {
+                    used.insert(t.id); byDisc[slot.disc, default: []].append(.have(t))
+                } else {
+                    byDisc[slot.disc, default: []].append(.missing(id: "\(slot.disc)-\(slot.track)-\(key)",
+                                                                   disc: slot.disc, track: slot.track,
+                                                                   title: slot.title, lengthMs: slot.lengthMs))
+                }
+            }
+            return byDisc.keys.sorted().map { d in
+                let rows = byDisc[d]!
+                let have = rows.reduce(0) { if case .have = $1 { return $0 + 1 }; return $0 }
+                return (d, rows, have, rows.count)
+            }
+        } else {
+            var byDisc: [Int: [InspectorRow]] = [:]
+            for t in tracks { byDisc[t.discNo == 0 ? 1 : t.discNo, default: []].append(.have(t)) }
+            return byDisc.keys.sorted().map { d -> (disc: Int, rows: [InspectorRow], have: Int, total: Int) in
+                let rows = byDisc[d]!; return (d, rows, rows.count, rows.count)
+            }
+        }
+    }
+
+    private func discHeader(_ disc: Int, have: Int, total: Int) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "opticaldisc").font(.system(size: 11)).foregroundStyle(.secondary)
+            Text("Disc \(disc)").font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary).textCase(.uppercase)
+            if expected != nil {
+                Text("\(have) of \(total)").font(.system(size: 11)).foregroundStyle(have < total ? Color.orange : Color.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14).padding(.top, 14).padding(.bottom, 5)
+    }
+
+    private func missingRow(disc: Int, track: Int, title: String, lengthMs: Int?) -> some View {
+        HStack(spacing: 10) {
+            Text("\(track)").font(.system(size: 12, design: .monospaced)).foregroundStyle(.tertiary)
+                .frame(width: 24, alignment: .trailing)
+            Image(systemName: "circle.dotted").font(.system(size: 18)).foregroundStyle(.tertiary)
+            Text(title.isEmpty ? "Unknown" : title).font(.system(size: 13)).italic().foregroundStyle(.tertiary).lineLimit(1)
+            badge("missing", .orange)
+            Spacer()
+            if let ms = lengthMs {
+                Text(fmtDur(Double(ms) / 1000)).font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.tertiary).frame(width: 46, alignment: .trailing)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 7).opacity(0.8)
+    }
+
+    private func reconcileBanner(_ note: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: expected != nil ? "checkmark.seal.fill" : "questionmark.circle")
+                .foregroundStyle(expected != nil ? Color.teal : Color.orange)
+            Text(note).font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Button { expected = nil; reconcileNote = nil } label: {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+            }.buttonStyle(.plain).help("Dismiss")
+        }
+        .padding(.horizontal, 14).padding(.vertical, 8)
+        .background(Color.secondary.opacity(0.06))
+    }
+
+    private func reconcile() {
+        reconciling = true; reconcileNote = nil; expected = nil
+        let artist = albumArtist.isEmpty ? album.artist : albumArtist
+        let alb = albumName.isEmpty ? album.album : albumName
+        let haveTitles = tracks.map { $0.title }
+        let discCount = max(1, Set(tracks.map { $0.discNo == 0 ? 1 : $0.discNo }).count)
+        Task {
+            let match = await MusicBrainzClient().matchRelease(artist: artist, album: alb,
+                                                               haveTitles: haveTitles, discCount: discCount)
+            await MainActor.run {
+                reconciling = false
+                if let m = match {
+                    expected = m
+                    let yr = m.date.flatMap { $0.isEmpty ? nil : " (\($0.prefix(4)))" } ?? ""
+                    reconcileNote = "Matched “\(m.title)”\(yr) — you have \(tracks.count) of \(m.tracks.count) tracks"
+                } else {
+                    reconcileNote = "Couldn't identify the exact edition — showing your tracks only."
+                }
+            }
+        }
     }
 
     private func trackRow(_ t: Track) -> some View {
