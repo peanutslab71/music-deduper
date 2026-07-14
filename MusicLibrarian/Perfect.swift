@@ -200,6 +200,18 @@ struct ArtworkReviewItem: Identifiable {
     var mbids: [String] = [] // release MBIDs (from identify), for Cover Art Archive lookups
 }
 
+/// One album a Perfect run found to be incomplete: what release it matched and how
+/// many of its tracks are absent. The full matched tracklist is persisted per album
+/// folder so the Album Inspector can grey out the missing rows afterwards.
+struct MissingAlbumReport: Identifiable {
+    let id = UUID()
+    let artist: String
+    let album: String
+    let missing: Int
+    let total: Int
+    let missingTitles: [String]   // "Disc d · n. Title" for the change log
+}
+
 // MARK: - Found cover art (preview before it's embedded)
 
 /// A single lightweight "artwork changed" signal. AlbumCover observes ONLY this
@@ -636,6 +648,7 @@ final class PerfectStore: ObservableObject {
         organisePlans = []; dedupClusters = []; dedupTracks = []
         compilationCandidates = []; confirmedCompilations = []
         albumMergeCandidates = []; declinedAlbumMerges = []
+        missingTrackReports = []
         lastRunSummary = nil
         clearPlan()                      // starting over discards the saved plan for this library
         root = nil                       // → PerfectView shows the intro / new-library screen
@@ -794,6 +807,14 @@ final class PerfectStore: ObservableObject {
     }
     @Published var composerFirstClassical = false   // classical → Composer-first folders
     @Published var renumberTracks = false           // assign a clean 1…N per album/disc
+    // Missing-track reconcile for the whole run: after the clean tree is built, check
+    // each real album against MusicBrainz/Discogs/Deezer and remember which tracks it's
+    // missing (persisted per album folder so the Album Inspector greys them out later).
+    // Network-heavy, so it's a toggle — off means a quick run stays offline.
+    @Published var checkMissingTracks: Bool = (UserDefaults.standard.object(forKey: "perfectCheckMissing") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(checkMissingTracks, forKey: "perfectCheckMissing") }
+    }
+    @Published var missingTrackReports: [MissingAlbumReport] = []   // filled by the last Apply
     // category-level toggles (the mockup's bulk on/off buttons)
     @Published var applyNames = true       // identify: artist/title/album corrections
     @Published var applyArtwork = true     // add missing cover art
@@ -2192,6 +2213,7 @@ final class PerfectStore: ObservableObject {
         let renumberOrg = renumberTracks
         let compsOrg = confirmedCompilations
         let declinedMergesOrg = declinedAlbumMerges
+        let checkMissing = checkMissingTracks
         commitTotal = accTagEdits.count
             + accEnrich.reduce(0) { $0 + $1.2.count }
             + accPerf.reduce(0) { $0 + $1.2.count }
@@ -2548,6 +2570,53 @@ final class PerfectStore: ObservableObject {
                 }
             }
 
+            // 5) MISSING-TRACK RECONCILE — now the clean tree is on disk, check each real
+            //    album against MusicBrainz/Discogs/Deezer and remember what it's missing,
+            //    keyed by the album's final folder so the Album Inspector greys the gaps
+            //    out later. Reports only (nothing to write for a track that isn't there),
+            //    network-gated by the toggle, and cancellable — the file moves are done.
+            var missingReports: [MissingAlbumReport] = []
+            if checkMissing && !box.cancelled {
+                let inputs = Self.organiseInputsFromDisk(root: root, fm: fm)
+                var byFolder: [String: [OrganiseInput]] = [:]
+                for i in inputs {
+                    let folder = root.appendingPathComponent(i.rel).deletingLastPathComponent().path
+                    byFolder[folder, default: []].append(i)
+                }
+                // real albums only — skip loose/junk folders and one-offs the check can't help
+                let albums = byFolder.filter { $0.value.count >= 4 && !Organiser.albumOrEmpty($0.value.first?.album ?? "").isEmpty }
+                let mb = MusicBrainzClient()
+                var idx = 0
+                for (folder, tracks) in albums {
+                    if box.cancelled { break }
+                    idx += 1
+                    await self.setCommitProgress("Checking for missing tracks (\(idx) of \(albums.count))", done: done)
+                    let comp = tracks.contains { $0.isCompilation }
+                    let album = Organiser.stripDiscSuffix(tracks.first?.album ?? "").clean
+                    let aaTally = tracks.map { $0.albumArtist.isEmpty ? $0.artist : $0.albumArtist }.filter { !$0.isEmpty }
+                    let artist = comp ? "Various Artists"
+                        : (aaTally.sorted { a, b in aaTally.filter { $0 == a }.count > aaTally.filter { $0 == b }.count }.first ?? "")
+                    let discCount = max(1, Set(tracks.map { $0.discNo == 0 ? 1 : $0.discNo }).count)
+                    guard !album.isEmpty,
+                          let match = await mb.bestRelease(artist: artist, album: album,
+                                                           haveTitles: tracks.map { $0.title }, discCount: discCount)
+                    else { continue }
+                    let have = Set(tracks.map { TrackProposal.typoFold($0.title).lowercased() })
+                    let missing = match.tracks
+                        .filter { !have.contains(TrackProposal.typoFold($0.title).lowercased()) }
+                        .sorted { ($0.disc, $0.track) < ($1.disc, $1.track) }
+                    // always remember the matched tracklist so the inspector can show gaps
+                    AlbumReconcileStore.save(folder, match)
+                    guard !missing.isEmpty else { continue }
+                    let lines = missing.map { "Disc \($0.disc) · \($0.track). \($0.title)" }
+                    missingReports.append(MissingAlbumReport(artist: artist, album: match.title,
+                                                             missing: missing.count, total: match.tracks.count,
+                                                             missingTitles: lines))
+                    log += "\nMISSING from “\(match.title)” (\(missing.count) of \(match.tracks.count)):\n"
+                    for l in lines { log += "  · \(l)\n" }
+                }
+            }
+
             let total = ops.count + tagEdits.count + perfEdits.count + artEdits.count
                         + artPromotions.count + artReplacements.count
             let wasCancelled = box.cancelled
@@ -2572,13 +2641,15 @@ final class PerfectStore: ObservableObject {
                 try? fm.removeItem(at: quarantine)
             }
             await self.finishCommit(count: total, quarantine: quarantine, cancelled: wasCancelled,
-                                    flagged: flaggedArt.map { ArtworkReviewItem(artist: $0.artist, album: $0.album, files: $0.files, mbids: $0.mbids) })
+                                    flagged: flaggedArt.map { ArtworkReviewItem(artist: $0.artist, album: $0.album, files: $0.files, mbids: $0.mbids) },
+                                    missing: missingReports)
         }
     }
 
     private func finishCommit(count: Int, quarantine: URL, cancelled: Bool = false,
-                              flagged: [ArtworkReviewItem] = []) {
+                              flagged: [ArtworkReviewItem] = [], missing: [MissingAlbumReport] = []) {
         busy = false
+        missingTrackReports = missing.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
         // the summary dialog is set BEFORE committing flips false so the view's
         // onChange sees it and shows the "all done" sheet (not just a dismiss).
         showCompletionSummary = !cancelled && count > 0

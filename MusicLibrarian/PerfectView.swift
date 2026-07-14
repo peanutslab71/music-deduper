@@ -313,6 +313,7 @@ struct PerfectView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
+            if !store.missingTrackReports.isEmpty { missingTracksSummary }
             HStack(spacing: 8) {
                 if let q = store.lastQuarantine {
                     Button {
@@ -335,6 +336,34 @@ struct PerfectView: View {
         .padding(24)
         .frame(width: 480)
         .interactiveDismissDisabled()
+    }
+
+    /// After Apply: albums the run found to be incomplete. Read-only — there's nothing
+    /// to write for a track you don't have; the gaps are remembered so the Album
+    /// Inspector greys them out. The full list is in the change log.
+    private var missingTracksSummary: some View {
+        let reports = store.missingTrackReports
+        let totalMissing = reports.reduce(0) { $0 + $1.missing }
+        return VStack(alignment: .leading, spacing: 6) {
+            Label("\(totalMissing) missing track(s) across \(reports.count) album(s)",
+                  systemImage: "questionmark.square.dashed")
+                .font(.caption).fontWeight(.semibold).foregroundStyle(.orange)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(reports) { r in
+                        Text("\(r.artist.isEmpty ? "" : r.artist + " — ")\(r.album): missing \(r.missing) of \(r.total)")
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .frame(maxHeight: 120)
+            Text("Open an album in the Library to see exactly which tracks are missing (greyed out).")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.08)))
     }
 
     // MARK: header
@@ -636,6 +665,9 @@ struct PerfectView: View {
                     .onChange(of: store.renumberTracks) { _ in
                         if !store.organisePlans.isEmpty { store.organise() }
                     }
+                Toggle("Check for missing tracks", isOn: $store.checkMissingTracks)
+                    .toggleStyle(.checkbox).controlSize(.small)
+                    .help("After the clean tree is built, check each album online (MusicBrainz, Discogs, Deezer) and remember which tracks it's missing, so the Album Inspector can grey them out. Uses the network — turn off for a quick offline run.")
                 Toggle("Composer-first for classical", isOn: $store.composerFirstClassical)
                     .toggleStyle(.checkbox).controlSize(.small)
                     .onChange(of: store.composerFirstClassical) { _ in
