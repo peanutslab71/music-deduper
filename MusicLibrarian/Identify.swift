@@ -161,7 +161,7 @@ struct TrackProposal: Identifiable, Codable {
     ///    should REVIEW these, not auto-apply.
     /// A bare "A & B" / "A and B" with no comma (Simon & Garfunkel, Aerosmith & Run-DMC)
     /// is treated as one band name → nil.
-    static func splitArtistCredit(_ raw: String) -> (primary: String, performers: [String], confident: Bool)? {
+    static func splitArtistCredit(_ raw: String) -> (primary: String, performers: [(name: String, role: String)], confident: Bool)? {
         let s = raw.trimmingCharacters(in: .whitespaces)
         guard !s.isEmpty, !Identifier.isJunkValue(s) else { return nil }
 
@@ -172,24 +172,50 @@ struct TrackProposal: Identifiable, Codable {
                .filter { !$0.isEmpty }
         }
 
-        // 1) feat/ft/featuring — the guest is unambiguous
+        // 1) feat/ft/featuring — a pop guest, unambiguous. All extras are performers.
         if let r = s.range(of: #"\s+(feat\.?|ft\.?|featuring)\s+"#, options: [.regularExpression, .caseInsensitive]) {
             let primary = String(s[s.startIndex..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
             let rest = parts(String(s[r.upperBound...]))
             guard !primary.isEmpty, !rest.isEmpty else { return nil }
-            return (primary, rest, true)
+            return (primary, rest.map { ($0, "performer") }, true)
         }
-        // 2) comma present → a list
+        // 2) comma present → a list of contributors
         if s.contains(",") {
             let p = parts(s)
             guard p.count >= 2 else { return nil }
-            // a comma immediately followed by a non-space is a machine join, never a
-            // human-written band name → safe to split automatically
+            let extras = Array(p.dropFirst())
+            // A classical/opera credit lists a soloist plus an orchestra, a choir and a
+            // conductor (and sometimes a venue). Those ensemble words also prove it's NOT
+            // a pop band, so such a list is safe to split automatically.
+            let ensemble = extras.contains { classicalRole($0, isLastPerson: false) != "performer" && classicalRole($0, isLastPerson: false) != "recording location" }
+            // a comma immediately followed by a non-space is a machine join, also safe
             let machineJoin = s.range(of: #",\S"#, options: .regularExpression) != nil
-            return (p[0], Array(p.dropFirst()), machineJoin)
+            let roled = extras.enumerated().map { (i, name) -> (name: String, role: String) in
+                (name, classicalRole(name, isLastPerson: ensemble && i == extras.count - 1))
+            }
+            return (p[0], roled, machineJoin || ensemble)
         }
         // 3) no comma: a bare "&"/"and" is a band/duo name — leave it
         return nil
+    }
+
+    /// The likely role of one part of a classical/opera credit. `isLastPerson` marks the
+    /// last entry in a list that already has an ensemble in it — in classical that trailing
+    /// name is almost always the conductor. Falls back to "performer".
+    private static func classicalRole(_ name: String, isLastPerson: Bool) -> String {
+        let l = name.lowercased()
+        func has(_ pats: [String]) -> Bool { pats.contains { l.range(of: $0, options: .regularExpression) != nil } }
+        if has(["orchestra", "philharmoni", "symphon", "sinfoni", "filarmonic", "orkest"]) { return "orchestra" }
+        if has(["choir", "chorus", "chorale", "\\bcoro\\b", "cappella", "capella", "singers"]) { return "choir" }
+        if has(["ensemble", "camerata", "consort", "collegium", "academy", "quartet", "quintet", "sextet"]) { return "ensemble" }
+        if has(["\\bhall\\b", "theatre", "theater", "teatro", "auditorium", "arena", "\\bopera house\\b"]) || l.hasPrefix("live ") { return "recording location" }
+        // a plain person-like name at the tail of a classical list → conductor
+        if isLastPerson {
+            let words = name.split(separator: " ")
+            let personish = (2...4).contains(words.count) && words.allSatisfy { ($0.first?.isUppercase ?? false) && !$0.contains(where: \.isNumber) }
+            if personish { return "conductor" }
+        }
+        return "performer"
     }
 
     /// Classify how different `to` is from `from`.

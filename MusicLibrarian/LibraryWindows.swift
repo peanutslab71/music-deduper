@@ -1560,10 +1560,11 @@ enum AlbumPerfect {
                 guard let split = TrackProposal.splitArtistCredit(t.artist), split.confident == confident,
                       split.primary != t.artist else { continue }
                 writes.append((rel(t.url), "artist", split.primary))
-                for name in split.performers where md_has_performer(t.url.path, name, "performer") == 0 {
-                    perf.append((rel(t.url), name, "performer"))
+                for p in split.performers where md_has_performer(t.url.path, p.name, p.role) == 0 {
+                    perf.append((rel(t.url), p.name, p.role))
                 }
-                lines.append("“\(t.title)” — \(t.artist) → \(split.primary) + \(split.performers.joined(separator: ", "))")
+                let credited = split.performers.map { "\($0.name) (\($0.role))" }.joined(separator: ", ")
+                lines.append("“\(t.title)” — \(t.artist) → \(split.primary) + \(credited)")
             }
             if !writes.isEmpty {
                 fixes.append(AlbumFix(kind: .artistCredit,
