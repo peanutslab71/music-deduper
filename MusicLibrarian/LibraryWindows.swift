@@ -551,16 +551,18 @@ struct LibraryAlbumSheet: View {
     /// it — every slot is either a track we have or a greyed "missing" placeholder.
     private var discSections: [(disc: Int, rows: [InspectorRow], have: Int, total: Int)] {
         if let e = expected {
-            let byDiscTrack = Dictionary(tracks.map { ("\($0.discNo == 0 ? 1 : $0.discNo)-\($0.trackNo)", $0) },
-                                         uniquingKeysWith: { a, _ in a })
+            // Match a slot to an on-disk track by TITLE, not by track number. Across
+            // editions/pressings the numbering doesn't line up (and a multi-disc Discogs
+            // release numbers each disc from 1), so a position match would steal the wrong
+            // track and show songs you have as "missing". Title is the reliable key for
+            // "do I have this track?".
             let byTitle = Dictionary(tracks.map { (TrackProposal.typoFold($0.title).lowercased(), $0) },
                                      uniquingKeysWith: { a, _ in a })
             var used = Set<Int>()
             var byDisc: [Int: [InspectorRow]] = [:]
             for slot in e.tracks.sorted(by: { ($0.disc, $0.track) < ($1.disc, $1.track) }) {
                 let key = TrackProposal.typoFold(slot.title).lowercased()
-                let cand = byDiscTrack["\(slot.disc)-\(slot.track)"] ?? byTitle[key]
-                if let t = cand, !used.contains(t.id) {
+                if let t = byTitle[key], !used.contains(t.id) {
                     used.insert(t.id); byDisc[slot.disc, default: []].append(.have(t))
                 } else {
                     byDisc[slot.disc, default: []].append(.missing(id: "\(slot.disc)-\(slot.track)-\(key)",

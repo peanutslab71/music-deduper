@@ -800,23 +800,26 @@ actor MusicBrainzClient {
     private static func discogsTracks(_ raw: [DiscogsTrack]) -> [MBReleaseTrack] {
         var out: [MBReleaseTrack] = []
         var run = 0
+        var disc = 1, prevPlain = 0
         for t in raw {
             if let ty = t.type_, ty != "track" { continue }       // heading / index
             guard let title = t.title, !title.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
             run += 1
-            // Only an explicit numeric "disc-track" ("2-13") gives a real disc+track.
-            // A plain "5" is a track. A vinyl side ("A1","B2") restarts numbering per
-            // side, so its side-relative number is NOT a unique track number — a running
-            // counter is used instead (and vinyl sides aren't discs), which keeps titles
-            // ordered without colliding A1/B1 on the same disc. Titles drive the reconcile.
-            var disc = 1, track = run
+            // Discogs puts the disc/medium in a SEPARATE field, not the position string:
+            //  • an explicit numeric "disc-track" ("2-13") gives disc+track directly;
+            //  • a plain "5" is a track WITHIN the current medium — Discogs restarts at 1
+            //    for each disc, so when the number goes backwards a new disc has begun
+            //    (without this, a 2-CD release collapses to one disc with duplicate track
+            //    numbers, and songs you own show as "missing");
+            //  • a vinyl side ("A1","B2") has no reliable number → running counter, one disc.
+            var track = run
             let pos = (t.position ?? "").trimmingCharacters(in: .whitespaces)
-            let cd = pos.range(of: #"^\d+-\d+$"#, options: .regularExpression) != nil
-            if cd {
+            if pos.range(of: #"^\d+-\d+$"#, options: .regularExpression) != nil {
                 let parts = pos.split(separator: "-")
-                if let d = Int(parts[0]), let n = Int(parts[1]) { disc = d; track = n }
+                if let d = Int(parts[0]), let n = Int(parts[1]) { disc = d; track = n; prevPlain = n }
             } else if pos.range(of: #"^\d+$"#, options: .regularExpression) != nil, let n = Int(pos) {
-                track = n                                          // plain numeric track
+                if n <= prevPlain { disc += 1 }                    // numbering reset → next disc
+                track = n; prevPlain = n
             }                                                      // else (vinyl side / blank): keep run
             out.append(MBReleaseTrack(disc: max(1, disc), track: track, title: title, lengthMs: Self.parseDuration(t.duration)))
         }
