@@ -35,6 +35,8 @@ struct LibraryBrowserView: View {
     @State private var search = ""
     @State private var selectedAlbum: LibAlbum?
     @State private var showMerge = false
+    @State private var scrollTarget: String?   // album id to scroll back to after a reload
+    @State private var lastAlbumID: String?    // the album most recently opened
 
     /// Album folders that are the SAME release by the SAME artist — a "(Disc 2)"
     /// split, or a differently-marked edition — so they can be merged into one.
@@ -68,7 +70,7 @@ struct LibraryBrowserView: View {
         }
         .sheet(item: $selectedAlbum) { a in
             LibraryAlbumSheet(album: a, root: root ?? a.dir.deletingLastPathComponent().deletingLastPathComponent(),
-                              onChanged: { load() })
+                              onChanged: { scrollTarget = lastAlbumID; load() })
         }
         .sheet(isPresented: $showMerge) {
             MergeAlbumsSheet(groups: mergeGroups, root: root ?? URL(fileURLWithPath: savedRoot),
@@ -133,25 +135,36 @@ struct LibraryBrowserView: View {
     }
 
     private var albumGrid: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                if !mergeGroups.isEmpty { mergeBanner }
-                HStack(spacing: 8) {
-                    Image(systemName: "square.grid.2x2").foregroundStyle(.purple)
-                    Text("\(filtered.count) album(s)").fontWeight(.semibold)
-                    Text("click an album to see its tracks").font(.caption).foregroundStyle(.secondary)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if !mergeGroups.isEmpty { mergeBanner }
+                    HStack(spacing: 8) {
+                        Image(systemName: "square.grid.2x2").foregroundStyle(.purple)
+                        Text("\(filtered.count) album(s)").fontWeight(.semibold)
+                        Text("click an album to see its tracks").font(.caption).foregroundStyle(.secondary)
+                    }
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 176, maximum: 210), spacing: 18)],
+                              alignment: .leading, spacing: 18) {
+                        ForEach(filtered) { a in albumCard(a).id(a.id) }
+                    }
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 176, maximum: 210), spacing: 18)],
-                          alignment: .leading, spacing: 18) {
-                    ForEach(filtered) { a in albumCard(a) }
+                .padding(16)
+            }
+            // After a reload (e.g. closing an album post-Perfect), scroll back to the
+            // album that was open once it reappears in the freshly-loaded grid.
+            .onChange(of: albums.count) { _ in
+                guard let id = scrollTarget, albums.contains(where: { $0.id == id }) else { return }
+                scrollTarget = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .center) }
                 }
             }
-            .padding(16)
         }
     }
 
     private func albumCard(_ a: LibAlbum) -> some View {
-        Button { selectedAlbum = a } label: {
+        Button { lastAlbumID = a.id; selectedAlbum = a } label: {
             VStack(alignment: .leading, spacing: 8) {
                 AlbumCover(key: a.id, sampleURL: a.sampleURL, foundMBID: nil, size: 176)
                 VStack(alignment: .leading, spacing: 1) {
@@ -1147,6 +1160,7 @@ struct AlbumFix: Identifiable {
         case album = "Album name"
         case albumArtist = "Album artist"
         case compilation = "Compilation"
+        case discOrder = "Disc order"
         case artwork = "Cover art"
         case duplicate = "Duplicates"
         case filename = "File names"
@@ -1168,6 +1182,7 @@ struct AlbumFix: Identifiable {
         case .album: return "textformat"
         case .albumArtist: return "person.2"
         case .compilation: return "person.3.sequence"
+        case .discOrder: return "opticaldisc"
         case .artwork: return "photo"
         case .duplicate: return "doc.on.doc"
         case .filename: return "character.cursor.ibeam"
@@ -1365,6 +1380,33 @@ enum AlbumPerfect {
                     fixes.append(AlbumFix(kind: .albumArtist, summary: "Set album artist to “\(target)” on \(writes.count) track\(writes.count == 1 ? "" : "s")",
                                           lines: lines, enabled: true, applyable: true, tagWrites: writes))
                 }
+            }
+        }
+
+        // ---- 3b. Disc order. Duplicate track numbers (same disc + track appearing more
+        // than once) mean a multi-disc set was flattened into one folder with no disc
+        // tags — so the tracks interleave (1,1,2,2,…). Assign disc numbers by occurrence,
+        // ordered by file name, so they group into discs.
+        let numbered = kept.filter { $0.trackNo > 0 }
+        let dupKeys = Dictionary(grouping: numbered, by: { $0.discNo * 1000 + $0.trackNo }).filter { $0.value.count > 1 }
+        if !dupKeys.isEmpty {
+            let discCount = dupKeys.values.map { $0.count }.max() ?? 2
+            var seen: [Int: Int] = [:]
+            var writes: [(rel: String, field: String, value: String)] = []
+            var lines: [String] = []
+            for t in kept.sorted(by: { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }) where t.trackNo > 0 {
+                let key = t.discNo * 1000 + t.trackNo
+                let newDisc = (seen[key] ?? 0) + 1
+                seen[key] = newDisc
+                if t.discNo != newDisc {
+                    writes.append((rel(t.url), "disc", String(newDisc)))
+                    lines.append("“\(t.title)” (track \(t.trackNo)) → disc \(newDisc)")
+                }
+            }
+            if !writes.isEmpty {
+                fixes.append(AlbumFix(kind: .discOrder,
+                                      summary: "Assign disc numbers — looks like a \(discCount)-disc set flattened into one folder (\(writes.count) tracks)",
+                                      lines: lines, enabled: true, applyable: true, tagWrites: writes))
             }
         }
 
