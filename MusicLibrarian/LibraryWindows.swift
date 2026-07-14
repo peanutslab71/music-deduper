@@ -454,7 +454,9 @@ struct LibraryAlbumSheet: View {
     private var factsLine: String {
         var bits = ["\(tracks.count) track(s)"]
         if totalSeconds > 0 { bits.append(fmtLong(totalSeconds)) }
-        let fmts = Set(tracks.map { $0.formatLabel }); if !fmts.isEmpty { bits.append(fmts.sorted().joined(separator: " / ")) }
+        // just the distinct container formats (MP3, FLAC…), not every per-track bitrate
+        let fmts = Set(tracks.map { $0.ext.uppercased() }).sorted()
+        if !fmts.isEmpty { bits.append(fmts.joined(separator: " / ")) }
         if protectedCount > 0 { bits.append("\(protectedCount) protected") }
         if !artless.isEmpty { bits.append("\(artless.count) need a cover") }
         return bits.joined(separator: " · ")
@@ -496,7 +498,9 @@ struct LibraryAlbumSheet: View {
             }
             Spacer()
             Text(fmtDur(t.duration)).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                .frame(width: 46, alignment: .trailing)
             Text(t.formatLabel).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                .frame(width: 58, alignment: .center)
                 .padding(.horizontal, 5).padding(.vertical, 1)
                 .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color.secondary.opacity(0.25)))
             Button { NSWorkspace.shared.activateFileViewerSelecting([t.url]) } label: { Image(systemName: "arrow.up.forward.square") }
