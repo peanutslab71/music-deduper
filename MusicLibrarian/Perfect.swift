@@ -2364,8 +2364,8 @@ final class PerfectStore: ObservableObject {
                     do {
                         try Self.writeField(u, "artist", to: split.primary)
                         tagEdits.append((rel, "artist", cur))
-                        let credited = split.performers.map { "\($0.name) (\($0.role))" }.joined(separator: ", ")
-                        log += "ARTIST SPLIT: \(rel): \(cur) → \(split.primary) + \(credited)\n"
+                        let credited = split.performers.map { $0.name }.joined(separator: ", ")
+                        log += "ARTIST SPLIT: \(rel): \(cur) → \(split.primary) + credits: \(credited)\n"
                     } catch { log += "FAILED artist split \(rel): \(error.localizedDescription)\n"; continue }
                     for p in split.performers where md_has_performer(u.path, p.name, p.role) == 0 {
                         do { try Self.addPerformer(u, name: p.name, role: p.role); perfEdits.append((rel, p.name, p.role)) }

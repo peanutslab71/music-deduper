@@ -1563,8 +1563,8 @@ enum AlbumPerfect {
                 for p in split.performers where md_has_performer(t.url.path, p.name, p.role) == 0 {
                     perf.append((rel(t.url), p.name, p.role))
                 }
-                let credited = split.performers.map { "\($0.name) (\($0.role))" }.joined(separator: ", ")
-                lines.append("“\(t.title)” — \(t.artist) → \(split.primary) + \(credited)")
+                let credited = split.performers.map { $0.name }.joined(separator: ", ")
+                lines.append("“\(t.title)” — \(t.artist) → \(split.primary) + credits: \(credited)")
             }
             if !writes.isEmpty {
                 fixes.append(AlbumFix(kind: .artistCredit,

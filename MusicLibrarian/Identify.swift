@@ -187,32 +187,18 @@ struct TrackProposal: Identifiable, Codable {
             let primary = String(s[s.startIndex..<comma]).trimmingCharacters(in: .whitespaces)
             let extras = parts(String(s[s.index(after: comma)...]))
             guard !primary.isEmpty, !extras.isEmpty else { return nil }
-            let roled = extras.map { (name: $0, role: Self.creditRole($0)) }
-            // An orchestra/choir/ensemble NAMES itself as one, which both types the credit
-            // and proves the list is a classical credit, not a pop band → safe to split.
-            let ensemble = roled.contains { ["orchestra", "choir", "ensemble"].contains($0.role) }
-            // a comma immediately followed by a non-space is a machine join, also safe
+            // Everyone after the primary becomes a NEUTRAL "performer" credit. Their real
+            // role (conductor, orchestra, choir, soloist, instrument…) is typed by the
+            // Credits step from the authoritative MusicBrainz/Discogs relationship data —
+            // not guessed from words in the tag. So only a machine-join ("A,B" — a comma
+            // with no space, never a human-written band name) auto-applies. A spaced list
+            // ("A, B & C") could be a band, so without a lookup it's offered for review,
+            // not applied.
             let machineJoin = s.range(of: #",\S"#, options: .regularExpression) != nil
-            return (primary, roled, machineJoin || ensemble)
+            return (primary, extras.map { ($0, "performer") }, machineJoin)
         }
         // 3) no comma: a bare "&"/"and" is a band/duo name — leave it
         return nil
-    }
-
-    /// The role of one contributor, decided ONLY from the words in its own name — never
-    /// from its position in the list. A name containing "Orchestra"/"Philharmonic" is an
-    /// orchestra, "Choir"/"Chorus"/"Coro" a choir, a "Hall"/"Teatro" a venue, wherever it
-    /// appears. A bare person name can't be typed from the string (soloist? conductor?),
-    /// so it stays a neutral "performer" — the Credits step (MusicBrainz/Discogs) is the
-    /// authoritative source that types conductor vs soloist vs instrument.
-    private static func creditRole(_ name: String) -> String {
-        let l = name.lowercased()
-        func has(_ pats: [String]) -> Bool { pats.contains { l.range(of: $0, options: .regularExpression) != nil } }
-        if has(["orchestra", "philharmoni", "symphon", "sinfoni", "filarmonic", "orkest"]) { return "orchestra" }
-        if has(["choir", "chorus", "chorale", "\\bcoro\\b", "cappella", "capella", "singers"]) { return "choir" }
-        if has(["ensemble", "camerata", "consort", "collegium", "academy", "quartet", "quintet", "sextet"]) { return "ensemble" }
-        if has(["\\bhall\\b", "theatre", "theater", "teatro", "auditorium", "arena", "\\bopera house\\b"]) || l.hasPrefix("live ") { return "recording location" }
-        return "performer"
     }
 
     /// Classify how different `to` is from `from`.
