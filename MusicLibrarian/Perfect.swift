@@ -801,17 +801,12 @@ final class PerfectStore: ObservableObject {
         organise()
     }
 
-    /// Generic album titles shared by many unrelated artists — NOT evidence of a
-    /// compilation, and a hint that same-titled albums by different artists are really
-    /// separate releases (used by both compilation detection and credit grouping).
-    nonisolated static let genericAlbumTitles: Set<String> = [
-        "greatest hits", "the greatest hits", "hits", "live", "best of",
-        "the best of", "collection", "the collection", "compilation",
-        "essential", "the essential", "gold", "anthology"]
-
-    /// Flag-less compilation candidates: an album title shared by ≥2 distinct artists
-    /// with NO album-artist on any track, non-generic name. Flagged albums are marked
-    /// flagged=true (auto). For the Organise step's confirmation list.
+    /// Flag-less compilation candidates: an album whose tracks span ≥2 distinct artists
+    /// with NO album-artist on any track — the structural signature of a various-artists
+    /// release (a normal album carries a consistent album-artist). Only SURFACED for the
+    /// user to confirm on the Organise step; nothing here auto-applies, so there's no
+    /// hardcoded title vocabulary deciding what is or isn't a compilation. Albums already
+    /// carrying the compilation flag are marked flagged=true.
     nonisolated static func compilationCandidates(from inputs: [OrganiseInput]) -> [CompilationCandidate] {
         struct Acc { var album = ""; var artists = Set<String>(); var count = 0; var anyAA = false; var anyFlag = false }
         var by: [String: Acc] = [:]
@@ -827,7 +822,7 @@ final class PerfectStore: ObservableObject {
             by[key] = acc
         }
         return by.compactMap { (key, acc) -> CompilationCandidate? in
-            let heuristic = acc.artists.count >= 2 && !acc.anyAA && !Self.genericAlbumTitles.contains(key)
+            let heuristic = acc.artists.count >= 2 && !acc.anyAA
             guard heuristic || acc.anyFlag else { return nil }
             return CompilationCandidate(id: key, album: acc.album, artists: Array(acc.artists).sorted(),
                                         trackCount: acc.count, flagged: acc.anyFlag)
