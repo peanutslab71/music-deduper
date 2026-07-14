@@ -513,6 +513,55 @@ private struct DiscogsRelease: Decodable {
 private struct DiscogsCredit: Decodable { let name: String?; let role: String? }
 private struct DiscogsLabel: Decodable { let name: String?; let catno: String? }
 
+// ---- Extra reconcile/artwork sources: Deezer (no key) and Discogs release tracklists ----
+// Deezer: album search → cover_xl (~1000px) + full ordered tracklist. Free, no key.
+private struct DeezerSearch: Decodable { let data: [DeezerAlbum]? }
+private struct DeezerAlbum: Decodable {
+    let id: Int?
+    let title: String?
+    let artist: DeezerArtist?
+    let cover_xl: String?
+    let nb_tracks: Int?
+}
+private struct DeezerArtist: Decodable { let name: String? }
+private struct DeezerAlbumDetail: Decodable {
+    let title: String?
+    let release_date: String?
+    let tracks: DeezerTrackList?
+}
+private struct DeezerTrackList: Decodable { let data: [DeezerTrack]? }
+private struct DeezerTrack: Decodable {
+    let title: String?
+    let disk_number: Int?
+    let track_position: Int?
+    let duration: Int?   // SECONDS on Deezer (MB/our model use ms)
+}
+
+// Discogs: release search → full tracklist + release images. Best coverage for
+// compilations, reissues and box-sets that MusicBrainz is thin on. Optional token
+// (Settings) lifts the rate limit; the existing discogsToken/UA are reused.
+private struct DiscogsSearch: Decodable { let results: [DiscogsSearchResult]? }
+private struct DiscogsSearchResult: Decodable {
+    let id: Int?
+    let title: String?
+    let format: [String]?
+    let year: String?
+}
+private struct DiscogsReleaseFull: Decodable {
+    let title: String?
+    let released: String?
+    let year: Int?
+    let tracklist: [DiscogsTrack]?
+    let images: [DiscogsImage]?
+}
+private struct DiscogsTrack: Decodable {
+    let position: String?
+    let title: String?
+    let duration: String?
+    let type_: String?
+}
+private struct DiscogsImage: Decodable { let type: String?; let uri: String? }
+
 /// Looks up MusicBrainz relationships for a recording. An actor so its per-run
 /// caches are safe, and it serialises requests — MusicBrainz allows ~1 req/sec,
 /// so each network call waits a beat, and works/releases are cached to avoid
@@ -623,6 +672,163 @@ actor MusicBrainzClient {
             }
         }
         return nil
+    }
+
+    // ---- Multi-source reconcile ------------------------------------------------
+    // MusicBrainz alone is thin on obscure comps/box-sets, so the missing-track
+    // check tries several sources and keeps the tracklist that best fits what's on
+    // disk. Data (titles/order) is CC0 from MB, licence-clean from Discogs; Deezer
+    // is used only to fill gaps the others miss. Same reference tracklist also
+    // drives disc assignment, so a richer match fixes reordering too.
+
+    /// How well a candidate tracklist fits the folder: fraction of on-disk titles
+    /// present in the release. Only tracklists clearing 0.6 are trusted.
+    private func overlap(_ tracks: [MBReleaseTrack], _ want: Set<String>) -> Double {
+        guard !want.isEmpty else { return 0 }
+        let have = Set(tracks.map { TrackProposal.typoFold($0.title).lowercased() })
+        return Double(want.filter { have.contains($0) }.count) / Double(want.count)
+    }
+
+    /// Try MusicBrainz, Discogs and Deezer, then keep the tracklist that fits the
+    /// folder best. Ties break toward the disc-count match, then the fuller
+    /// pressing (box-sets/comps list more, which is what we want to reconcile
+    /// against). Declines when nothing clears the overlap gate.
+    func bestRelease(artist: String, album: String, haveTitles: [String], discCount: Int) async -> MBReleaseMatch? {
+        let want = Set(haveTitles.map { TrackProposal.typoFold($0).lowercased() }.filter { !$0.isEmpty })
+        guard !want.isEmpty else { return nil }
+        var cands: [MBReleaseMatch] = []
+        if let m = await matchRelease(artist: artist, album: album, haveTitles: haveTitles, discCount: discCount) { cands.append(m) }
+        if let d = await matchReleaseDiscogs(artist: artist, album: album, want: want) { cands.append(d) }
+        if let z = await matchReleaseDeezer(artist: artist, album: album, want: want) { cands.append(z) }
+        guard !cands.isEmpty else { return nil }
+        return cands.max { a, b in
+            let oa = overlap(a.tracks, want), ob = overlap(b.tracks, want)
+            if abs(oa - ob) > 0.05 { return oa < ob }             // best fit first
+            let da = a.discCount == discCount, db = b.discCount == discCount
+            if da != db { return db }                             // then disc-count match
+            return a.tracks.count < b.tracks.count                // then the fuller list
+        }
+    }
+
+    /// Discogs release tracklist. Searches releases by artist + title, pulls the
+    /// first whose tracklist clears the overlap gate. Skips heading/index rows and
+    /// derives (disc, track) from Discogs positions ("2-13", "A1", "5").
+    private func matchReleaseDiscogs(artist: String, album: String, want: Set<String>) async -> MBReleaseMatch? {
+        var comps = URLComponents(string: "https://api.discogs.com/database/search")!
+        comps.queryItems = [.init(name: "type", value: "release"),
+                            .init(name: "artist", value: artist),
+                            .init(name: "release_title", value: album)]
+        guard let searchURL = comps.url,
+              let search: DiscogsSearch = await getDiscogs(searchURL),
+              let hits = search.results, !hits.isEmpty else { return nil }
+        for hit in hits.prefix(4) {
+            guard let id = hit.id,
+                  let url = URL(string: "https://api.discogs.com/releases/\(id)"),
+                  let rel: DiscogsReleaseFull = await getDiscogs(url) else { continue }
+            let tracks = Self.discogsTracks(rel.tracklist ?? [])
+            guard !tracks.isEmpty, overlap(tracks, want) >= 0.6 else { continue }
+            let date = rel.released?.isEmpty == false ? rel.released : rel.year.map(String.init)
+            return MBReleaseMatch(id: "discogs:\(id)", title: rel.title ?? album, date: date,
+                                  discCount: max(1, tracks.map { $0.disc }.max() ?? 1), tracks: tracks)
+        }
+        return nil
+    }
+
+    /// Turn Discogs positions into ordered (disc, track). Non-playable rows
+    /// (headings, index tracks with no position) are dropped; a running counter
+    /// backs up any position we can't parse so titles still line up.
+    private static func discogsTracks(_ raw: [DiscogsTrack]) -> [MBReleaseTrack] {
+        var out: [MBReleaseTrack] = []
+        var run = 0
+        for t in raw {
+            if let ty = t.type_, ty != "track" { continue }       // heading / index
+            guard let title = t.title, !title.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+            run += 1
+            var disc = 1, track = run
+            let pos = (t.position ?? "").trimmingCharacters(in: .whitespaces)
+            if pos.contains("-") {                                // CD form "2-13"
+                let parts = pos.split(separator: "-")
+                if parts.count == 2, let d = Int(parts[0]), let n = Int(parts[1].filter(\.isNumber)) { disc = d; track = n }
+            } else if let n = Int(pos.filter(\.isNumber)), !pos.isEmpty {   // "5" or "A1"
+                track = n
+                if let side = pos.first, side.isLetter {          // vinyl side → rough disc
+                    disc = (Int(side.asciiValue ?? 65) - 65) / 2 + 1
+                }
+            }
+            out.append(MBReleaseTrack(disc: max(1, disc), track: track, title: title, lengthMs: Self.parseDuration(t.duration)))
+        }
+        return out
+    }
+
+    private static func parseDuration(_ s: String?) -> Int? {
+        guard let s = s, s.contains(":") else { return nil }
+        let p = s.split(separator: ":").compactMap { Int($0) }
+        guard p.count == 2 else { return nil }
+        return (p[0] * 60 + p[1]) * 1000
+    }
+
+    /// Deezer album tracklist (no key). Searches albums by artist+title, takes the
+    /// best title/artist match, then pulls its full ordered tracklist.
+    private func matchReleaseDeezer(artist: String, album: String, want: Set<String>) async -> MBReleaseMatch? {
+        guard let alb = await deezerAlbum(artist: artist, album: album), let id = alb.id,
+              let url = URL(string: "https://api.deezer.com/album/\(id)"),
+              let detail: DeezerAlbumDetail = await getDeezer(url) else { return nil }
+        var out: [MBReleaseTrack] = []
+        for t in detail.tracks?.data ?? [] {
+            guard let title = t.title, !title.isEmpty else { continue }
+            out.append(MBReleaseTrack(disc: max(1, t.disk_number ?? 1), track: t.track_position ?? (out.count + 1),
+                                      title: title, lengthMs: t.duration.map { $0 * 1000 }))
+        }
+        guard !out.isEmpty, overlap(out, want) >= 0.6 else { return nil }
+        return MBReleaseMatch(id: "deezer:\(id)", title: detail.title ?? album, date: detail.release_date,
+                              discCount: max(1, out.map { $0.disc }.max() ?? 1), tracks: out)
+    }
+
+    /// Find the best-matching Deezer album for artist+title (shared by reconcile).
+    private func deezerAlbum(artist: String, album: String) async -> DeezerAlbum? {
+        let q = "artist:\"\(artist)\" album:\"\(album)\""
+        guard let enc = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://api.deezer.com/search/album?q=\(enc)&limit=10"),
+              let search: DeezerSearch = await getDeezer(url) else { return nil }
+        let wantAlbum = TrackProposal.typoFold(album).lowercased()
+        let wantArtist = TrackProposal.typoFold(artist).lowercased()
+        return (search.data ?? []).max { a, b in
+            func score(_ x: DeezerAlbum) -> Int {
+                let cn = TrackProposal.typoFold(x.title ?? "").lowercased()
+                let an = TrackProposal.typoFold(x.artist?.name ?? "").lowercased()
+                let al = cn == wantAlbum ? 2 : (cn.contains(wantAlbum) || wantAlbum.contains(cn) ? 1 : 0)
+                let ar = !wantArtist.isEmpty && (an == wantArtist || an.contains(wantArtist) || wantArtist.contains(an)) ? 1 : 0
+                return al > 0 && ar > 0 ? al + ar : 0
+            }
+            return score(a) < score(b)
+        }.flatMap { alb in
+            // require a real match, not just "the first album Deezer returned"
+            let cn = TrackProposal.typoFold(alb.title ?? "").lowercased()
+            let an = TrackProposal.typoFold(alb.artist?.name ?? "").lowercased()
+            let al = cn == wantAlbum || cn.contains(wantAlbum) || wantAlbum.contains(cn)
+            let ar = wantArtist.isEmpty || an == wantArtist || an.contains(wantArtist) || wantArtist.contains(an)
+            return (al && ar) ? alb : nil
+        }
+    }
+
+    // Deezer: no key, generous limits — a light pause is enough.
+    private func getDeezer<T: Decodable>(_ url: URL) async -> T? {
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        var req = URLRequest(url: url)
+        req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        guard let (data, _) = try? await session.data(for: req) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    // Discogs: reuse the same token + UA + pacing as the credits path.
+    private func getDiscogs<T: Decodable>(_ url: URL) async -> T? {
+        discogsRequests += 1
+        try? await Task.sleep(nanoseconds: discogsToken.isEmpty ? 2_500_000_000 : 1_050_000_000)
+        var req = URLRequest(url: url)
+        req.setValue(discogsUA, forHTTPHeaderField: "User-Agent")
+        if !discogsToken.isEmpty { req.setValue("Discogs token=\(discogsToken)", forHTTPHeaderField: "Authorization") }
+        guard let (data, _) = try? await session.data(for: req) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
     }
 
     /// Credits for an ENTIRE album in ~2 requests instead of one-per-track. Picks
@@ -859,6 +1065,72 @@ actor CoverArtClient {
         }
         for mbid in releaseMBIDs { if let d = await frontCover(releaseMBID: mbid) { add(d) } }
         for d in await itunesCovers(artist: artist, album: album) { add(d) }
+        for d in await deezerCovers(artist: artist, album: album) { add(d) }
+        for d in await discogsCovers(artist: artist, album: album) { add(d) }
+        return out
+    }
+
+    /// Deezer album cover (cover_xl, ~1000px). No key. Only the best title+artist
+    /// match, so we never grab another album's art.
+    func deezerCovers(artist: String, album: String, limit: Int = 3) async -> [Data] {
+        guard !album.isEmpty else { return [] }
+        let q = "artist:\"\(artist)\" album:\"\(album)\""
+        guard let enc = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://api.deezer.com/search/album?q=\(enc)&limit=10") else { return [] }
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        guard let (data, resp) = try? await session.data(from: url),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let search = try? JSONDecoder().decode(DeezerSearch.self, from: data) else { return [] }
+        let wantAlbum = TrackProposal.typoFold(album).lowercased()
+        let wantArtist = TrackProposal.typoFold(artist).lowercased()
+        var out: [Data] = []
+        for alb in search.data ?? [] {
+            let cn = TrackProposal.typoFold(alb.title ?? "").lowercased()
+            let an = TrackProposal.typoFold(alb.artist?.name ?? "").lowercased()
+            let al = cn == wantAlbum || cn.contains(wantAlbum) || wantAlbum.contains(cn)
+            let ar = wantArtist.isEmpty || an == wantArtist || an.contains(wantArtist) || wantArtist.contains(an)
+            guard al, ar, let cover = alb.cover_xl, let cu = URL(string: cover) else { continue }
+            if let (d, ir) = try? await session.data(from: cu),
+               (ir as? HTTPURLResponse)?.statusCode == 200, !d.isEmpty { out.append(d) }
+            if out.count >= limit { break }
+        }
+        return out
+    }
+
+    /// Discogs release cover (primary image), for the comps/box-sets the other
+    /// services miss. Needs the user's Discogs token (Settings) — skipped without it.
+    func discogsCovers(artist: String, album: String, limit: Int = 2) async -> [Data] {
+        let token = APIKeys.discogs
+        guard !token.isEmpty, !album.isEmpty else { return [] }
+        let ua = "MusicLibrarian/1.4 +https://github.com/peanutslab71/music-librarian"
+        var comps = URLComponents(string: "https://api.discogs.com/database/search")!
+        comps.queryItems = [.init(name: "type", value: "release"),
+                            .init(name: "artist", value: artist),
+                            .init(name: "release_title", value: album)]
+        func fetch(_ url: URL) async -> Data? {
+            try? await Task.sleep(nanoseconds: 1_050_000_000)
+            var req = URLRequest(url: url)
+            req.setValue(ua, forHTTPHeaderField: "User-Agent")
+            req.setValue("Discogs token=\(token)", forHTTPHeaderField: "Authorization")
+            guard let (d, r) = try? await session.data(for: req),
+                  (r as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            return d
+        }
+        guard let searchURL = comps.url, let sd = await fetch(searchURL),
+              let search = try? JSONDecoder().decode(DiscogsSearch.self, from: sd) else { return [] }
+        var out: [Data] = []
+        for hit in (search.results ?? []).prefix(limit) {
+            guard let id = hit.id, let url = URL(string: "https://api.discogs.com/releases/\(id)"),
+                  let rd = await fetch(url),
+                  let rel = try? JSONDecoder().decode(DiscogsReleaseFull.self, from: rd) else { continue }
+            let imgs = rel.images ?? []
+            let pick = imgs.first(where: { $0.type == "primary" }) ?? imgs.first
+            guard let uri = pick?.uri, let iu = URL(string: uri) else { continue }
+            var ireq = URLRequest(url: iu)
+            ireq.setValue(ua, forHTTPHeaderField: "User-Agent")
+            if let (d, ir) = try? await session.data(for: ireq),
+               (ir as? HTTPURLResponse)?.statusCode == 200, !d.isEmpty { out.append(d) }
+        }
         return out
     }
 
@@ -914,6 +1186,8 @@ actor CoverArtClient {
             if let (d, ir) = try? await session.data(from: u),
                (ir as? HTTPURLResponse)?.statusCode == 200, !d.isEmpty { await onEach(d) }
         }
+        for d in await deezerCovers(artist: artist, album: album) { await onEach(d) }
+        for d in await discogsCovers(artist: artist, album: album) { await onEach(d) }
     }
 
     /// Apple iTunes Search artwork (no key; ~20 req/min). Upsizes the 100px thumb

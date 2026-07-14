@@ -1664,16 +1664,17 @@ enum AlbumPerfect {
                                   lines: damagedLines, enabled: false, applyable: false))
         }
 
-        // ---- 7. Missing tracks — reconcile against MusicBrainz (network). Runs as part
-        // of the Perfect check so the result is remembered on Apply and the inspector can
-        // keep showing the gaps. Declines rather than guess when nothing matches.
+        // ---- 7. Missing tracks — reconcile across MusicBrainz, Discogs and Deezer
+        // (network). Runs as part of the Perfect check so the result is remembered on
+        // Apply and the inspector can keep showing the gaps. The richest tracklist that
+        // fits the folder wins; declines rather than guess when nothing matches.
         // Skip when the album's already been reconciled (result saved + shown in the
         // inspector) — no point re-fetching and re-listing it every time Perfect opens.
         var reconcile: MBReleaseMatch? = nil
         let discCount = max(1, Set(kept.map { $0.discNo == 0 ? 1 : $0.discNo }).count)
         if !alreadyReconciled,
-           let match = await MusicBrainzClient().matchRelease(artist: art.artist, album: art.album,
-                                                              haveTitles: kept.map { $0.title }, discCount: discCount) {
+           let match = await MusicBrainzClient().bestRelease(artist: art.artist, album: art.album,
+                                                             haveTitles: kept.map { $0.title }, discCount: discCount) {
             reconcile = match
             let haveFolded = Set(kept.map { TrackProposal.typoFold($0.title).lowercased() })
             let missing = match.tracks
