@@ -791,6 +791,14 @@ final class PerfectStore: ObservableObject {
         organise()
     }
 
+    /// Generic album titles shared by many unrelated artists — NOT evidence of a
+    /// compilation, and a hint that same-titled albums by different artists are really
+    /// separate releases (used by both compilation detection and credit grouping).
+    nonisolated static let genericAlbumTitles: Set<String> = [
+        "greatest hits", "the greatest hits", "hits", "live", "best of",
+        "the best of", "collection", "the collection", "compilation",
+        "essential", "the essential", "gold", "anthology"]
+
     /// Flag-less compilation candidates: an album title shared by ≥2 distinct artists
     /// with NO album-artist on any track, non-generic name. Flagged albums are marked
     /// flagged=true (auto). For the Organise step's confirmation list.
@@ -808,11 +816,8 @@ final class PerfectStore: ObservableObject {
             if t.isCompilation { acc.anyFlag = true }
             by[key] = acc
         }
-        let generic: Set<String> = ["greatest hits", "the greatest hits", "hits", "live", "best of",
-                                    "the best of", "collection", "the collection", "compilation",
-                                    "essential", "the essential", "gold", "anthology"]
         return by.compactMap { (key, acc) -> CompilationCandidate? in
-            let heuristic = acc.artists.count >= 2 && !acc.anyAA && !generic.contains(key)
+            let heuristic = acc.artists.count >= 2 && !acc.anyAA && !Self.genericAlbumTitles.contains(key)
             guard heuristic || acc.anyFlag else { return nil }
             return CompilationCandidate(id: key, album: acc.album, artists: Array(acc.artists).sorted(),
                                         trackCount: acc.count, flagged: acc.anyFlag)
@@ -1619,17 +1624,37 @@ final class PerfectStore: ObservableObject {
                                 artist: p.newArtist.isEmpty ? p.curArtist : p.newArtist,
                                 album: p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum)
         }
-        // Group by album TAG (artist + album), not folder — so it batches even when
-        // an album's tracks are loose or one-per-folder. One release lookup then
-        // covers the whole album. Tracks with no album tag can't be grouped, so
-        // each gets a unique key and takes the direct per-track path. Order is
-        // preserved so the feed still moves top-to-bottom.
+        // Group by album so ONE release lookup covers the whole album — including a
+        // VARIOUS-ARTISTS compilation, whose tracks have different artists but share an
+        // album. (Grouping by artist+album used to fragment a compilation into singles,
+        // so it never batched and missed the album-wide credits per-album Perfect finds.)
+        // The exception: a GENERIC title shared by ≥2 artists ("Greatest Hits", "Live")
+        // is usually two different albums colliding, so those sub-split by artist to
+        // avoid seeding one from the other's release. Tracks with no album tag stay
+        // single. Order is preserved so the feed still moves top-to-bottom.
         var order: [String] = []
         var groups: [String: [EnrichTarget]] = [:]
+        var albumOrder: [String] = []
+        var byAlbum: [String: [EnrichTarget]] = [:]
         for (i, t) in targets.enumerated() {
-            let key = t.album.isEmpty ? "single#\(i)" : Self.foldKey(t.artist) + "|" + Self.foldKey(t.album)
-            if groups[key] == nil { order.append(key) }
-            groups[key, default: []].append(t)
+            let key = t.album.isEmpty ? "single#\(i)" : "alb|" + Self.foldKey(t.album)
+            if byAlbum[key] == nil { albumOrder.append(key) }
+            byAlbum[key, default: []].append(t)
+        }
+        for key in albumOrder {
+            let ts = byAlbum[key]!
+            let distinctArtists = Set(ts.map { Self.foldKey($0.artist) }.filter { !$0.isEmpty })
+            let albumFold = key.hasPrefix("alb|") ? String(key.dropFirst(4)) : ""
+            if distinctArtists.count >= 2 && Self.genericAlbumTitles.contains(albumFold) {
+                for t in ts {                                   // ambiguous generic title → keep artists apart
+                    let sk = key + "|" + Self.foldKey(t.artist)
+                    if groups[sk] == nil { order.append(sk) }
+                    groups[sk, default: []].append(t)
+                }
+            } else {                                            // real album (incl. VA compilation) → one group
+                order.append(key)
+                groups[key] = ts
+            }
         }
         let total = targets.count
         Self.creditsLog("=== Credits run: \(total) tracks in \(order.count) album-group(s) ===", reset: true)
