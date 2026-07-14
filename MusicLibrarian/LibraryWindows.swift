@@ -358,6 +358,33 @@ struct MergeAlbumsSheet: View {
     }
 }
 
+/// Remembers the MusicBrainz tracklist a "Perfect this album" run matched, so the
+/// inspector can keep showing which tracks are missing after the dialog closes. Kept
+/// in Application Support keyed by the album folder path (the files themselves have
+/// nothing to write for a track that isn't there), so the music folder stays clean.
+enum AlbumReconcileStore {
+    private static func hash(_ s: String) -> String {
+        var h: UInt64 = 5381; for b in s.utf8 { h = (h &* 33) &+ UInt64(b) }; return String(h, radix: 16)
+    }
+    private static func file(_ folderPath: String) -> URL? {
+        let fm = FileManager.default
+        guard let base = try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                     appropriateFor: nil, create: true) else { return nil }
+        let dir = base.appendingPathComponent("Music Librarian/album-tracklists", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(hash(folderPath)).json")
+    }
+    static func save(_ folderPath: String, _ match: MBReleaseMatch) {
+        guard let u = file(folderPath), let d = try? JSONEncoder().encode(match) else { return }
+        try? d.write(to: u)
+    }
+    static func load(_ folderPath: String) -> MBReleaseMatch? {
+        guard let u = file(folderPath), let d = try? Data(contentsOf: u) else { return nil }
+        return try? JSONDecoder().decode(MBReleaseMatch.self, from: d)
+    }
+    static func clear(_ folderPath: String) { if let u = file(folderPath) { try? FileManager.default.removeItem(at: u) } }
+}
+
 /// One row in the inspector's track list: a track we have (playable/editable) or a
 /// greyed placeholder for a track the album should contain but is missing.
 private enum InspectorRow: Identifiable {
@@ -394,8 +421,7 @@ struct LibraryAlbumSheet: View {
     @State private var albumArtist = ""
     @State private var confirmDeleteAlbum = false
     @State private var showPerfect = false
-    @State private var expected: MBReleaseMatch?   // MusicBrainz tracklist, once reconciled
-    @State private var reconciling = false
+    @State private var expected: MBReleaseMatch?   // MusicBrainz tracklist, loaded from the Perfect run's saved result
     @State private var reconcileNote: String?
 
     private var selected: Track? { tracks.first { $0.id == selectedID } }
@@ -466,12 +492,6 @@ struct LibraryAlbumSheet: View {
                     Button { showPerfect = true } label: { Label("Perfect this album", systemImage: "wand.and.stars") }
                         .controlSize(.small).tint(.purple)
                         .help("One-shot cleanup for this album: consistent tags, unified cover art, remove duplicates, tidy file names.")
-                    Button { reconcile() } label: {
-                        if reconciling { ProgressView().controlSize(.small).scaleEffect(0.7) }
-                        else { Label("Check for missing tracks", systemImage: "checklist") }
-                    }
-                    .controlSize(.small).disabled(reconciling)
-                    .help("Look this album up on MusicBrainz and grey out any tracks that are missing")
                     Spacer()
                     if albumDetailsDirty {
                         Button("Save details") { saveAlbumDetails() }.controlSize(.small).tint(.teal)
@@ -594,34 +614,25 @@ struct LibraryAlbumSheet: View {
                 .foregroundStyle(expected != nil ? Color.teal : Color.orange)
             Text(note).font(.caption).foregroundStyle(.secondary)
             Spacer()
-            Button { expected = nil; reconcileNote = nil } label: {
+            Button { expected = nil; reconcileNote = nil; AlbumReconcileStore.clear(album.id) } label: {
                 Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
-            }.buttonStyle(.plain).help("Dismiss")
+            }.buttonStyle(.plain).help("Stop tracking missing tracks for this album")
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .background(Color.secondary.opacity(0.06))
     }
 
-    private func reconcile() {
-        reconciling = true; reconcileNote = nil; expected = nil
-        let artist = albumArtist.isEmpty ? album.artist : albumArtist
-        let alb = albumName.isEmpty ? album.album : albumName
-        let haveTitles = tracks.map { $0.title }
-        let discCount = max(1, Set(tracks.map { $0.discNo == 0 ? 1 : $0.discNo }).count)
-        Task {
-            let match = await MusicBrainzClient().matchRelease(artist: artist, album: alb,
-                                                               haveTitles: haveTitles, discCount: discCount)
-            await MainActor.run {
-                reconciling = false
-                if let m = match {
-                    expected = m
-                    let yr = m.date.flatMap { $0.isEmpty ? nil : " (\($0.prefix(4)))" } ?? ""
-                    reconcileNote = "Matched “\(m.title)”\(yr) — you have \(tracks.count) of \(m.tracks.count) tracks"
-                } else {
-                    reconcileNote = "Couldn't identify the exact edition — showing your tracks only."
-                }
-            }
-        }
+    /// Load the tracklist a Perfect run matched + saved for this album, so the missing
+    /// tracks keep showing after the dialog is reopened. No network here.
+    private func loadReconcile() {
+        guard let m = AlbumReconcileStore.load(album.id) else { expected = nil; reconcileNote = nil; return }
+        expected = m
+        let have = Set(tracks.map { TrackProposal.typoFold($0.title).lowercased() })
+        let missing = m.tracks.filter { !have.contains(TrackProposal.typoFold($0.title).lowercased()) }.count
+        let yr = m.date.flatMap { $0.isEmpty ? nil : " (\($0.prefix(4)))" } ?? ""
+        reconcileNote = missing > 0
+            ? "Missing \(missing) of \(m.tracks.count) tracks from “\(m.title)”\(yr)"
+            : "All \(m.tracks.count) tracks present — “\(m.title)”\(yr)"
     }
 
     private func trackRow(_ t: Track) -> some View {
@@ -867,6 +878,7 @@ struct LibraryAlbumSheet: View {
             await MainActor.run {
                 tracks = sorted; extras = ex; artless = noArt; loading = false
                 if albumName.isEmpty { albumName = album.album }; if albumArtist.isEmpty { albumArtist = album.artist }
+                loadReconcile()   // show missing tracks a Perfect run found + saved
                 done?()
             }
         }
@@ -1302,6 +1314,7 @@ struct AlbumFix: Identifiable {
         case artwork = "Cover art"
         case duplicate = "Duplicates"
         case filename = "File names"
+        case missing = "Missing tracks"
         case damaged = "Possibly damaged"
     }
     let id = UUID()
@@ -1324,6 +1337,7 @@ struct AlbumFix: Identifiable {
         case .artwork: return "photo"
         case .duplicate: return "doc.on.doc"
         case .filename: return "character.cursor.ibeam"
+        case .missing: return "circle.dotted"
         case .damaged: return "exclamationmark.triangle"
         }
     }
@@ -1366,7 +1380,7 @@ enum AlbumPerfect {
         return (d, pixels, mime)
     }
 
-    static func analyze(root: URL, files: [URL]) async -> (fixes: [AlbumFix], art: AlbumArtContext) {
+    static func analyze(root: URL, files: [URL]) async -> (fixes: [AlbumFix], art: AlbumArtContext, reconcile: MBReleaseMatch?) {
         // Read every track's tags (bounded concurrency, same as the inspector).
         var tracks = [Track](repeating: Track(id: 0, url: root, name: "", relDir: "", size: 0, ext: "",
                                               title: "", artist: "", album: "", albumArtist: "",
@@ -1458,7 +1472,7 @@ enum AlbumPerfect {
         let fallbackAlbum = files.first?.deletingLastPathComponent().lastPathComponent ?? ""
         let kept = tracks.filter { !removed.contains(rel($0.url)) }
         guard !kept.isEmpty else {
-            return (fixes, AlbumArtContext(artist: "", album: fallbackAlbum, rels: [], relArt: [:], ownCovers: []))
+            return (fixes, AlbumArtContext(artist: "", album: fallbackAlbum, rels: [], relArt: [:], ownCovers: []), nil)
         }
 
         // ---- 2. Album name consensus.
@@ -1607,7 +1621,27 @@ enum AlbumPerfect {
                                   lines: damagedLines, enabled: false, applyable: false))
         }
 
-        return (fixes, art)
+        // ---- 7. Missing tracks — reconcile against MusicBrainz (network). Runs as part
+        // of the Perfect check so the result is remembered on Apply and the inspector can
+        // keep showing the gaps. Declines rather than guess when nothing matches.
+        var reconcile: MBReleaseMatch? = nil
+        let discCount = max(1, Set(kept.map { $0.discNo == 0 ? 1 : $0.discNo }).count)
+        if let match = await MusicBrainzClient().matchRelease(artist: art.artist, album: art.album,
+                                                              haveTitles: kept.map { $0.title }, discCount: discCount) {
+            reconcile = match
+            let haveFolded = Set(kept.map { TrackProposal.typoFold($0.title).lowercased() })
+            let missing = match.tracks
+                .filter { !haveFolded.contains(TrackProposal.typoFold($0.title).lowercased()) }
+                .sorted { ($0.disc, $0.track) < ($1.disc, $1.track) }
+            if !missing.isEmpty {
+                let lines = missing.map { "Disc \($0.disc) · \($0.track). \($0.title)" }
+                fixes.append(AlbumFix(kind: .missing,
+                                      summary: "\(missing.count) of \(match.tracks.count) tracks missing from “\(match.title)” — kept so the album shows the gaps",
+                                      lines: lines, enabled: false, applyable: false))
+            }
+        }
+
+        return (fixes, art, reconcile)
     }
 }
 
@@ -1629,6 +1663,7 @@ struct PerfectAlbumSheet: View {
     @State private var coversLoading = false
     @State private var loading = true
     @State private var applying = false
+    @State private var reconcile: MBReleaseMatch?   // matched tracklist, saved on Apply
 
     private var applyable: [AlbumFix] { fixes.filter { $0.applyable && $0.enabled } }
 
@@ -1709,7 +1744,8 @@ struct PerfectAlbumSheet: View {
                 ProgressView().controlSize(.small)
                 Text("Applying…").foregroundStyle(.secondary).font(.callout)
             } else if !fixes.isEmpty {
-                Text(totalChanges == 0 ? "Nothing selected"
+                Text(totalChanges == 0
+                     ? (reconcile != nil ? "Save the tracklist so missing tracks stay shown" : "Nothing selected")
                      : "\(totalChanges) change\(totalChanges == 1 ? "" : "s") selected · reversible from Runs")
                     .font(.callout).foregroundStyle(.secondary)
             }
@@ -1718,7 +1754,7 @@ struct PerfectAlbumSheet: View {
             Button("Apply") { apply() }
                 .buttonStyle(.borderedProminent).tint(.teal)
                 .keyboardShortcut(.defaultAction)
-                .disabled(applying || totalChanges == 0)
+                .disabled(applying || (totalChanges == 0 && reconcile == nil))
         }
         .padding(14)
     }
@@ -1767,9 +1803,9 @@ struct PerfectAlbumSheet: View {
         loading = true
         let root = self.root, files = album.files
         Task {
-            let (result, ctx) = await AlbumPerfect.analyze(root: root, files: files)
+            let (result, ctx, rec) = await AlbumPerfect.analyze(root: root, files: files)
             await MainActor.run {
-                fixes = result; art = ctx
+                fixes = result; art = ctx; reconcile = rec
                 selectedCover = ctx.ownCovers.first   // default: the album's best own cover
                 loading = false
             }
@@ -1783,9 +1819,13 @@ struct PerfectAlbumSheet: View {
     }
 
     private func apply() {
-        guard totalChanges > 0 else { return }
-        let chosen = applyable
+        let hasChanges = totalChanges > 0
+        guard hasChanges || reconcile != nil else { return }
+        // remember the matched tracklist so the inspector keeps showing missing tracks
+        if let r = reconcile { AlbumReconcileStore.save(album.id, r) }
+        guard hasChanges else { dismiss(); onApplied(); return }   // reconcile-only: nothing to write
         applying = true
+        let chosen = applyable
         let tagWrites = chosen.flatMap { $0.tagWrites }
         let moves = chosen.flatMap { $0.moves }
         let embeds = chosen.flatMap { $0.artEmbeds } + artEmbeds   // checklist art (none now) + the chosen cover

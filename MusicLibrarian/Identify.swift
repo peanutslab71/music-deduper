@@ -469,8 +469,8 @@ private struct MBLabelInfo: Decodable {
 
 // Reconcile: the full per-disc tracklist of a release, so a folder can be checked
 // against what the album SHOULD contain (missing-track detection).
-struct MBReleaseTrack: Sendable { let disc: Int; let track: Int; let title: String; let lengthMs: Int? }
-struct MBReleaseMatch: Sendable { let id: String; let title: String; let date: String?; let discCount: Int; let tracks: [MBReleaseTrack] }
+struct MBReleaseTrack: Sendable, Codable { let disc: Int; let track: Int; let title: String; let lengthMs: Int? }
+struct MBReleaseMatch: Sendable, Codable { let id: String; let title: String; let date: String?; let discCount: Int; let tracks: [MBReleaseTrack] }
 
 private struct MBSearchResult: Decodable { let releases: [MBSearchRelease]? }
 private struct MBSearchRelease: Decodable {
