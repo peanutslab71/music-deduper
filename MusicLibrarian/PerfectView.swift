@@ -869,6 +869,7 @@ struct PerfectView: View {
                 if step == 2 || step == 7 { nameChangeSummary }
                 if step == 2 || step == 3 { identifiedNote }
                 if step == 7 && !store.artworkNeedsReview.isEmpty { artworkReviewSection }
+                if step == 7 { anyAlbumArtworkDisclosure }
                 if visibleAlbums.isEmpty && !store.identifying && !store.enriching {
                     emptyStageNote
                 }
@@ -958,9 +959,27 @@ struct PerfectView: View {
         }
     }
 
-    // All albums (from the current proposals), so any one can be opened for a
-    // cover change — not just the auto-flagged ones.
+    // EVERY album the scan found (folder-based), so any one can be opened for a cover
+    // change — not just the AcoustID-matched ones. Where identify corrected an album's
+    // name, that name is shown; unidentified albums show by their folder. This is what
+    // lets you fix a cover that's present but wrong on an album we never matched.
     private var artAlbumGroups: [(artist: String, album: String, files: [String])] {
+        // corrected names by folder, from proposals (best label when we have it)
+        var nameByFolder: [String: (artist: String, album: String)] = [:]
+        for p in store.proposals {
+            let folder = p.url.deletingLastPathComponent().path
+            let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
+            let album = Organiser.stripDiscSuffix(p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum).clean
+            if !album.isEmpty, nameByFolder[folder] == nil { nameByFolder[folder] = (artist, album) }
+        }
+        // base = all scanned album folders; fall back to proposals only if a scan
+        // hasn't populated the list (e.g. an identify-only path)
+        if !store.scannedAlbums.isEmpty {
+            return store.scannedAlbums.map { a in
+                let named = nameByFolder[a.id]
+                return (named?.artist ?? a.artist, named?.album ?? a.album, a.files)
+            }.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+        }
         var byAlbum: [String: (artist: String, album: String, files: [String])] = [:]
         for p in store.proposals {
             let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
@@ -971,6 +990,25 @@ struct PerfectView: View {
             byAlbum[key] = e
         }
         return byAlbum.values.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+    }
+
+    /// On the final Review: spotted a cover that's wrong (even one that's present)?
+    /// Every album is here — pick it to choose a new cover, identified or not.
+    @ViewBuilder private var anyAlbumArtworkDisclosure: some View {
+        let groups = artAlbumGroups
+        if !groups.isEmpty {
+            DisclosureGroup {
+                artworkAllAlbumsGrid.padding(.top, 6)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "photo.on.rectangle.angled").foregroundStyle(.secondary)
+                    Text("Change a cover on any album (\(groups.count))").font(.callout)
+                    Text("including ones with a cover that's just wrong").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.05)))
+        }
     }
 
     private var artworkAllAlbumsGrid: some View {

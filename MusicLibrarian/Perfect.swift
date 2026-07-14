@@ -200,6 +200,16 @@ struct ArtworkReviewItem: Identifiable {
     var mbids: [String] = [] // release MBIDs (from identify), for Cover Art Archive lookups
 }
 
+/// One album folder found by the scan. Derived from the folder layout
+/// (…/Artist/Album/track) so it exists for EVERY album, identified or not — the
+/// Artwork step uses it to let you replace any cover, even one that's present but wrong.
+struct ScannedAlbum: Identifiable {
+    let id: String          // album folder path
+    let artist: String      // grandparent folder name
+    let album: String       // parent folder name
+    let files: [String]     // root-relative track paths
+}
+
 /// One album a Perfect run found to be incomplete: what release it matched and how
 /// many of its tracks are absent. The full matched tracklist is persisted per album
 /// folder so the Album Inspector can grey out the missing rows afterwards.
@@ -622,6 +632,9 @@ final class PerfectStore: ObservableObject {
     private var chainTags = false
     @Published var progress = ""
     @Published var findings: [PerfectFinding] = []
+    // Every album folder found by the scan (Artist/Album/track layout), so the Artwork
+    // step can offer a cover change on ANY album — not only the ones AcoustID matched.
+    @Published var scannedAlbums: [ScannedAlbum] = []
     @Published var renames: [RenameProposal] = []
     // one artist-centric list, folding folder merges and tag fixes together
     @Published var artists: [ArtistIssue] = []
@@ -639,7 +652,7 @@ final class PerfectStore: ObservableObject {
     /// Reset the whole Perfect wizard back to the choose-a-library screen.
     func resetWizard() {
         showCompletionSummary = false
-        proposals = []; findings = []; artists = []; renames = []
+        proposals = []; findings = []; artists = []; renames = []; scannedAlbums = []
         diagnosed = false; didIdentify = false; enriched = false; wizardStep = 1
         artworkStagePlanned = false; artworkStageDone = false; artworkNeedsReview = []
         ArtworkChoices.shared.clearAll()
@@ -1073,6 +1086,7 @@ final class PerfectStore: ObservableObject {
             // (anywhere below) so we can flag the truly-empty ones afterwards.
             var dirHasContent = Set<String>()
             var allDirs: [URL] = []
+            var audioByFolder: [String: [URL]] = [:]   // album folder path → its audio files
 
             if let en = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
                                       options: []) {
@@ -1097,6 +1111,9 @@ final class PerfectStore: ObservableObject {
                         p = p.deletingLastPathComponent()
                     }
 
+                    if Self.isAudio(u) {
+                        audioByFolder[u.deletingLastPathComponent().path, default: []].append(u)
+                    }
                     if let junkReason = Self.junkReason(u) {
                         found.append(PerfectFinding(kind: .junk, url: u, relPath: rel,
                                                     detail: junkReason, bytes: size, accepted: true))
@@ -1167,9 +1184,21 @@ final class PerfectStore: ObservableObject {
                 return true
             }
 
+            // one entry per album folder (…/Artist/Album/track), for the Artwork step's
+            // "change any cover" grid — covers albums AcoustID never matched.
+            let albums: [ScannedAlbum] = audioByFolder.compactMap { (folder, urls) in
+                guard folder != root.path else { return nil }   // loose files at the top aren't an album
+                let dir = URL(fileURLWithPath: folder)
+                if dir.lastPathComponent == "Music Librarian Quarantine" { return nil }
+                return ScannedAlbum(id: folder,
+                                    artist: dir.deletingLastPathComponent().lastPathComponent,
+                                    album: dir.lastPathComponent,
+                                    files: urls.map { Self.rel($0, root) })
+            }.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+
             let (ff, fo, fb) = (files, folders, bytes)
             let fg = folderGroups
-            await self.finishDiagnose(found: found, folderGroups: fg,
+            await self.finishDiagnose(found: found, folderGroups: fg, albums: albums,
                                       renames: filteredRenames.sorted { $0.relPath.lowercased() < $1.relPath.lowercased() },
                                       files: ff, folders: fo, bytes: fb, cancelled: box.cancelled)
         }
@@ -1178,9 +1207,10 @@ final class PerfectStore: ObservableObject {
     private func setProgress(_ s: String) { progress = s }
 
     private func finishDiagnose(found: [PerfectFinding], folderGroups fg: [FolderGroup],
-                               renames r: [RenameProposal],
+                               albums: [ScannedAlbum], renames r: [RenameProposal],
                                files: Int, folders: Int, bytes: Int64, cancelled: Bool) {
         findings = found.sorted { $0.relPath.lowercased() < $1.relPath.lowercased() }
+        if !cancelled { scannedAlbums = albums }
         // gate by thoroughness (junk/empties/DRM always; renames Standard+; merges Thorough)
         folderGroups = fg
         renames = thoroughness.doesRenames ? r : []
