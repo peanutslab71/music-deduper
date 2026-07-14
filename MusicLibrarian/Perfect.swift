@@ -2801,6 +2801,7 @@ final class PerfectStore: ObservableObject {
                     if dupKeys {
                         let slotByTitle = Dictionary(match.tracks.map { (TrackProposal.typoFold($0.title).lowercased(), $0) },
                                                      uniquingKeysWith: { a, _ in a })
+                        let multiDisc = match.discCount > 1
                         for t in tracks {
                             if box.cancelled { break }
                             guard let slot = slotByTitle[TrackProposal.typoFold(t.title).lowercased()] else { continue }
@@ -2812,6 +2813,15 @@ final class PerfectStore: ObservableObject {
                             if t.trackNo != slot.track {
                                 do { try Self.writeField(t.url, "track", to: String(slot.track))
                                      tagEdits.append((rel, "track", t.trackNo == 0 ? "" : String(t.trackNo))) } catch {}
+                            }
+                            // Rename the file to match the corrected numbers IN THE SAME RUN, so
+                            // the on-disk name and the tag agree (no second Perfect pass needed).
+                            let prefix = multiDisc ? "\(slot.disc)-\(Organiser.pad2(slot.track))" : Organiser.pad2(slot.track)
+                            let newName = "\(prefix) \(Organiser.safe(t.title)).\(t.url.pathExtension)"
+                            if newName != t.url.lastPathComponent {
+                                let parent = (rel as NSString).deletingLastPathComponent
+                                let toRel = parent.isEmpty ? newName : parent + "/" + newName
+                                if move(rel, toRel) { log += "RENAMED (disc-fix): \(rel) → \(toRel)\n" }
                             }
                         }
                     }

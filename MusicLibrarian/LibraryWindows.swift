@@ -1494,7 +1494,7 @@ enum AlbumPerfect {
         }
 
         let fallbackAlbum = files.first?.deletingLastPathComponent().lastPathComponent ?? ""
-        let kept = tracks.filter { !removed.contains(rel($0.url)) }
+        var kept = tracks.filter { !removed.contains(rel($0.url)) }
         guard !kept.isEmpty else {
             return (fixes, AlbumArtContext(artist: "", album: fallbackAlbum, rels: [], relArt: [:], ownCovers: []), nil)
         }
@@ -1683,6 +1683,62 @@ enum AlbumPerfect {
                                   album: dominantAlbum.isEmpty ? fallbackAlbum : dominantAlbum,
                                   rels: kept.map { rel($0.url) }, relArt: relArt, ownCovers: ownCovers)
 
+        // ---- 4b. Reconcile against the matched release, and correct broken disc/track
+        // tags BEFORE the file-name tidy below — so ONE Apply fixes both the tags and the
+        // names. Uses a saved match when present (no re-fetch, no re-listing the gaps);
+        // otherwise reconciles a real album (4+ tracks) across MusicBrainz/Discogs/Deezer.
+        var reconcile: MBReleaseMatch? = nil
+        let discCount = max(1, Set(kept.map { $0.discNo == 0 ? 1 : $0.discNo }).count)
+        let match: MBReleaseMatch?
+        if let cached = reconciledMatch {
+            match = cached
+        } else if kept.count >= 4 {
+            match = await MusicBrainzClient().bestRelease(artist: art.artist, album: art.album,
+                                                          haveTitles: kept.map { $0.title }, discCount: discCount)
+            reconcile = match
+        } else {
+            match = nil
+        }
+        if let match = match {
+            if reconcile != nil {   // list the gaps only on a fresh reconcile (else it's noise)
+                let haveFolded = Set(kept.map { TrackProposal.typoFold($0.title).lowercased() })
+                let missing = match.tracks
+                    .filter { !haveFolded.contains(TrackProposal.typoFold($0.title).lowercased()) }
+                    .sorted { ($0.disc, $0.track) < ($1.disc, $1.track) }
+                if !missing.isEmpty {
+                    let lines = missing.map { "Disc \($0.disc) · \($0.track). \($0.title)" }
+                    fixes.append(AlbumFix(kind: .missing,
+                                          summary: "\(missing.count) of \(match.tracks.count) tracks missing from “\(match.title)” — kept so the album shows the gaps",
+                                          lines: lines, enabled: false, applyable: false))
+                }
+            }
+            // Correct disc & track FROM the release when the on-disk tags are broken (a
+            // flattened set with duplicate (disc,track) keys — every track wrongly tagged one
+            // disc). Update the in-memory tracks too so the file-name tidy below uses the
+            // corrected numbers. Authoritative source = the release, not a guess.
+            let dupKeys = Dictionary(grouping: kept, by: { $0.discNo * 1000 + $0.trackNo }).contains { $0.value.count > 1 }
+            if dupKeys {
+                let slotByTitle = Dictionary(match.tracks.map { (TrackProposal.typoFold($0.title).lowercased(), $0) },
+                                             uniquingKeysWith: { a, _ in a })
+                var writes: [(rel: String, field: String, value: String)] = []
+                var lines: [String] = []
+                for i in kept.indices {
+                    guard let slot = slotByTitle[TrackProposal.typoFold(kept[i].title).lowercased()] else { continue }
+                    let discChanged = kept[i].discNo != slot.disc, trackChanged = kept[i].trackNo != slot.track
+                    guard discChanged || trackChanged else { continue }
+                    if discChanged { writes.append((rel(kept[i].url), "disc", String(slot.disc))) }
+                    if trackChanged { writes.append((rel(kept[i].url), "track", String(slot.track))) }
+                    lines.append("“\(kept[i].title)” → disc \(slot.disc), track \(slot.track)")
+                    kept[i].discNo = slot.disc; kept[i].trackNo = slot.track
+                }
+                if !writes.isEmpty {
+                    fixes.append(AlbumFix(kind: .discOrder,
+                                          summary: "Fix disc & track numbers from “\(match.title)” (\(lines.count) track\(lines.count == 1 ? "" : "s"))",
+                                          lines: lines, enabled: true, applyable: true, tagWrites: writes))
+                }
+            }
+        }
+
         // ---- 5. File-name tidy → "## Title.ext" (disc-prefixed on multi-disc sets).
         let multiDisc = kept.contains { $0.discNo > 1 }
         var renames: [(from: String, to: String)] = []
@@ -1715,72 +1771,6 @@ enum AlbumPerfect {
         if !damagedLines.isEmpty {
             fixes.append(AlbumFix(kind: .damaged, summary: "\(damagedLines.count) track\(damagedLines.count == 1 ? "" : "s") look unusually short — check before keeping",
                                   lines: damagedLines, enabled: false, applyable: false))
-        }
-
-        // ---- 7. Missing tracks — reconcile across MusicBrainz, Discogs and Deezer
-        // (network). Runs as part of the Perfect check so the result is remembered on
-        // Apply and the inspector can keep showing the gaps. The richest tracklist that
-        // fits the folder wins; declines rather than guess when nothing matches.
-        // Skip when the album's already been reconciled (result saved + shown in the
-        // inspector) — no point re-fetching and re-listing it every time Perfect opens.
-        // Only reconcile a real album (4+ tracks) — a single or a 2–3 track EP would match
-        // a full release and grey in a pile of bogus "missing" tracks. (Same gate as batch.)
-        var reconcile: MBReleaseMatch? = nil
-        let discCount = max(1, Set(kept.map { $0.discNo == 0 ? 1 : $0.discNo }).count)
-        // Use the already-saved match when we have one (no re-fetch, and don't re-list the
-        // missing tracks every open); otherwise reconcile fresh for a real album (4+ tracks).
-        let match: MBReleaseMatch?
-        if let cached = reconciledMatch {
-            match = cached
-        } else if kept.count >= 4 {
-            match = await MusicBrainzClient().bestRelease(artist: art.artist, album: art.album,
-                                                          haveTitles: kept.map { $0.title }, discCount: discCount)
-            reconcile = match   // fresh → save it + list the gaps below
-        } else {
-            match = nil
-        }
-        if let match = match {
-            // List missing tracks only on a FRESH reconcile — re-listing them every time the
-            // album is opened is noise once it's saved.
-            if reconcile != nil {
-                let haveFolded = Set(kept.map { TrackProposal.typoFold($0.title).lowercased() })
-                let missing = match.tracks
-                    .filter { !haveFolded.contains(TrackProposal.typoFold($0.title).lowercased()) }
-                    .sorted { ($0.disc, $0.track) < ($1.disc, $1.track) }
-                if !missing.isEmpty {
-                    let lines = missing.map { "Disc \($0.disc) · \($0.track). \($0.title)" }
-                    fixes.append(AlbumFix(kind: .missing,
-                                          summary: "\(missing.count) of \(match.tracks.count) tracks missing from “\(match.title)” — kept so the album shows the gaps",
-                                          lines: lines, enabled: false, applyable: false))
-                }
-            }
-
-            // Correct disc & track numbers FROM the matched release when the on-disk tags
-            // are broken — a flattened multi-disc set has duplicate (disc,track) keys (every
-            // track wrongly tagged one disc). The release is authoritative for which disc a
-            // title belongs to, so write its numbers rather than guess. Runs whether the
-            // match is fresh OR already saved, so a re-Perfect of a reconciled album still
-            // offers it. (Tags only; a later Perfect pass re-tidies the file names.)
-            let dupKeys = Dictionary(grouping: kept, by: { $0.discNo * 1000 + $0.trackNo }).contains { $0.value.count > 1 }
-            if dupKeys {
-                let slotByTitle = Dictionary(match.tracks.map { (TrackProposal.typoFold($0.title).lowercased(), $0) },
-                                             uniquingKeysWith: { a, _ in a })
-                var writes: [(rel: String, field: String, value: String)] = []
-                var lines: [String] = []
-                for t in kept {
-                    guard let slot = slotByTitle[TrackProposal.typoFold(t.title).lowercased()] else { continue }
-                    if t.discNo != slot.disc { writes.append((rel(t.url), "disc", String(slot.disc))) }
-                    if t.trackNo != slot.track { writes.append((rel(t.url), "track", String(slot.track))) }
-                    if t.discNo != slot.disc || t.trackNo != slot.track {
-                        lines.append("“\(t.title)” → disc \(slot.disc), track \(slot.track)")
-                    }
-                }
-                if !writes.isEmpty {
-                    fixes.append(AlbumFix(kind: .discOrder,
-                                          summary: "Fix disc & track numbers from “\(match.title)” (\(lines.count) track\(lines.count == 1 ? "" : "s"))",
-                                          lines: lines, enabled: true, applyable: true, tagWrites: writes))
-                }
-            }
         }
 
         return (fixes, art, reconcile)
