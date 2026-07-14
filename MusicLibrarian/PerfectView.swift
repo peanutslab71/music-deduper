@@ -319,6 +319,7 @@ struct PerfectView: View {
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
             if !store.missingTrackReports.isEmpty { missingTracksSummary }
+            if !store.damagedTrackReports.isEmpty { damagedTracksSummary }
             HStack(spacing: 8) {
                 if let q = store.lastQuarantine {
                     Button {
@@ -364,6 +365,35 @@ struct PerfectView: View {
             }
             .frame(maxHeight: 120)
             Text("Open an album in the Library to see exactly which tracks are missing (greyed out).")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.08)))
+    }
+
+    /// After Apply: files that look truncated/damaged (much shorter than their album's
+    /// typical length). Nothing was removed — this is for you to check and re-rip.
+    private var damagedTracksSummary: some View {
+        let reports = store.damagedTrackReports
+        let total = reports.reduce(0) { $0 + $1.lines.count }
+        return VStack(alignment: .leading, spacing: 6) {
+            Label("\(total) track(s) look unusually short — possibly damaged, kept for you to check",
+                  systemImage: "exclamationmark.triangle")
+                .font(.caption).fontWeight(.semibold).foregroundStyle(.orange)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(reports) { r in
+                        ForEach(r.lines, id: \.self) { line in
+                            Text("\(r.album.isEmpty ? "" : r.album + " · ")\(line)")
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 100)
+            Text("Nothing was deleted. Re-rip or replace these if they really are broken.")
                 .font(.caption2).foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

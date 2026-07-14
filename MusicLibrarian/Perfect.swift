@@ -210,6 +210,16 @@ struct ScannedAlbum: Identifiable {
     let files: [String]     // root-relative track paths
 }
 
+/// Tracks a Perfect run found suspiciously short with no full-length twin — likely
+/// truncated/damaged. Information only; NEVER auto-removed. Mirrors the per-album
+/// "Possibly damaged" flag so batch and per-album Perfect surface the same files.
+struct DamagedAlbumReport: Identifiable {
+    let id = UUID()
+    let artist: String
+    let album: String
+    let lines: [String]   // "“Title” — 0:03 (album typical 2:25)"
+}
+
 /// One album a Perfect run found to be incomplete: what release it matched and how
 /// many of its tracks are absent. The full matched tracklist is persisted per album
 /// folder so the Album Inspector can grey out the missing rows afterwards.
@@ -661,7 +671,7 @@ final class PerfectStore: ObservableObject {
         organisePlans = []; dedupClusters = []; dedupTracks = []
         compilationCandidates = []; confirmedCompilations = []
         albumMergeCandidates = []; declinedAlbumMerges = []
-        missingTrackReports = []
+        missingTrackReports = []; damagedTrackReports = []
         lastRunSummary = nil
         clearPlan()                      // starting over discards the saved plan for this library
         root = nil                       // → PerfectView shows the intro / new-library screen
@@ -833,6 +843,7 @@ final class PerfectStore: ObservableObject {
         didSet { UserDefaults.standard.set(checkMissingTracks, forKey: "perfectCheckMissing") }
     }
     @Published var missingTrackReports: [MissingAlbumReport] = []   // filled by the last Apply
+    @Published var damagedTrackReports: [DamagedAlbumReport] = []    // suspiciously-short files, info-only
     // category-level toggles (the mockup's bulk on/off buttons)
     @Published var applyNames = true       // identify: artist/title/album corrections
     @Published var applyArtwork = true     // add missing cover art
@@ -2625,35 +2636,51 @@ final class PerfectStore: ObservableObject {
                 }
             }
 
-            // 5) MISSING-TRACK RECONCILE — now the clean tree is on disk, check each real
-            //    album against MusicBrainz/Discogs/Deezer and remember what it's missing,
-            //    keyed by the album's final folder so the Album Inspector greys the gaps
-            //    out later. Reports only (nothing to write for a track that isn't there),
-            //    network-gated by the toggle, and cancellable — the file moves are done.
+            // 5) ALBUM ANALYSIS on the final tree — the same checks per-album "Perfect
+            //    this album" runs, so the two flows surface the same things:
+            //    (a) POSSIBLY-DAMAGED files (offline, always) — a track much shorter than
+            //        its album's typical length, likely truncated. Info only, never removed.
+            //    (b) MISSING-TRACK reconcile (network, gated by the toggle) — remembered per
+            //        album folder so the Album Inspector greys the gaps out later.
+            //    One disk pass (buildTracksFromDisk) gives tags + durations for both.
             var missingReports: [MissingAlbumReport] = []
-            if checkMissing && !box.cancelled {
-                let inputs = Self.organiseInputsFromDisk(root: root, fm: fm)
-                var byFolder: [String: [OrganiseInput]] = [:]
-                for i in inputs {
-                    let folder = root.appendingPathComponent(i.rel).deletingLastPathComponent().path
-                    byFolder[folder, default: []].append(i)
+            var damagedReports: [DamagedAlbumReport] = []
+            if !box.cancelled {
+                let diskTracks = await Self.buildTracksFromDisk(root: root, fm: fm)
+                var byFolder: [String: [Track]] = [:]
+                for t in diskTracks {
+                    byFolder[t.url.deletingLastPathComponent().path, default: []].append(t)
                 }
-                // real albums only — skip loose/junk folders and one-offs the check can't help
-                let albums = byFolder.filter { $0.value.count >= 4 && !Organiser.albumOrEmpty($0.value.first?.album ?? "").isEmpty }
+                // real albums only — skip loose/junk folders and one-offs the checks can't help
+                let albums = byFolder.filter { $0.value.count >= 2 && !Organiser.albumOrEmpty($0.value.first?.album ?? "").isEmpty }
+                    .sorted { $0.key < $1.key }
                 let mb = MusicBrainzClient()
                 var idx = 0
                 for (folder, tracks) in albums {
                     if box.cancelled { break }
                     idx += 1
-                    await self.setCommitProgress("Checking for missing tracks (\(idx) of \(albums.count))", done: done)
-                    let comp = tracks.contains { $0.isCompilation }
                     let album = Organiser.stripDiscSuffix(tracks.first?.album ?? "").clean
-                    let aaTally = tracks.map { $0.albumArtist.isEmpty ? $0.artist : $0.albumArtist }.filter { !$0.isEmpty }
+                    let comp = compsOrg.contains(Organiser.fold(album))
+                    let aaTally = tracks.map { $0.displayArtist }.filter { !$0.isEmpty }
                     let artist = comp ? "Various Artists"
                         : (aaTally.sorted { a, b in aaTally.filter { $0 == a }.count > aaTally.filter { $0 == b }.count }.first ?? "")
+
+                    // (a) possibly-damaged — same heuristic as per-album Perfect
+                    let durs = tracks.map { $0.duration }.filter { $0 > 0 }.sorted()
+                    let median = durs.isEmpty ? 0 : durs[durs.count / 2]
+                    let shorties = tracks.filter { $0.duration > 0 && $0.duration <= 40 && median > 90 && $0.duration < median * 0.5 }
+                    if !shorties.isEmpty {
+                        let dlines = shorties.map { "“\($0.title.isEmpty ? $0.name : $0.title)” — \(fmtDur($0.duration)) (album typical \(fmtDur(median)))" }
+                        damagedReports.append(DamagedAlbumReport(artist: artist, album: album.isEmpty ? (tracks.first?.album ?? "") : album, lines: dlines))
+                        log += "\nPOSSIBLY DAMAGED in “\(album)” (unusually short, kept for review):\n"
+                        for l in dlines { log += "  · \(l)\n" }
+                    }
+
+                    // (b) missing tracks — reconcile online, gated
+                    guard checkMissing, tracks.count >= 4, !album.isEmpty else { continue }
+                    await self.setCommitProgress("Checking for missing tracks (\(idx) of \(albums.count))", done: done)
                     let discCount = max(1, Set(tracks.map { $0.discNo == 0 ? 1 : $0.discNo }).count)
-                    guard !album.isEmpty,
-                          let match = await mb.bestRelease(artist: artist, album: album,
+                    guard let match = await mb.bestRelease(artist: artist, album: album,
                                                            haveTitles: tracks.map { $0.title }, discCount: discCount)
                     else { continue }
                     let have = Set(tracks.map { TrackProposal.typoFold($0.title).lowercased() })
@@ -2697,14 +2724,16 @@ final class PerfectStore: ObservableObject {
             }
             await self.finishCommit(count: total, quarantine: quarantine, cancelled: wasCancelled,
                                     flagged: flaggedArt.map { ArtworkReviewItem(artist: $0.artist, album: $0.album, files: $0.files, mbids: $0.mbids) },
-                                    missing: missingReports)
+                                    missing: missingReports, damaged: damagedReports)
         }
     }
 
     private func finishCommit(count: Int, quarantine: URL, cancelled: Bool = false,
-                              flagged: [ArtworkReviewItem] = [], missing: [MissingAlbumReport] = []) {
+                              flagged: [ArtworkReviewItem] = [], missing: [MissingAlbumReport] = [],
+                              damaged: [DamagedAlbumReport] = []) {
         busy = false
         missingTrackReports = missing.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+        damagedTrackReports = damaged.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
         // the summary dialog is set BEFORE committing flips false so the view's
         // onChange sees it and shows the "all done" sheet (not just a dismiss).
         showCompletionSummary = !cancelled && count > 0
