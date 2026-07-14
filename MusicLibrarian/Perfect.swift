@@ -1204,7 +1204,10 @@ final class PerfectStore: ObservableObject {
             let albums: [ScannedAlbum] = audioByFolder.compactMap { (folder, urls) in
                 guard folder != root.path else { return nil }   // loose files at the top aren't an album
                 let dir = URL(fileURLWithPath: folder)
-                if dir.lastPathComponent == "Music Librarian Quarantine" { return nil }
+                // `folder` is a track's PARENT (album) folder, so its lastPathComponent is
+                // the album name — never the literal quarantine name. Match on the relative
+                // path prefix (as elsewhere) so discarded albums don't leak into the grid.
+                if Self.rel(dir, root).hasPrefix("Music Librarian Quarantine") { return nil }
                 let sample = urls.first
                 let tagAlbum = sample.flatMap { Self.readField($0, "album") } ?? ""
                 let tagArtist = sample.flatMap { Self.readField($0, "albumartist") ?? Self.readField($0, "artist") } ?? ""
@@ -2388,8 +2391,12 @@ final class PerfectStore: ObservableObject {
                 }
                 for (_, items) in byFolder {
                     if box.cancelled { break }
-                    let dup = Dictionary(grouping: items, by: { $0.disc * 1000 + $0.track }).contains { $0.value.count > 1 }
-                    guard dup else { continue }
+                    let dup = Dictionary(grouping: items, by: { $0.track }).contains { $0.value.count > 1 }
+                    // Only the shape this is for: a multi-disc set flattened into one folder
+                    // with NO disc tags, so track numbers repeat. If ANY track already has a
+                    // disc number, it's a correctly-tagged album (perhaps with one accidental
+                    // duplicate) — don't rewrite everyone's disc down to 1.
+                    guard dup, items.allSatisfy({ $0.disc == 0 }) else { continue }
                     var seen: [Int: Int] = [:]
                     for it in items.sorted(by: { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }) {
                         let key = it.disc * 1000 + it.track
@@ -3212,8 +3219,14 @@ final class PerfectStore: ObservableObject {
             // already rebuilt) — merge its contents in instead.
             func restore(_ from: URL, _ to: URL) -> Bool {
                 let fromIsDir = (try? from.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                // A case-only rename ("On" → "on") reverses to a `to` that case-folds to the
+                // SAME file as `from` on a case-insensitive volume. `toExists` is then a false
+                // positive — removing `to` would unlink the file itself and the move would then
+                // fail with no backup (silent data loss). Go via a temp name instead, exactly
+                // like the forward path, and never removeItem in that case.
+                let caseOnly = from.path != to.path && from.path.lowercased() == to.path.lowercased()
                 let toExists = fm.fileExists(atPath: to.path)
-                if fromIsDir && toExists {
+                if fromIsDir && toExists && !caseOnly {
                     for child in (try? fm.contentsOfDirectory(atPath: from.path)) ?? [] {
                         _ = restore(from.appendingPathComponent(child), to.appendingPathComponent(child))
                     }
@@ -3222,8 +3235,15 @@ final class PerfectStore: ObservableObject {
                 }
                 do {
                     try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    if toExists { try? fm.removeItem(at: to) }
-                    try fm.moveItem(at: from, to: to)
+                    if caseOnly {
+                        let tmp = to.deletingLastPathComponent().appendingPathComponent(".mdtmp-\(to.lastPathComponent)")
+                        try? fm.removeItem(at: tmp)
+                        try fm.moveItem(at: from, to: tmp)
+                        try fm.moveItem(at: tmp, to: to)
+                    } else {
+                        if toExists { try? fm.removeItem(at: to) }
+                        try fm.moveItem(at: from, to: to)
+                    }
                     return true
                 } catch { return false }
             }

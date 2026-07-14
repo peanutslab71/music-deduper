@@ -256,8 +256,10 @@ struct MergeAlbumsSheet: View {
     var onChanged: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: PerfectStore
-    @State private var merged = Set<Int>()
-    @State private var working: Int?
+    // Keyed by the primary folder's path (stable), NOT the positional index — `groups`
+    // shrinks after each merge, so an Int key would mark the wrong row afterwards.
+    @State private var merged = Set<String>()
+    @State private var working: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -292,9 +294,9 @@ struct MergeAlbumsSheet: View {
                     Text(g.first?.artist ?? "").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                if merged.contains(i) {
+                if merged.contains(primary.id) {
                     Label("Merged", systemImage: "checkmark.circle.fill").foregroundStyle(.teal).font(.callout)
-                } else if working == i {
+                } else if working == primary.id {
                     ProgressView().controlSize(.small)
                 } else {
                     Button("Merge") { merge(i) }.buttonStyle(.borderedProminent).tint(.orange).controlSize(.small)
@@ -350,10 +352,10 @@ struct MergeAlbumsSheet: View {
                 }
             }
         }
-        working = i
+        working = primary.id
         store.applyLibraryRun(root: root, summary: "Merged album — \(clean)",
                               tagWrites: tagWrites, moves: moves) {
-            working = nil; merged.insert(i); onChanged()
+            working = nil; merged.insert(primary.id); onChanged()
         }
     }
 }
@@ -565,6 +567,12 @@ struct LibraryAlbumSheet: View {
                                                                    disc: slot.disc, track: slot.track,
                                                                    title: slot.title, lengthMs: slot.lengthMs))
                 }
+            }
+            // On-disk tracks the matched release doesn't list (bonus/hidden/edition extras)
+            // must still appear so they can be played, renamed, tagged or deleted here —
+            // the release match only needs 60% title overlap, so up to 40% can be extras.
+            for t in tracks where !used.contains(t.id) {
+                byDisc[t.discNo == 0 ? 1 : t.discNo, default: []].append(.have(t))
             }
             return byDisc.keys.sorted().map { d in
                 let rows = byDisc[d]!
@@ -1530,10 +1538,14 @@ enum AlbumPerfect {
                                       lines: lines, enabled: true, applyable: true, tagWrites: writes))
             }
         } else {
-            // single act: file everything under the album's dominant album-artist
-            let target = dominantAA.isEmpty
-                ? (Dictionary(grouping: kept.map { $0.artist }.filter { !$0.isEmpty }, by: { $0 }).mapValues { $0.count }.max(by: { $0.value < $1.value })?.key ?? "")
-                : dominantAA
+            // single act: file everything under the album's dominant album-artist. Only
+            // trust the dominant album-artist when it has real support (a majority of the
+            // tracks) — a lone stray tag ("Mick Jagger" on one track of an otherwise-blank
+            // Rolling Stones album) shouldn't be propagated to the whole album; fall back to
+            // the track-artist consensus instead.
+            let artistConsensus = Dictionary(grouping: kept.map { $0.artist }.filter { !$0.isEmpty }, by: { $0 }).mapValues { $0.count }.max(by: { $0.value < $1.value })?.key ?? ""
+            let aaWellSupported = !dominantAA.isEmpty && Double(aaAgree) >= Double(kept.count) * 0.5
+            let target = aaWellSupported ? dominantAA : artistConsensus
             if !target.isEmpty {
                 var writes: [(rel: String, field: String, value: String)] = []
                 var lines: [String] = []
@@ -1580,9 +1592,12 @@ enum AlbumPerfect {
         // than once) mean a multi-disc set was flattened into one folder with no disc
         // tags — so the tracks interleave (1,1,2,2,…). Assign disc numbers by occurrence,
         // ordered by file name, so they group into discs.
+        // Only the flattened-with-no-disc-tags shape: if ANY track already carries a disc
+        // number, it's a correctly-tagged album (maybe with an accidental duplicate) and we
+        // must NOT rewrite everyone's disc down to 1.
         let numbered = kept.filter { $0.trackNo > 0 }
-        let dupKeys = Dictionary(grouping: numbered, by: { $0.discNo * 1000 + $0.trackNo }).filter { $0.value.count > 1 }
-        if !dupKeys.isEmpty {
+        let dupKeys = Dictionary(grouping: numbered, by: { $0.trackNo }).filter { $0.value.count > 1 }
+        if !dupKeys.isEmpty, numbered.allSatisfy({ $0.discNo == 0 }) {
             let discCount = dupKeys.values.map { $0.count }.max() ?? 2
             var seen: [Int: Int] = [:]
             var writes: [(rel: String, field: String, value: String)] = []
