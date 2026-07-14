@@ -2675,37 +2675,44 @@ final class PerfectStore: ObservableObject {
                                            compilations: compsOrg, mergeAlbums: mergesOrg)
                 for p in plans {
                     if box.cancelled { break }
-                    guard let target = p.targetRel, target != p.rel else { continue }
+                    guard let target = p.targetRel else { continue }   // nil = couldn't place; leave it
                     let src = root.appendingPathComponent(p.rel)
                     guard fm.fileExists(atPath: src.path) else { continue }
-                    // Collision: the clean-tree destination is already occupied. If the
-                    // sitting file is the SAME recording (matching size, or matching
-                    // duration), this source is a leftover duplicate the dedup pass didn't
-                    // fold in — quarantine it rather than stranding it in a stray folder.
-                    let dst = root.appendingPathComponent(target)
-                    if fm.fileExists(atPath: dst.path) {
-                        let sSize = (try? src.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
-                        let dSize = (try? dst.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -2
-                        var sameTrack = (sSize == dSize)
-                        if !sameTrack {
-                            let sd = await readMetadata(url: src, size: Int64(max(sSize, 0))).duration
-                            let dd = await readMetadata(url: dst, size: Int64(max(dSize, 0))).duration
-                            if sd > 0 && dd > 0 { sameTrack = abs(sd - dd) <= 3.0 }
+                    let willMove = target != p.rel
+                    if willMove {
+                        // Collision: the clean-tree destination is already occupied. If the
+                        // sitting file is the SAME recording (matching size, or matching
+                        // duration), this source is a leftover duplicate the dedup pass didn't
+                        // fold in — quarantine it rather than stranding it in a stray folder.
+                        let dst = root.appendingPathComponent(target)
+                        if fm.fileExists(atPath: dst.path) {
+                            let sSize = (try? src.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
+                            let dSize = (try? dst.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -2
+                            var sameTrack = (sSize == dSize)
+                            if !sameTrack {
+                                let sd = await readMetadata(url: src, size: Int64(max(sSize, 0))).duration
+                                let dd = await readMetadata(url: dst, size: Int64(max(dSize, 0))).duration
+                                if sd > 0 && dd > 0 { sameTrack = abs(sd - dd) <= 3.0 }
+                            }
+                            if sameTrack {
+                                if move(p.rel, qRel + "/" + p.rel) { log += "DUPLICATE (target exists) → quarantine: \(p.rel)\n" }
+                            } else {
+                                log += "SKIPPED (target exists, different track): \(p.rel) → \(target)\n"
+                            }
+                            await bump("Reorganising files")
+                            continue
                         }
-                        if sameTrack {
-                            if move(p.rel, qRel + "/" + p.rel) { log += "DUPLICATE (target exists) → quarantine: \(p.rel)\n" }
-                        } else {
-                            log += "SKIPPED (target exists, different track): \(p.rel) → \(target)\n"
-                        }
-                        await bump("Reorganising files")
-                        continue
                     }
+                    // Write the self-describing tags (album-artist / album / disc / track) even
+                    // when the file DOESN'T move — an album already in the right folder still
+                    // needs its album-artist consensus filled, or per-album Perfect re-proposes
+                    // it forever. Only changed fields are written.
                     for (field, value) in p.tagWrites {
                         let old = Self.readField(src, field) ?? ""
                         if old == value { continue }
                         do { try Self.writeField(src, field, to: value); tagEdits.append((p.rel, field, old)) } catch {}
                     }
-                    if move(p.rel, target) { log += "MOVED: \(p.rel) → \(target)\n" }
+                    if willMove, move(p.rel, target) { log += "MOVED: \(p.rel) → \(target)\n" }
                     await bump("Reorganising files")
                 }
             }
