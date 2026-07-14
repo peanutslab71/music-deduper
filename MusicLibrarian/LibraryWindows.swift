@@ -1355,15 +1355,20 @@ enum AlbumPerfect {
             var writes: [(rel: String, field: String, value: String)] = []
             var lines: [String] = []
             for t in kept {
-                if normText(t.albumArtist) != "various artists" {
-                    writes.append((rel(t.url), "albumartist", "Various Artists"))
-                }
-                writes.append((rel(t.url), "compilation", "1"))
-                lines.append("“\(t.title)” — \(t.artist.isEmpty ? "—" : t.artist)")
+                let needAA = normText(t.albumArtist) != "various artists"
+                let hasFlag = (PerfectStore.readField(t.url, "compilation") ?? "").hasPrefix("1")
+                if needAA { writes.append((rel(t.url), "albumartist", "Various Artists")) }
+                if !hasFlag { writes.append((rel(t.url), "compilation", "1")) }
+                if needAA || !hasFlag { lines.append("“\(t.title)” — \(t.artist.isEmpty ? "—" : t.artist)") }
             }
-            fixes.append(AlbumFix(kind: .compilation,
-                                  summary: "Various-artists compilation — set album artist “Various Artists” + compilation flag (\(kept.count) tracks)",
-                                  lines: lines, enabled: true, applyable: true, tagWrites: writes))
+            // Only offer the fix when something actually needs changing — otherwise an
+            // album that's ALREADY marked "Various Artists" + flagged would keep
+            // re-proposing itself every time it's opened.
+            if !writes.isEmpty {
+                fixes.append(AlbumFix(kind: .compilation,
+                                      summary: "Various-artists compilation — set album artist “Various Artists” + compilation flag (\(lines.count) track\(lines.count == 1 ? "" : "s"))",
+                                      lines: lines, enabled: true, applyable: true, tagWrites: writes))
+            }
         } else {
             // single act: file everything under the album's dominant album-artist
             let target = dominantAA.isEmpty

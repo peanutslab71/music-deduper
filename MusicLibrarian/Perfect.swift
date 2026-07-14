@@ -2829,10 +2829,24 @@ final class PerfectStore: ObservableObject {
             let toRel = m.to.isEmpty ? qRel + "/" + m.from : m.to
             let from = root.appendingPathComponent(m.from), to = root.appendingPathComponent(toRel)
             guard fm.fileExists(atPath: from.path) else { continue }
-            if !m.to.isEmpty && fm.fileExists(atPath: to.path) { log += "SKIP (target exists): \(toRel)\n"; continue }
+            // A case-only rename ("… On …" → "… on …") on a case-insensitive volume
+            // makes `to` look like it already exists (it's the SAME file as `from`) —
+            // that's not a collision, so allow it; only skip a genuinely different file.
+            let caseOnly = from.path != to.path && from.path.lowercased() == to.path.lowercased()
+            if !m.to.isEmpty && !caseOnly && fm.fileExists(atPath: to.path) {
+                log += "SKIP (target exists): \(toRel)\n"; continue
+            }
             do {
                 try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try fm.moveItem(at: from, to: to)
+                if caseOnly {
+                    // go via a temp name so a case-insensitive filesystem actually applies it
+                    let tmp = to.deletingLastPathComponent().appendingPathComponent(".mdtmp-\(to.lastPathComponent)")
+                    try? fm.removeItem(at: tmp)
+                    try fm.moveItem(at: from, to: tmp)
+                    try fm.moveItem(at: tmp, to: to)
+                } else {
+                    try fm.moveItem(at: from, to: to)
+                }
                 ops.append((m.from, toRel))
                 log += "\(m.to.isEmpty ? "DELETE → quarantine" : "MOVE"): \(m.from) → \(toRel)\n"
             } catch { log += "FAILED \(m.from): \(error.localizedDescription)\n" }
