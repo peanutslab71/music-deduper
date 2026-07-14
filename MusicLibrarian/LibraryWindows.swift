@@ -513,7 +513,7 @@ struct LibraryAlbumSheet: View {
             Text(fmtDur(t.duration)).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                 .frame(width: 46, alignment: .trailing)
             Text(t.formatLabel).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
-                .frame(width: 58, alignment: .center)
+                .frame(width: 68, alignment: .center)
                 .padding(.horizontal, 5).padding(.vertical, 1)
                 .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color.secondary.opacity(0.25)))
             Button { NSWorkspace.shared.activateFileViewerSelecting([t.url]) } label: { Image(systemName: "arrow.up.forward.square") }

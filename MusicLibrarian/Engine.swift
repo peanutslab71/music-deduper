@@ -58,7 +58,10 @@ struct Track: Identifiable, Hashable {
         return s
     }
     var formatLabel: String {
-        (lossless ? "◆ " : "") + codec.uppercased() + (bitrate > 0 ? " \(bitrate)k" : "")
+        // fall back to the size÷duration estimate so a VBR / un-estimated file still
+        // shows a bitrate instead of a bare "MP3"
+        let kbps = bitrate > 0 ? bitrate : Int(effectiveKbps.rounded())
+        return (lossless ? "◆ " : "") + codec.uppercased() + (kbps > 0 ? " \(kbps)k" : "")
     }
 }
 
