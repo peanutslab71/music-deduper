@@ -2360,6 +2360,43 @@ final class PerfectStore: ObservableObject {
                 }
             }
 
+            // 0a3) DISC ORDER — a multi-disc set flattened into one folder with no disc
+            //      tags interleaves track numbers (1,1,2,2,…). Assign disc numbers by
+            //      occurrence (ordered by file name) BEFORE organise, so it files them as
+            //      a proper multi-disc album. Same detector per-album Perfect uses.
+            if !box.cancelled {
+                func leadInt(_ s: String?) -> Int { Int((s ?? "").split(separator: "/").first.map(String.init) ?? "") ?? 0 }
+                var byFolder: [String: [(url: URL, track: Int, disc: Int)]] = [:]
+                if let en = fm.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                    while let u = en.nextObject() as? URL {
+                        if box.cancelled { break }
+                        guard Self.isAudio(u), !u.path.contains("Music Librarian Quarantine") else { continue }
+                        let tn = leadInt(Self.readField(u, "track"))
+                        guard tn > 0 else { continue }
+                        byFolder[u.deletingLastPathComponent().path, default: []].append((u, tn, leadInt(Self.readField(u, "disc"))))
+                    }
+                }
+                for (_, items) in byFolder {
+                    if box.cancelled { break }
+                    let dup = Dictionary(grouping: items, by: { $0.disc * 1000 + $0.track }).contains { $0.value.count > 1 }
+                    guard dup else { continue }
+                    var seen: [Int: Int] = [:]
+                    for it in items.sorted(by: { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }) {
+                        let key = it.disc * 1000 + it.track
+                        let newDisc = (seen[key] ?? 0) + 1
+                        seen[key] = newDisc
+                        guard it.disc != newDisc else { continue }
+                        let rel = Self.rel(it.url, root)
+                        do {
+                            try Self.writeField(it.url, "disc", to: String(newDisc))
+                            tagEdits.append((rel, "disc", it.disc == 0 ? "" : String(it.disc)))
+                            log += "DISC: \(rel)  track \(it.track) → disc \(newDisc)\n"
+                        } catch { log += "FAILED disc \(rel): \(error.localizedDescription)\n" }
+                        await bump("Assigning disc numbers")
+                    }
+                }
+            }
+
             // 0b) enrichment gap-fills — only fill a field that is actually BLANK,
             //     never overwrite. Record old = "" so undo clears it again.
             for (url, rel, fields) in accEnrich {
