@@ -1201,14 +1201,21 @@ final class PerfectStore: ObservableObject {
             }
 
             // one entry per album folder (…/Artist/Album/track), for the Artwork step's
-            // "change any cover" grid — covers albums AcoustID never matched.
+            // "change any cover" grid — covers albums AcoustID never matched. PREFER the
+            // files' own album / album-artist TAGS (so the online cover search uses real
+            // metadata), and fall back to the folder names only when the tags are blank —
+            // a mislabelled folder shouldn't drive the lookup when the tag is right. One
+            // representative read per folder keeps it cheap.
             let albums: [ScannedAlbum] = audioByFolder.compactMap { (folder, urls) in
                 guard folder != root.path else { return nil }   // loose files at the top aren't an album
                 let dir = URL(fileURLWithPath: folder)
                 if dir.lastPathComponent == "Music Librarian Quarantine" { return nil }
-                return ScannedAlbum(id: folder,
-                                    artist: dir.deletingLastPathComponent().lastPathComponent,
-                                    album: dir.lastPathComponent,
+                let sample = urls.first
+                let tagAlbum = sample.flatMap { Self.readField($0, "album") } ?? ""
+                let tagArtist = sample.flatMap { Self.readField($0, "albumartist") ?? Self.readField($0, "artist") } ?? ""
+                let album = Organiser.isPlaceholderAlbum(tagAlbum) ? dir.lastPathComponent : tagAlbum
+                let artist = tagArtist.isEmpty ? dir.deletingLastPathComponent().lastPathComponent : tagArtist
+                return ScannedAlbum(id: folder, artist: artist, album: album,
                                     files: urls.map { Self.rel($0, root) })
             }.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
 
