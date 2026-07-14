@@ -179,18 +179,21 @@ struct TrackProposal: Identifiable, Codable {
             guard !primary.isEmpty, !rest.isEmpty else { return nil }
             return (primary, rest.map { ($0, "performer") }, true)
         }
-        // 2) comma present → a list of contributors
-        if s.contains(",") {
-            let p = parts(s)
-            guard p.count >= 2 else { return nil }
-            let extras = Array(p.dropFirst())
+        // 2) comma present → a list of contributors. The PRIMARY is everything before
+        // the first comma, kept intact — so a band whose own name contains "&" ("Hall &
+        // Oates, Guest", "Simon & Garfunkel, London Symphony Orchestra") isn't truncated
+        // to the fragment before the "&". Only the remainder is split into credits.
+        if let comma = s.firstIndex(of: ",") {
+            let primary = String(s[s.startIndex..<comma]).trimmingCharacters(in: .whitespaces)
+            let extras = parts(String(s[s.index(after: comma)...]))
+            guard !primary.isEmpty, !extras.isEmpty else { return nil }
             let roled = extras.map { (name: $0, role: Self.creditRole($0)) }
             // An orchestra/choir/ensemble NAMES itself as one, which both types the credit
             // and proves the list is a classical credit, not a pop band → safe to split.
             let ensemble = roled.contains { ["orchestra", "choir", "ensemble"].contains($0.role) }
             // a comma immediately followed by a non-space is a machine join, also safe
             let machineJoin = s.range(of: #",\S"#, options: .regularExpression) != nil
-            return (p[0], roled, machineJoin || ensemble)
+            return (primary, roled, machineJoin || ensemble)
         }
         // 3) no comma: a bare "&"/"and" is a band/duo name — leave it
         return nil
@@ -815,17 +818,20 @@ actor MusicBrainzClient {
             if let ty = t.type_, ty != "track" { continue }       // heading / index
             guard let title = t.title, !title.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
             run += 1
+            // Only an explicit numeric "disc-track" ("2-13") gives a real disc+track.
+            // A plain "5" is a track. A vinyl side ("A1","B2") restarts numbering per
+            // side, so its side-relative number is NOT a unique track number — a running
+            // counter is used instead (and vinyl sides aren't discs), which keeps titles
+            // ordered without colliding A1/B1 on the same disc. Titles drive the reconcile.
             var disc = 1, track = run
             let pos = (t.position ?? "").trimmingCharacters(in: .whitespaces)
-            if pos.contains("-") {                                // CD form "2-13"
+            let cd = pos.range(of: #"^\d+-\d+$"#, options: .regularExpression) != nil
+            if cd {
                 let parts = pos.split(separator: "-")
-                if parts.count == 2, let d = Int(parts[0]), let n = Int(parts[1].filter(\.isNumber)) { disc = d; track = n }
-            } else if let n = Int(pos.filter(\.isNumber)), !pos.isEmpty {   // "5" or "A1"
-                track = n
-                if let side = pos.first, side.isLetter {          // vinyl side → rough disc
-                    disc = (Int(side.asciiValue ?? 65) - 65) / 2 + 1
-                }
-            }
+                if let d = Int(parts[0]), let n = Int(parts[1]) { disc = d; track = n }
+            } else if pos.range(of: #"^\d+$"#, options: .regularExpression) != nil, let n = Int(pos) {
+                track = n                                          // plain numeric track
+            }                                                      // else (vinyl side / blank): keep run
             out.append(MBReleaseTrack(disc: max(1, disc), track: track, title: title, lengthMs: Self.parseDuration(t.duration)))
         }
         return out

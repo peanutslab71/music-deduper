@@ -1659,17 +1659,24 @@ final class PerfectStore: ObservableObject {
             if byAlbum[key] == nil { albumOrder.append(key) }
             byAlbum[key, default: []].append(t)
         }
+        let confirmedComps = confirmedCompilations
         for key in albumOrder {
             let ts = byAlbum[key]!
             let distinctArtists = Set(ts.map { Self.foldKey($0.artist) }.filter { !$0.isEmpty })
-            let albumFold = key.hasPrefix("alb|") ? String(key.dropFirst(4)) : ""
-            if distinctArtists.count >= 2 && Self.genericAlbumTitles.contains(albumFold) {
-                for t in ts {                                   // ambiguous generic title → keep artists apart
+            let compKey = Organiser.fold(Organiser.stripDiscSuffix(ts.first?.album ?? "").clean)
+            let isComp = confirmedComps.contains(compKey)
+            // Keep an album in ONE group (one release lookup) when it's single-artist OR a
+            // CONFIRMED various-artists compilation. If ≥2 different artists share a title
+            // but it isn't a confirmed compilation, they're most likely different albums
+            // (two "Debut"s by different artists) → sub-split by artist so one doesn't get
+            // seeded from the other's release credits.
+            if distinctArtists.count >= 2 && !isComp {
+                for t in ts {
                     let sk = key + "|" + Self.foldKey(t.artist)
                     if groups[sk] == nil { order.append(sk) }
                     groups[sk, default: []].append(t)
                 }
-            } else {                                            // real album (incl. VA compilation) → one group
+            } else {
                 order.append(key)
                 groups[key] = ts
             }
@@ -2459,22 +2466,31 @@ final class PerfectStore: ObservableObject {
                     for (url, rel) in cj.files {
                         if box.cancelled { break }
                         await bump("Setting chosen cover art")
+                        var mayOverwrite = true
                         if md_has_artwork(url.path) == 1 {
+                            // Must have a verified backup before replacing existing art —
+                            // otherwise undo can't restore it. If the copy or the backup
+                            // write fails, leave the current cover untouched.
+                            mayOverwrite = false
                             var bl: Int32 = 0, bt: Int32 = 0
                             if let bbuf = md_copy_artwork(url.path, &bl, &bt) {
                                 let bdata = Data(bytes: bbuf, count: Int(bl)); free(bbuf)
                                 try? fm.createDirectory(at: artBackupDir, withIntermediateDirectories: true)
                                 let name = "\(bIdx).img"; bIdx += 1
-                                try? bdata.write(to: artBackupDir.appendingPathComponent(name))
-                                artReplacements.append((rel, "artwork-backups/" + name, Int(bt)))
-                            }
+                                if (try? bdata.write(to: artBackupDir.appendingPathComponent(name))) != nil {
+                                    artReplacements.append((rel, "artwork-backups/" + name, Int(bt)))
+                                    mayOverwrite = true
+                                } else { bIdx -= 1; log += "SKIP art \(rel): backup write failed, cover kept\n" }
+                            } else { log += "SKIP art \(rel): couldn't read existing cover to back up, kept\n" }
                         } else {
                             artEdits.append(rel)   // was blank → undo just strips it
                         }
-                        let rc = cj.image.withUnsafeBytes { buf in
-                            md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(cj.image.count), mime)
+                        if mayOverwrite {
+                            let rc = cj.image.withUnsafeBytes { buf in
+                                md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(cj.image.count), mime)
+                            }
+                            log += rc == 0 ? "ART: \(rel)  ← chosen cover (\(cj.image.count) bytes)\n" : "FAILED art \(rel): rc \(rc)\n"
                         }
-                        log += rc == 0 ? "ART: \(rel)  ← chosen cover (\(cj.image.count) bytes)\n" : "FAILED art \(rel): rc \(rc)\n"
                     }
                 }
             }
@@ -2734,11 +2750,21 @@ final class PerfectStore: ObservableObject {
                 for (folder, tracks) in albums {
                     if box.cancelled { break }
                     idx += 1
-                    let album = Organiser.stripDiscSuffix(tracks.first?.album ?? "").clean
-                    let comp = compsOrg.contains(Organiser.fold(album))
-                    let aaTally = tracks.map { $0.displayArtist }.filter { !$0.isEmpty }
-                    let artist = comp ? "Various Artists"
-                        : (aaTally.sorted { a, b in aaTally.filter { $0 == a }.count > aaTally.filter { $0 == b }.count }.first ?? "")
+                    // Album by consensus (not just the first file, whose tag may carry a
+                    // stray edition marker), and the lookup artist chosen the SAME way
+                    // per-album Perfect does: a various-artists folder searches under
+                    // "Various Artists" whether or not it was ticked as a compilation (this
+                    // only affects the read-only lookup, never writes the compilation flag).
+                    let realAlbums = tracks.map { $0.album }.filter { !$0.isEmpty && !Organiser.isPlaceholderAlbum($0) }
+                    let album = Organiser.stripDiscSuffix(Organiser.canonicalAlbumDisplay(realAlbums.isEmpty ? tracks.map { $0.album } : realAlbums)).clean
+                    let primaryArtists = Set(tracks.map { normText($0.artist.isEmpty ? $0.albumArtist : $0.artist) }.filter { !$0.isEmpty })
+                    let aaCounts = Dictionary(grouping: tracks.map { $0.albumArtist }.filter { !$0.isEmpty }, by: { $0 }).mapValues { $0.count }
+                    let dominantAA = aaCounts.max(by: { $0.value < $1.value })?.key ?? ""
+                    let aaAgree = tracks.filter { !$0.albumArtist.isEmpty && $0.albumArtist == dominantAA }.count
+                    let looksComp = primaryArtists.count >= 2 &&
+                        (dominantAA.isEmpty || normText(dominantAA) == "various artists" || Double(aaAgree) < Double(tracks.count) * 0.6)
+                    let mostCommonArtist = Dictionary(grouping: tracks.map { $0.artist }.filter { !$0.isEmpty }, by: { $0 }).mapValues { $0.count }.max(by: { $0.value < $1.value })?.key ?? ""
+                    let artist = looksComp ? "Various Artists" : (dominantAA.isEmpty ? mostCommonArtist : dominantAA)
 
                     // (a) possibly-damaged — same heuristic as per-album Perfect
                     let durs = tracks.map { $0.duration }.filter { $0 > 0 }.sorted()
@@ -2928,13 +2954,20 @@ final class PerfectStore: ObservableObject {
                 let url = root.appendingPathComponent(rel)
                 guard fm.fileExists(atPath: url.path) else { continue }
                 var l: Int32 = 0, t: Int32 = 0
-                if let b = md_copy_artwork(url.path, &l, &t) {
-                    let bd = Data(bytes: b, count: Int(l)); free(b)
-                    try? fm.createDirectory(at: backupDir, withIntermediateDirectories: true)
-                    let name = "\(idx).img"; idx += 1
-                    try? bd.write(to: backupDir.appendingPathComponent(name))
-                    artReplacements.append((rel, "artwork-backups/" + name, Int(t)))
+                var mayOverwrite = true
+                if md_has_artwork(url.path) == 1 {
+                    mayOverwrite = false                          // need a verified backup first
+                    if let b = md_copy_artwork(url.path, &l, &t) {
+                        let bd = Data(bytes: b, count: Int(l)); free(b)
+                        try? fm.createDirectory(at: backupDir, withIntermediateDirectories: true)
+                        let name = "\(idx).img"; idx += 1
+                        if (try? bd.write(to: backupDir.appendingPathComponent(name))) != nil {
+                            artReplacements.append((rel, "artwork-backups/" + name, Int(t)))
+                            mayOverwrite = true
+                        } else { idx -= 1; log += "SKIP art \(rel): backup write failed, cover kept\n" }
+                    } else { log += "SKIP art \(rel): couldn't read existing cover to back up, kept\n" }
                 } else { artEdits.append(rel) }
+                guard mayOverwrite else { continue }
                 let rc = image.withUnsafeBytes { buf in
                     md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(image.count), mime)
                 }
@@ -3048,18 +3081,23 @@ final class PerfectStore: ObservableObject {
             for e in artEmbeds {
                 let url = root.appendingPathComponent(e.rel)
                 guard fm.fileExists(atPath: url.path) else { continue }
+                var mayOverwrite = true
                 if md_has_artwork(url.path) == 1 {
+                    mayOverwrite = false                          // need a verified backup first
                     var bl: Int32 = 0, bt: Int32 = 0
                     if let bbuf = md_copy_artwork(url.path, &bl, &bt) {
                         let bdata = Data(bytes: bbuf, count: Int(bl)); free(bbuf)
                         try? fm.createDirectory(at: artBackupDir, withIntermediateDirectories: true)
                         let name = "\(bIdx).img"; bIdx += 1
-                        try? bdata.write(to: artBackupDir.appendingPathComponent(name))
-                        artReplacements.append((e.rel, "artwork-backups/" + name, Int(bt)))
-                    }
+                        if (try? bdata.write(to: artBackupDir.appendingPathComponent(name))) != nil {
+                            artReplacements.append((e.rel, "artwork-backups/" + name, Int(bt)))
+                            mayOverwrite = true
+                        } else { bIdx -= 1; log += "SKIP art \(e.rel): backup write failed, cover kept\n" }
+                    } else { log += "SKIP art \(e.rel): couldn't read existing cover to back up, kept\n" }
                 } else {
                     artEdits.append(e.rel)   // was blank → undo just strips it
                 }
+                guard mayOverwrite else { continue }
                 let rc = e.image.withUnsafeBytes { buf in
                     md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(e.image.count), e.mime)
                 }
@@ -3203,9 +3241,13 @@ final class PerfectStore: ObservableObject {
                 if restore(from, to) { restored += 1 } else { failed += 1 }
             }
 
-            // restore tag rewrites — the files are back at their original paths now,
-            // so write each old artist spelling back into place.
-            for edit in tagEdits {
+            // restore tag rewrites — the files are back at their original paths now, so
+            // write each old value back. REVERSED: if one run wrote the same field twice
+            // (e.g. album consensus in step 0 then Organise, or identify then the artist
+            // split), replaying in reverse means the FIRST write's recorded old value —
+            // the true original — is applied last and wins. Forward order would leave the
+            // intermediate value on disk.
+            for edit in tagEdits.reversed() {
                 let url = root.appendingPathComponent(edit.rel)
                 guard fm.fileExists(atPath: url.path) else { failed += 1; continue }
                 do { try Self.writeField(url, edit.field, to: edit.old); restored += 1 } catch { failed += 1 }

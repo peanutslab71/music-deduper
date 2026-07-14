@@ -1700,9 +1700,11 @@ enum AlbumPerfect {
         // fits the folder wins; declines rather than guess when nothing matches.
         // Skip when the album's already been reconciled (result saved + shown in the
         // inspector) — no point re-fetching and re-listing it every time Perfect opens.
+        // Only reconcile a real album (4+ tracks) — a single or a 2–3 track EP would match
+        // a full release and grey in a pile of bogus "missing" tracks. (Same gate as batch.)
         var reconcile: MBReleaseMatch? = nil
         let discCount = max(1, Set(kept.map { $0.discNo == 0 ? 1 : $0.discNo }).count)
-        if !alreadyReconciled,
+        if !alreadyReconciled, kept.count >= 4,
            let match = await MusicBrainzClient().bestRelease(artist: art.artist, album: art.album,
                                                              haveTitles: kept.map { $0.title }, discCount: discCount) {
             reconcile = match
