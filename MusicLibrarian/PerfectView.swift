@@ -999,7 +999,30 @@ struct PerfectView: View {
     // name, that name is shown; unidentified albums show by their folder. This is what
     // lets you fix a cover that's present but wrong on an album we never matched.
     private var artAlbumGroups: [(artist: String, album: String, files: [String])] {
-        // corrected names by folder, from proposals (best label when we have it)
+        // Prefer the FINAL organise plan so the grid shows the corrected tree — one card per
+        // album AS IT WILL BE after Apply (editions merged, duplicates folded, husks gone) —
+        // instead of the raw pre-Perfect folders. Group by the destination Album Artist/Album
+        // folder; carry each track's ORIGINAL path (art is embedded before the move).
+        if !store.organisePlans.isEmpty {
+            var byAlbum: [String: (artist: String, album: String, files: [String])] = [:]
+            for p in store.organisePlans {
+                let finalRel = p.targetRel ?? p.rel
+                if finalRel.hasPrefix("Music Librarian Quarantine") { continue }   // being discarded
+                let folder = (finalRel as NSString).deletingLastPathComponent
+                guard !folder.isEmpty, folder != "." else { continue }
+                let album = (folder as NSString).lastPathComponent
+                let artist = ((folder as NSString).deletingLastPathComponent as NSString).lastPathComponent
+                var e = byAlbum[folder] ?? (artist, album, [])
+                e.files.append(p.rel)
+                byAlbum[folder] = e
+            }
+            if !byAlbum.isEmpty {
+                return byAlbum.values.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+            }
+        }
+
+        // Fallbacks when Organise hasn't been previewed (files are still in their scanned
+        // folders): use the scan list, with identify's corrected names where we have them.
         var nameByFolder: [String: (artist: String, album: String)] = [:]
         for p in store.proposals {
             let folder = p.url.deletingLastPathComponent().path
@@ -1007,8 +1030,6 @@ struct PerfectView: View {
             let album = Organiser.stripDiscSuffix(p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum).clean
             if !album.isEmpty, nameByFolder[folder] == nil { nameByFolder[folder] = (artist, album) }
         }
-        // base = all scanned album folders; fall back to proposals only if a scan
-        // hasn't populated the list (e.g. an identify-only path)
         if !store.scannedAlbums.isEmpty {
             return store.scannedAlbums.map { a in
                 let named = nameByFolder[a.id]
