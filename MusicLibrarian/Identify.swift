@@ -149,6 +149,49 @@ struct TrackProposal: Identifiable, Codable {
         return String(scalars).components(separatedBy: " ").filter { !$0.isEmpty }.joined(separator: " ")
     }
 
+    /// Split a stuffed artist tag into a PRIMARY artist plus guest/session performers,
+    /// the Roon-correct shape (one artist per track; everyone else is a credit). Returns
+    /// nil when it's a single act or a real band/duo we must not break.
+    ///
+    /// `confident` distinguishes the safe machine-joined cases from ambiguous lists:
+    ///  • "A feat./ft./featuring B"          → primary A, guest B      (confident)
+    ///  • "A,B" (comma with NO space)         → machine join, split all (confident)
+    ///  • "A, B, C & D" (spaced comma list)   → split, but confident=false — a spaced
+    ///    "&"/comma list can be a band ("Crosby, Stills, Nash & Young"), so callers
+    ///    should REVIEW these, not auto-apply.
+    /// A bare "A & B" / "A and B" with no comma (Simon & Garfunkel, Aerosmith & Run-DMC)
+    /// is treated as one band name → nil.
+    static func splitArtistCredit(_ raw: String) -> (primary: String, performers: [String], confident: Bool)? {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        guard !s.isEmpty, !Identifier.isJunkValue(s) else { return nil }
+
+        func parts(_ str: String) -> [String] {
+            str.components(separatedBy: CharacterSet(charactersIn: ",&"))
+               .flatMap { $0.components(separatedBy: " and ") }
+               .map { $0.trimmingCharacters(in: .whitespaces) }
+               .filter { !$0.isEmpty }
+        }
+
+        // 1) feat/ft/featuring — the guest is unambiguous
+        if let r = s.range(of: #"\s+(feat\.?|ft\.?|featuring)\s+"#, options: [.regularExpression, .caseInsensitive]) {
+            let primary = String(s[s.startIndex..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+            let rest = parts(String(s[r.upperBound...]))
+            guard !primary.isEmpty, !rest.isEmpty else { return nil }
+            return (primary, rest, true)
+        }
+        // 2) comma present → a list
+        if s.contains(",") {
+            let p = parts(s)
+            guard p.count >= 2 else { return nil }
+            // a comma immediately followed by a non-space is a machine join, never a
+            // human-written band name → safe to split automatically
+            let machineJoin = s.range(of: #",\S"#, options: .regularExpression) != nil
+            return (p[0], Array(p.dropFirst()), machineJoin)
+        }
+        // 3) no comma: a bare "&"/"and" is a band/duo name — leave it
+        return nil
+    }
+
     /// Classify how different `to` is from `from`.
     static func classifyChange(_ from: String, _ to: String) -> ChangeKind {
         if from == to { return .none }

@@ -2330,6 +2330,36 @@ final class PerfectStore: ObservableObject {
                 await bump("Writing names & tags")
             }
 
+            // 0a2) STUFFED ARTIST TAGS → primary artist + performer credits (Roon shape),
+            //      applied here BEFORE organise so each track files under its clean primary
+            //      artist. Same detector per-album Perfect uses; only the CONFIDENT cases
+            //      (machine-joined "A,B" or "A feat. B") auto-apply — ambiguous spaced lists
+            //      that could be a band name are logged for review, not changed. Reversible
+            //      (artist tagEdit + performer perfEdit). m4p can't be written, so skipped.
+            if !box.cancelled, let en = fm.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                while let u = en.nextObject() as? URL {
+                    if box.cancelled { break }
+                    guard Self.isAudio(u), u.pathExtension.lowercased() != "m4p",
+                          !u.path.contains("Music Librarian Quarantine"),
+                          let cur = Self.readField(u, "artist"),
+                          let split = TrackProposal.splitArtistCredit(cur), split.primary != cur else { continue }
+                    let rel = Self.rel(u, root)
+                    guard split.confident else {
+                        log += "ARTIST LIST (left for review — open in the Album Inspector): \(rel): \(cur)\n"; continue
+                    }
+                    do {
+                        try Self.writeField(u, "artist", to: split.primary)
+                        tagEdits.append((rel, "artist", cur))
+                        log += "ARTIST SPLIT: \(rel): \(cur) → \(split.primary) + \(split.performers.joined(separator: ", "))\n"
+                    } catch { log += "FAILED artist split \(rel): \(error.localizedDescription)\n"; continue }
+                    for name in split.performers where md_has_performer(u.path, name, "performer") == 0 {
+                        do { try Self.addPerformer(u, name: name, role: "performer"); perfEdits.append((rel, name, "performer")) }
+                        catch {}
+                    }
+                    await bump("Tidying artist credits")
+                }
+            }
+
             // 0b) enrichment gap-fills — only fill a field that is actually BLANK,
             //     never overwrite. Record old = "" so undo clears it again.
             for (url, rel, fields) in accEnrich {

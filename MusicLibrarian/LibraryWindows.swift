@@ -1309,6 +1309,7 @@ struct AlbumFix: Identifiable {
         case identify = "Identify"
         case album = "Album name"
         case albumArtist = "Album artist"
+        case artistCredit = "Artist credits"
         case compilation = "Compilation"
         case discOrder = "Disc order"
         case credits = "Credits"
@@ -1334,6 +1335,7 @@ struct AlbumFix: Identifiable {
         case .identify: return "waveform"
         case .album: return "textformat"
         case .albumArtist: return "person.2"
+        case .artistCredit: return "person.text.rectangle"
         case .compilation: return "person.3.sequence"
         case .discOrder: return "opticaldisc"
         case .credits: return "music.mic"
@@ -1543,6 +1545,33 @@ enum AlbumPerfect {
                     fixes.append(AlbumFix(kind: .albumArtist, summary: "Set album artist to “\(target)” on \(writes.count) track\(writes.count == 1 ? "" : "s")",
                                           lines: lines, enabled: true, applyable: true, tagWrites: writes))
                 }
+            }
+        }
+
+        // ---- 3d. Stuffed artist tags → primary artist + performer credits (Roon shape).
+        // Confident splits (machine-joined "A,B" or "A feat. B") are ready to apply;
+        // ambiguous spaced lists ("A, B, C & D") are offered OFF by default because a
+        // band name can look the same ("Crosby, Stills, Nash & Young").
+        for confident in [true, false] {
+            var writes: [(rel: String, field: String, value: String)] = []
+            var perf: [(rel: String, name: String, role: String)] = []
+            var lines: [String] = []
+            for t in kept {
+                guard let split = TrackProposal.splitArtistCredit(t.artist), split.confident == confident,
+                      split.primary != t.artist else { continue }
+                writes.append((rel(t.url), "artist", split.primary))
+                for name in split.performers where md_has_performer(t.url.path, name, "performer") == 0 {
+                    perf.append((rel(t.url), name, "performer"))
+                }
+                lines.append("“\(t.title)” — \(t.artist) → \(split.primary) + \(split.performers.joined(separator: ", "))")
+            }
+            if !writes.isEmpty {
+                fixes.append(AlbumFix(kind: .artistCredit,
+                                      summary: confident
+                                        ? "Split \(writes.count) stuffed artist tag\(writes.count == 1 ? "" : "s") — primary artist + performer credits"
+                                        : "Possibly split \(writes.count) artist list\(writes.count == 1 ? "" : "s") — CHECK it's not a band name first",
+                                      lines: lines, enabled: confident, applyable: true,
+                                      tagWrites: writes, performerAdds: perf))
             }
         }
 
