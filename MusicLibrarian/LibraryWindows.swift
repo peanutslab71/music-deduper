@@ -1741,6 +1741,32 @@ enum AlbumPerfect {
                                       summary: "\(missing.count) of \(match.tracks.count) tracks missing from “\(match.title)” — kept so the album shows the gaps",
                                       lines: lines, enabled: false, applyable: false))
             }
+
+            // Correct disc & track numbers FROM the matched release when the on-disk tags
+            // are broken — a flattened multi-disc set has duplicate (disc,track) keys (every
+            // track wrongly tagged one disc). The release is authoritative for which disc a
+            // title belongs to, so write its numbers rather than guess. (Tags only; a later
+            // Perfect pass re-tidies the file names once the numbers are right.)
+            let dupKeys = Dictionary(grouping: kept, by: { $0.discNo * 1000 + $0.trackNo }).contains { $0.value.count > 1 }
+            if dupKeys {
+                let slotByTitle = Dictionary(match.tracks.map { (TrackProposal.typoFold($0.title).lowercased(), $0) },
+                                             uniquingKeysWith: { a, _ in a })
+                var writes: [(rel: String, field: String, value: String)] = []
+                var lines: [String] = []
+                for t in kept {
+                    guard let slot = slotByTitle[TrackProposal.typoFold(t.title).lowercased()] else { continue }
+                    if t.discNo != slot.disc { writes.append((rel(t.url), "disc", String(slot.disc))) }
+                    if t.trackNo != slot.track { writes.append((rel(t.url), "track", String(slot.track))) }
+                    if t.discNo != slot.disc || t.trackNo != slot.track {
+                        lines.append("“\(t.title)” → disc \(slot.disc), track \(slot.track)")
+                    }
+                }
+                if !writes.isEmpty {
+                    fixes.append(AlbumFix(kind: .discOrder,
+                                          summary: "Fix disc & track numbers from “\(match.title)” (\(lines.count) track\(lines.count == 1 ? "" : "s"))",
+                                          lines: lines, enabled: true, applyable: true, tagWrites: writes))
+                }
+            }
         }
 
         return (fixes, art, reconcile)

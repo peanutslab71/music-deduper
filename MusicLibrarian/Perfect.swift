@@ -2792,6 +2792,30 @@ final class PerfectStore: ObservableObject {
                         .sorted { ($0.disc, $0.track) < ($1.disc, $1.track) }
                     // always remember the matched tracklist so the inspector can show gaps
                     AlbumReconcileStore.save(folder, match)
+
+                    // Correct disc & track numbers FROM the matched release when the on-disk
+                    // tags are broken — a flattened multi-disc set with duplicate (disc,track)
+                    // keys (every track wrongly tagged one disc). The release is authoritative
+                    // for which disc a title is on. Reversible; parity with per-album Perfect.
+                    let dupKeys = Dictionary(grouping: tracks, by: { $0.discNo * 1000 + $0.trackNo }).contains { $0.value.count > 1 }
+                    if dupKeys {
+                        let slotByTitle = Dictionary(match.tracks.map { (TrackProposal.typoFold($0.title).lowercased(), $0) },
+                                                     uniquingKeysWith: { a, _ in a })
+                        for t in tracks {
+                            if box.cancelled { break }
+                            guard let slot = slotByTitle[TrackProposal.typoFold(t.title).lowercased()] else { continue }
+                            let rel = Self.rel(t.url, root)
+                            if t.discNo != slot.disc {
+                                do { try Self.writeField(t.url, "disc", to: String(slot.disc))
+                                     tagEdits.append((rel, "disc", t.discNo == 0 ? "" : String(t.discNo))) } catch {}
+                            }
+                            if t.trackNo != slot.track {
+                                do { try Self.writeField(t.url, "track", to: String(slot.track))
+                                     tagEdits.append((rel, "track", t.trackNo == 0 ? "" : String(t.trackNo))) } catch {}
+                            }
+                        }
+                    }
+
                     guard !missing.isEmpty else { continue }
                     let lines = missing.map { "Disc \($0.disc) · \($0.track). \($0.title)" }
                     missingReports.append(MissingAlbumReport(artist: artist, album: match.title,
