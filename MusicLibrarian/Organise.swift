@@ -378,7 +378,12 @@ enum Organiser {
             ? name.replacingOccurrences(of: #"^\d+-"#, with: "", options: .regularExpression)
             : name
         let digits = afterDisc.prefix(while: { $0.isNumber })
-        guard let n = Int(digits), n > 0 else { return nil }
+        // A track number is 1–3 digits. A 4+-digit leading run is a year or catalogue
+        // number ("1999 - Song", "2001 A Space Odyssey"), NOT a track — don't invent a
+        // track tag from it. Also require a separator after it so "1999Song" isn't split.
+        guard digits.count <= 3, let n = Int(digits), n > 0, n <= 199 else { return nil }
+        let after = afterDisc.dropFirst(digits.count).first
+        guard after == nil || after == " " || after == "." || after == "-" || after == "_" || after == ")" else { return nil }
         return n
     }
 
