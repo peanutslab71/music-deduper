@@ -562,6 +562,14 @@ private struct DiscogsTrack: Decodable {
 }
 private struct DiscogsImage: Decodable { let type: String?; let uri: String? }
 
+// Deezer TRACK search — for a short preview clip to confirm an identify match by ear.
+private struct DeezerTrackSearch: Decodable { let data: [DeezerTrackHit]? }
+private struct DeezerTrackHit: Decodable {
+    let title: String?
+    let artist: DeezerArtist?
+    let preview: String?   // ~30s MP3 URL
+}
+
 /// Looks up MusicBrainz relationships for a recording. An actor so its per-run
 /// caches are safe, and it serialises requests — MusicBrainz allows ~1 req/sec,
 /// so each network call waits a beat, and works/releases are cached to avoid
@@ -1072,6 +1080,64 @@ actor CoverArtClient {
 
     /// Deezer album cover (cover_xl, ~1000px). No key. Only the best title+artist
     /// match, so we never grab another album's art.
+    /// A short (~30s) preview clip of a track, so you can confirm an identify match by
+    /// ear before accepting it. Tries iTunes (previewUrl) then Deezer (preview), and
+    /// downloads to a temp file AVAudioPlayer can play. Returns nil if neither has one.
+    func trackPreview(artist: String, title: String) async -> URL? {
+        guard !title.isEmpty else { return nil }
+        var src = await itunesPreviewURL(artist: artist, title: title)
+        if src == nil { src = await deezerPreviewURL(artist: artist, title: title) }
+        guard let u = src,
+              let (data, resp) = try? await session.data(from: u),
+              (resp as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty else { return nil }
+        let ext = u.pathExtension.isEmpty ? "m4a" : u.pathExtension
+        var h: UInt64 = 5381; for b in "\(artist)|\(title)".utf8 { h = (h &* 33) &+ UInt64(b) }
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mlpreview-\(String(h, radix: 16)).\(ext)")
+        do { try data.write(to: tmp) } catch { return nil }
+        return tmp
+    }
+
+    private func itunesPreviewURL(artist: String, title: String) async -> URL? {
+        let termRaw = (artist + " " + title).trimmingCharacters(in: .whitespaces)
+        guard let term = termRaw.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://itunes.apple.com/search?term=\(term)&entity=song&limit=15"),
+              let (data, resp) = try? await session.data(from: url),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let results = json["results"] as? [[String: Any]] else { return nil }
+        let wantTitle = TrackProposal.typoFold(title).lowercased()
+        let wantArtist = TrackProposal.typoFold(artist).lowercased()
+        let ranked = results.compactMap { r -> (Int, String)? in
+            guard let preview = r["previewUrl"] as? String else { return nil }
+            let tn = TrackProposal.typoFold(r["trackName"] as? String ?? "").lowercased()
+            let an = TrackProposal.typoFold(r["artistName"] as? String ?? "").lowercased()
+            let titleOK = tn == wantTitle || tn.contains(wantTitle) || wantTitle.contains(tn)
+            let artistOK = wantArtist.isEmpty || an == wantArtist || an.contains(wantArtist) || wantArtist.contains(an)
+            guard titleOK else { return nil }
+            return (artistOK ? 2 : 1, preview)
+        }.sorted { $0.0 > $1.0 }
+        return ranked.first.flatMap { URL(string: $0.1) }
+    }
+
+    private func deezerPreviewURL(artist: String, title: String) async -> URL? {
+        let q = "track:\"\(title)\" artist:\"\(artist)\""
+        guard let enc = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://api.deezer.com/search?q=\(enc)&limit=10"),
+              let (data, resp) = try? await session.data(from: url),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let search = try? JSONDecoder().decode(DeezerTrackSearch.self, from: data) else { return nil }
+        let wantTitle = TrackProposal.typoFold(title).lowercased()
+        let wantArtist = TrackProposal.typoFold(artist).lowercased()
+        let hit = (search.data ?? []).first { h in
+            let tn = TrackProposal.typoFold(h.title ?? "").lowercased()
+            let an = TrackProposal.typoFold(h.artist?.name ?? "").lowercased()
+            let titleOK = tn == wantTitle || tn.contains(wantTitle) || wantTitle.contains(tn)
+            let artistOK = wantArtist.isEmpty || an == wantArtist || an.contains(wantArtist) || wantArtist.contains(an)
+            return titleOK && artistOK && !(h.preview ?? "").isEmpty
+        }
+        return hit?.preview.flatMap { URL(string: $0) }
+    }
+
     func deezerCovers(artist: String, album: String, limit: Int = 3) async -> [Data] {
         guard !album.isEmpty else { return [] }
         let q = "artist:\"\(artist)\" album:\"\(album)\""

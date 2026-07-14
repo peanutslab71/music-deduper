@@ -109,6 +109,11 @@ struct PerfectView: View {
     @State private var expanded: Set<String> = []   // all sections collapsed initially — reads as a summary
     @State private var showSettings = false
     @State private var queueIndex = 0                // position in the step-through review queue
+    // A/B preview: a ~30s clip of the PROPOSED match, so a queue item can be checked
+    // by ear against the original file. Fetched on demand, cached per proposal.
+    @State private var previewURL: [UUID: URL] = [:]
+    @State private var previewLoading: Set<UUID> = []
+    @State private var previewMissing: Set<UUID> = []   // no preview found for these
     @State private var savedFlash = false            // brief "Saved" toast after a queue decision
     @State private var showResetConfirm = false      // "Start over" confirmation
     @ObservedObject private var creds = APICredentials.shared   // live API-key status
@@ -1360,14 +1365,23 @@ struct PerfectView: View {
 
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 6) {
-                            playButton(p.url)
                             Text(p.newTitle.isEmpty ? p.curTitle : p.newTitle).font(.headline)
                             Text(String(format: "%.0f%% by sound", p.score * 100))
                                 .font(.caption2).foregroundStyle(p.score >= 0.9 ? .green : .orange)
                             Spacer()
                             changeKindTags(p)
                         }
-                        scrubber(p.url)
+                        // A/B: play your file vs a preview of the proposed match — hear
+                        // both; picking one switches playback (one player) so you can
+                        // confirm the identification is really the same song.
+                        HStack(spacing: 8) {
+                            playButton(p.url)
+                            Text("your file").font(.caption2).foregroundStyle(.teal)
+                            Text("vs").font(.caption2).foregroundStyle(.tertiary)
+                            proposedPlayButton(p)
+                            Spacer()
+                        }
+                        scrubber(audio.playingURL ?? p.url)
                         // who/what this track is — so a decision is possible even with no cover
                         Text("\(p.newArtist.isEmpty ? p.curArtist : p.newArtist) · \(p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum)")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
@@ -1579,6 +1593,46 @@ struct PerfectView: View {
                 .font(.system(size: 18)).foregroundStyle(drm ? Color.secondary : (playing ? Color.red : Color.teal))
         }.buttonStyle(.plain).disabled(drm)
         .help(drm ? "Protected (DRM) — this file can't be played or re-encoded" : (playing ? "Stop" : "Listen"))
+    }
+
+    /// Play a ~30s preview of the PROPOSED match (from iTunes/Deezer), so you can
+    /// hear whether it's really the same song as your file. Playing it switches
+    /// playback away from the original (one player), which is the A/B compare.
+    @ViewBuilder private func proposedPlayButton(_ p: TrackProposal) -> some View {
+        let loading = previewLoading.contains(p.id)
+        let missing = previewMissing.contains(p.id)
+        let tmp = previewURL[p.id]
+        let playing = tmp != nil && audio.playingURL == tmp
+        Button { playProposedPreview(p) } label: {
+            HStack(spacing: 3) {
+                if loading { ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 18, height: 18) }
+                else {
+                    Image(systemName: missing ? "waveform.slash" : (playing ? "stop.circle.fill" : "waveform.circle"))
+                        .font(.system(size: 18))
+                        .foregroundStyle(missing ? Color.secondary : (playing ? Color.red : Color.purple))
+                }
+                Text("match").font(.caption2).foregroundStyle(missing ? Color.secondary : Color.purple)
+            }
+        }
+        .buttonStyle(.plain).disabled(loading || missing)
+        .help(missing ? "No online preview found for the proposed match"
+                      : "Hear a short preview of the proposed match to check it's the same song")
+    }
+
+    private func playProposedPreview(_ p: TrackProposal) {
+        if let tmp = previewURL[p.id] { audio.toggle(tmp); return }
+        guard !previewLoading.contains(p.id), !previewMissing.contains(p.id) else { return }
+        let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
+        let title = p.newTitle.isEmpty ? p.curTitle : p.newTitle
+        previewLoading.insert(p.id)
+        Task {
+            let url = await CoverArtClient().trackPreview(artist: artist, title: title)
+            await MainActor.run {
+                previewLoading.remove(p.id)
+                if let url { previewURL[p.id] = url; audio.toggle(url) }
+                else { previewMissing.insert(p.id) }
+            }
+        }
     }
 
     /// A seek bar so you can skip through the track while reviewing it.
