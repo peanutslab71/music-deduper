@@ -1311,6 +1311,7 @@ struct AlbumFix: Identifiable {
         case albumArtist = "Album artist"
         case compilation = "Compilation"
         case discOrder = "Disc order"
+        case credits = "Credits"
         case artwork = "Cover art"
         case duplicate = "Duplicates"
         case filename = "File names"
@@ -1326,6 +1327,7 @@ struct AlbumFix: Identifiable {
     var tagWrites: [(rel: String, field: String, value: String)] = []
     var moves: [(from: String, to: String)] = []
     var artEmbeds: [(rel: String, image: Data, mime: String)] = []
+    var performerAdds: [(rel: String, name: String, role: String)] = []
 
     var systemImage: String {
         switch kind {
@@ -1334,6 +1336,7 @@ struct AlbumFix: Identifiable {
         case .albumArtist: return "person.2"
         case .compilation: return "person.3.sequence"
         case .discOrder: return "opticaldisc"
+        case .credits: return "music.mic"
         case .artwork: return "photo"
         case .duplicate: return "doc.on.doc"
         case .filename: return "character.cursor.ibeam"
@@ -1341,7 +1344,7 @@ struct AlbumFix: Identifiable {
         case .damaged: return "exclamationmark.triangle"
         }
     }
-    var changeCount: Int { tagWrites.count + moves.count + artEmbeds.count }
+    var changeCount: Int { tagWrites.count + moves.count + artEmbeds.count + performerAdds.count }
 }
 
 /// Cover-art context for the interactive chooser in the sheet: each kept track's
@@ -1413,6 +1416,8 @@ enum AlbumPerfect {
         // no AcoustID key (Settings ⌘,) — the offline fixes still run.
         var idWrites: [(rel: String, field: String, value: String)] = []
         var idLines: [String] = []
+        var recIDByRel: [String: String] = [:]   // rel → MusicBrainz recording id (for credit enrichment)
+        var seedRecID: String?
         let acoustIDKey = Identifier.configuredKey
         if !acoustIDKey.isEmpty {
             let ident = Identifier(apiKey: acoustIDKey)
@@ -1426,6 +1431,7 @@ enum AlbumPerfect {
                 guard let p = try? await ident.resolve(url: t.url, relPath: rel(t.url), fingerprint: fp,
                                                        curArtist: t.artist, curTitle: t.title, curAlbum: t.album,
                                                        curHasArt: hasArt, curComposer: comp, curLabel: label) else { continue }
+                if let rid = p.recordingID, !rid.isEmpty { recIDByRel[rel(t.url)] = rid; if seedRecID == nil { seedRecID = rid } }
                 if nameChanged(t.title, p.newTitle) {
                     idWrites.append((rel(t.url), "title", p.newTitle))
                     idLines.append("“\(t.title.isEmpty ? t.url.lastPathComponent : t.title)” → “\(p.newTitle)”")
@@ -1564,6 +1570,43 @@ enum AlbumPerfect {
                 fixes.append(AlbumFix(kind: .discOrder,
                                       summary: "Assign disc numbers — looks like a \(discCount)-disc set flattened into one folder (\(writes.count) tracks)",
                                       lines: lines, enabled: true, applyable: true, tagWrites: writes))
+            }
+        }
+
+        // ---- 3c. Credits — the wizard's "Details" step scoped to this album. In ~2
+        // requests, pull performers, composer, lyricist, label and date for the whole
+        // album, then gap-fill BLANK fields and add performer credits not already
+        // present (md_has_performer keeps it idempotent). Needs identify (recording ids).
+        if !acoustIDKey.isEmpty, let seed = seedRecID {
+            let credits = await MusicBrainzClient().albumCredits(
+                seedRecordingID: seed, albumTitle: dominantAlbum.isEmpty ? fallbackAlbum : dominantAlbum,
+                groupSize: kept.count)
+            var writes: [(rel: String, field: String, value: String)] = []
+            var perf: [(rel: String, name: String, role: String)] = []
+            var lines: [String] = []
+            for t in kept {
+                let e = recIDByRel[rel(t.url)].flatMap { credits.byRecording[$0] }
+                    ?? credits.byTitle[TrackProposal.typoFold(t.title).lowercased()]
+                guard let e = e, !e.isEmpty else { continue }
+                var got: [String] = []
+                for (field, value) in [("composer", e.composer), ("lyricist", e.lyricist), ("label", e.label), ("date", e.date)] {
+                    if let v = value, !v.isEmpty, (PerfectStore.readField(t.url, field) ?? "").isEmpty {
+                        writes.append((rel(t.url), field, v)); got.append(field)
+                    }
+                }
+                let newPerf = e.performers.filter { md_has_performer(t.url.path, $0.name, $0.role) == 0 }
+                for pr in newPerf { perf.append((rel(t.url), pr.name, pr.role)) }
+                if !newPerf.isEmpty { got.append("\(newPerf.count) credit\(newPerf.count == 1 ? "" : "s")") }
+                if !got.isEmpty { lines.append("“\(t.title)” — \(got.joined(separator: ", "))") }
+            }
+            if !writes.isEmpty || !perf.isEmpty {
+                var parts: [String] = []
+                if !writes.isEmpty { parts.append("\(writes.count) tag\(writes.count == 1 ? "" : "s")") }
+                if !perf.isEmpty { parts.append("\(perf.count) performer credit\(perf.count == 1 ? "" : "s")") }
+                fixes.append(AlbumFix(kind: .credits,
+                                      summary: "Add \(parts.joined(separator: " + ")) from MusicBrainz / Discogs",
+                                      lines: lines, enabled: true, applyable: true,
+                                      tagWrites: writes, performerAdds: perf))
             }
         }
 
@@ -1829,9 +1872,10 @@ struct PerfectAlbumSheet: View {
         let tagWrites = chosen.flatMap { $0.tagWrites }
         let moves = chosen.flatMap { $0.moves }
         let embeds = chosen.flatMap { $0.artEmbeds } + artEmbeds   // checklist art (none now) + the chosen cover
+        let perfAdds = chosen.flatMap { $0.performerAdds }
         let name = album.album.isEmpty ? album.dir.lastPathComponent : album.album
         store.applyLibraryRun(root: root, summary: "Perfected album — \(name)",
-                              tagWrites: tagWrites, moves: moves, artEmbeds: embeds) {
+                              tagWrites: tagWrites, moves: moves, artEmbeds: embeds, performerAdds: perfAdds) {
             applying = false
             dismiss()
             onApplied()

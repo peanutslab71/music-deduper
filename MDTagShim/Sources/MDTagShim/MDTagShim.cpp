@@ -261,6 +261,42 @@ extern "C" int md_remove_performer(const char *path, const char *name, const cha
     return performerEdit(path, name, role, false);
 }
 
+// Is this exact performer credit (name + role) already present? Mirrors how
+// performerEdit stores it per format, so a gap-fill can skip a duplicate.
+extern "C" int md_has_performer(const char *path, const char *name, const char *role) {
+    if (path == nullptr || name == nullptr || role == nullptr) return 0;
+    TagLib::String nm(name, TagLib::String::UTF8);
+    TagLib::String rl(role, TagLib::String::UTF8);
+    TagLib::String combined = nm + " (" + rl + ")";   // flac/mp4 form
+    switch (kindOf(path)) {
+    case MD_MP3: {
+        TagLib::MPEG::File f(path);
+        if (!f.isValid() || !f.ID3v2Tag()) return 0;
+        TagLib::PropertyMap props = f.ID3v2Tag()->properties();
+        TagLib::String key = (TagLib::String("PERFORMER:") + rl).upper();
+        auto it = props.find(key);
+        if (it != props.end()) { for (const auto &v : it->second) if (v == nm) return 1; }
+        return 0;
+    }
+    case MD_FLAC: {
+        TagLib::FLAC::File f(path);
+        if (!f.isValid() || !f.xiphComment()) return 0;
+        const auto &m = f.xiphComment()->fieldListMap();
+        auto it = m.find("PERFORMER");
+        if (it != m.end()) { for (const auto &v : it->second) if (v == combined) return 1; }
+        return 0;
+    }
+    case MD_MP4: {
+        TagLib::MP4::File f(path);
+        if (!f.isValid() || !f.tag()) return 0;
+        const char *ck = "----:com.apple.iTunes:PERFORMER";
+        if (f.tag()->contains(ck)) { for (const auto &v : f.tag()->item(ck).toStringList()) if (v == combined) return 1; }
+        return 0;
+    }
+    default: return 0;
+    }
+}
+
 // Does the file already have embedded cover art (any picture)? 1 = yes, 0 = no.
 extern "C" int md_has_artwork(const char *path) {
     if (path == nullptr) return -3;

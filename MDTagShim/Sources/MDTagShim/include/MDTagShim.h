@@ -24,6 +24,10 @@ int md_add_performer(const char *path, const char *name, const char *role);
 /// Remove a performer credit (for undo). Returns 0 on success, negative on error.
 int md_remove_performer(const char *path, const char *name, const char *role);
 
+/// Whether a performer credit (exact name + role) is already present. 1 = yes, 0 = no.
+/// Lets a gap-fill avoid adding a duplicate credit when run more than once.
+int md_has_performer(const char *path, const char *name, const char *role);
+
 /// Embedded cover art. has: 1=any picture present, 0=none. set: embed a FRONT
 /// cover (jpeg/png bytes), replacing existing art. remove: strip cover art (undo).
 /// Works for mp3 (ID3 APIC), m4a/aac/mp4 (covr atom), flac (picture block).

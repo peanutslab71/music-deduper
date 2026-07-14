@@ -2760,11 +2760,13 @@ final class PerfectStore: ObservableObject {
                          tagWrites: [(rel: String, field: String, value: String)] = [],
                          moves: [(from: String, to: String)] = [],
                          artEmbeds: [(rel: String, image: Data, mime: String)] = [],
+                         performerAdds: [(rel: String, name: String, role: String)] = [],
                          then: (@MainActor () -> Void)? = nil) {
         busy = true; status = "Applying…"
         Task {   // @MainActor-isolated (this method is on the store); disk work suspends off-main
             await Self.performLibraryOps(root: root, summary: summary,
-                                         tagWrites: tagWrites, moves: moves, artEmbeds: artEmbeds)
+                                         tagWrites: tagWrites, moves: moves, artEmbeds: artEmbeds,
+                                         performerAdds: performerAdds)
             // Cover art / paths on disk just changed — drop the cached thumbnails so the
             // grid and album covers reload from the files (clear() bumps ArtRefresh).
             ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
@@ -2778,7 +2780,8 @@ final class PerfectStore: ObservableObject {
     nonisolated static func performLibraryOps(root: URL, summary: String,
                                               tagWrites: [(rel: String, field: String, value: String)],
                                               moves: [(from: String, to: String)],
-                                              artEmbeds: [(rel: String, image: Data, mime: String)] = []) async {
+                                              artEmbeds: [(rel: String, image: Data, mime: String)] = [],
+                                              performerAdds: [(rel: String, name: String, role: String)] = []) async {
         let fm = FileManager.default
         let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
         let qRel = "Music Librarian Quarantine/\(stamp)"
@@ -2786,6 +2789,7 @@ final class PerfectStore: ObservableObject {
         try? fm.createDirectory(at: quarantine, withIntermediateDirectories: true)
         var ops: [(from: String, to: String)] = []
         var tagEdits: [(rel: String, field: String, old: String)] = []
+        var perfEdits: [(rel: String, name: String, role: String)] = []   // credits added → undo removes them
         var artEdits: [String] = []                                   // art added where there was none → undo strips it
         var artReplacements: [(rel: String, backup: String, oldType: Int)] = []  // art replaced → undo restores backup
         var log = "Music Librarian — change log \(Date())\nLibrary: \(root.path)\n\n"
@@ -2796,6 +2800,14 @@ final class PerfectStore: ObservableObject {
             if old == w.value { continue }
             do { try writeField(url, w.field, to: w.value); tagEdits.append((w.rel, w.field, old))
                  log += "TAG: \(w.rel)  \(w.field) '\(old)' → '\(w.value)'\n" } catch {}
+        }
+        // performer credits — added to the musician-credits list, recorded so undo
+        // removes exactly what was added. Skip any already present (idempotent).
+        for p in performerAdds {
+            let url = root.appendingPathComponent(p.rel)
+            guard fm.fileExists(atPath: url.path), md_has_performer(url.path, p.name, p.role) == 0 else { continue }
+            do { try addPerformer(url, name: p.name, role: p.role); perfEdits.append((p.rel, p.name, p.role))
+                 log += "CREDIT: \(p.rel)  + \(p.name) (\(p.role))\n" } catch {}
         }
         // Embed artwork BEFORE any moves so the recorded rels are the files' original
         // paths (undo reverses moves first, then restores art by rel). Existing art is
@@ -2851,7 +2863,7 @@ final class PerfectStore: ObservableObject {
                 log += "\(m.to.isEmpty ? "DELETE → quarantine" : "MOVE"): \(m.from) → \(toRel)\n"
             } catch { log += "FAILED \(m.from): \(error.localizedDescription)\n" }
         }
-        let total = ops.count + tagEdits.count + artEdits.count + artReplacements.count
+        let total = ops.count + tagEdits.count + perfEdits.count + artEdits.count + artReplacements.count
         log += "\n\(total) change(s). Restore with 'Undo this run'.\n"
         try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
         let record: [String: Any] = [
@@ -2859,7 +2871,8 @@ final class PerfectStore: ObservableObject {
             "root": root.path, "summary": summary,
             "ops": ops.map { ["from": $0.from, "to": $0.to] },
             "tagEdits": tagEdits.map { ["rel": $0.rel, "field": $0.field, "old": $0.old] },
-            "perfEdits": [], "artEdits": artEdits, "artPromotions": [],
+            "perfEdits": perfEdits.map { ["rel": $0.rel, "name": $0.name, "role": $0.role] },
+            "artEdits": artEdits, "artPromotions": [],
             "artReplacements": artReplacements.map { ["rel": $0.rel, "backup": $0.backup, "oldType": String($0.oldType)] }
         ]
         if let data = try? JSONSerialization.data(withJSONObject: record) {
