@@ -2323,7 +2323,16 @@ final class PerfectStore: ObservableObject {
                 guard fm.fileExists(atPath: from.path) else { return false }
                 do {
                     try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    try fm.moveItem(at: from, to: to)
+                    if from.path != to.path && from.path.lowercased() == to.path.lowercased() {
+                        // case-only rename: go via a temp name so a case-insensitive
+                        // filesystem actually applies it
+                        let tmp = to.deletingLastPathComponent().appendingPathComponent(".mdtmp-\(to.lastPathComponent)")
+                        try? fm.removeItem(at: tmp)
+                        try fm.moveItem(at: from, to: tmp)
+                        try fm.moveItem(at: tmp, to: to)
+                    } else {
+                        try fm.moveItem(at: from, to: to)
+                    }
                     ops.append((fromRel, toRel))
                     return true
                 } catch { log += "FAILED \(fromRel): \(error.localizedDescription)\n"; return false }
@@ -2685,7 +2694,10 @@ final class PerfectStore: ObservableObject {
                         // duration), this source is a leftover duplicate the dedup pass didn't
                         // fold in — quarantine it rather than stranding it in a stray folder.
                         let dst = root.appendingPathComponent(target)
-                        if fm.fileExists(atPath: dst.path) {
+                        // A case-only rename on a case-insensitive volume makes the target
+                        // "exist" (it's the SAME file) — that's a rename, not a collision.
+                        let caseOnly = src.path != dst.path && src.path.lowercased() == dst.path.lowercased()
+                        if !caseOnly && fm.fileExists(atPath: dst.path) {
                             let sSize = (try? src.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
                             let dSize = (try? dst.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -2
                             var sameTrack = (sSize == dSize)

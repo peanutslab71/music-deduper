@@ -174,7 +174,10 @@ struct TrackProposal: Identifiable, Codable {
 
         // 1) feat/ft/featuring — a pop guest, unambiguous. All extras are performers.
         if let r = s.range(of: #"\s+(feat\.?|ft\.?|featuring)\s+"#, options: [.regularExpression, .caseInsensitive]) {
-            let primary = String(s[s.startIndex..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+            // "A, feat. B" / "A & feat. B": the regex anchors on whitespace, so a
+            // separator just before the keyword would survive into the primary
+            let primary = String(s[s.startIndex..<r.lowerBound])
+                .trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: ",&")))
             let rest = parts(String(s[r.upperBound...]))
             guard !primary.isEmpty, !rest.isEmpty else { return nil }
             return (primary, rest.map { ($0, "performer") }, true)
@@ -774,6 +777,7 @@ actor MusicBrainzClient {
     /// first whose tracklist clears the overlap gate. Skips heading/index rows and
     /// derives (disc, track) from Discogs positions ("2-13", "A1", "5").
     private func matchReleaseDiscogs(artist: String, album: String, want: Set<String>) async -> MBReleaseMatch? {
+        guard !discogsToken.isEmpty else { return nil }   // /database/search 401s anonymously
         var comps = URLComponents(string: "https://api.discogs.com/database/search")!
         comps.queryItems = [.init(name: "type", value: "release"),
                             .init(name: "artist", value: artist),
@@ -840,9 +844,12 @@ actor MusicBrainzClient {
               let url = URL(string: "https://api.deezer.com/album/\(id)"),
               let detail: DeezerAlbumDetail = await getDeezer(url) else { return nil }
         var out: [MBReleaseTrack] = []
+        var perDisc: [Int: Int] = [:]   // fallback counter resets per disc, not per release
         for t in detail.tracks?.data ?? [] {
             guard let title = t.title, !title.isEmpty else { continue }
-            out.append(MBReleaseTrack(disc: max(1, t.disk_number ?? 1), track: t.track_position ?? (out.count + 1),
+            let disc = max(1, t.disk_number ?? 1)
+            perDisc[disc, default: 0] += 1
+            out.append(MBReleaseTrack(disc: disc, track: t.track_position ?? perDisc[disc]!,
                                       title: title, lengthMs: t.duration.map { $0 * 1000 }))
         }
         guard !out.isEmpty, overlap(out, want) >= 0.6 else { return nil }

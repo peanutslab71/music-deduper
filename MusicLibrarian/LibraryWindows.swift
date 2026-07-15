@@ -341,9 +341,14 @@ struct MergeAlbumsSheet: View {
         var tagWrites: [(rel: String, field: String, value: String)] = []
         var moves: [(from: String, to: String)] = []
         for a in g {
-            let disc = discOf(a)
+            let folderDisc = discOf(a)
             for f in a.files {
                 tagWrites.append((rel(f), "album", clean))       // consistent album name
+                // A file that already carries a disc tag keeps it (a flat multi-disc rip
+                // has disc 1 AND disc 2 in one folder) — the folder-derived disc is only
+                // the fallback for untagged files.
+                let tagged = Int((PerfectStore.readField(f, "disc") ?? "").prefix(while: \.isNumber)) ?? 0
+                let disc = tagged > 0 ? tagged : folderDisc
                 tagWrites.append((rel(f), "disc", String(disc))) // so tracks sort by disc
                 if a.id != primary.id {
                     // disc-prefix the moved file so it can't collide with a same-numbered
@@ -1341,6 +1346,7 @@ struct AlbumFix: Identifiable {
     var lines: [String] = []             // per-item detail
     var enabled: Bool                    // checklist toggle
     let applyable: Bool                  // false = information only (e.g. damaged)
+    var needsDiscOrder = false           // built from release-corrected numbers → invalid without the disc fix
     var tagWrites: [(rel: String, field: String, value: String)] = []
     var moves: [(from: String, to: String)] = []
     var artEmbeds: [(rel: String, image: Data, mime: String)] = []
@@ -1699,6 +1705,7 @@ enum AlbumPerfect {
         } else {
             match = nil
         }
+        var discCorrected = false   // 4b rewrote kept's numbers from the release
         if let match = match {
             if reconcile != nil {   // list the gaps only on a fresh reconcile (else it's noise)
                 let haveFolded = Set(kept.map { TrackProposal.typoFold($0.title).lowercased() })
@@ -1735,11 +1742,15 @@ enum AlbumPerfect {
                     fixes.append(AlbumFix(kind: .discOrder,
                                           summary: "Fix disc & track numbers from “\(match.title)” (\(lines.count) track\(lines.count == 1 ? "" : "s"))",
                                           lines: lines, enabled: true, applyable: true, tagWrites: writes))
+                    discCorrected = true
                 }
             }
         }
 
         // ---- 5. File-name tidy → "## Title.ext" (disc-prefixed on multi-disc sets).
+        // When 4b corrected kept's numbers from the release, these names embed that
+        // correction — applying them without the disc fix would rename files to
+        // numbers never written, so the fix is marked dependent (needsDiscOrder).
         let multiDisc = kept.contains { $0.discNo > 1 }
         var renames: [(from: String, to: String)] = []
         var renameLines: [String] = []
@@ -1757,7 +1768,8 @@ enum AlbumPerfect {
         }
         if !renames.isEmpty {
             fixes.append(AlbumFix(kind: .filename, summary: "Tidy \(renames.count) file name\(renames.count == 1 ? "" : "s") to “## Title”",
-                                  lines: renameLines, enabled: true, applyable: true, moves: renames))
+                                  lines: renameLines, enabled: true, applyable: true,
+                                  needsDiscOrder: discCorrected, moves: renames))
         }
 
         // ---- 6. Possibly-damaged flag: lone very-short files with no full-length twin.
@@ -1843,7 +1855,16 @@ struct PerfectAlbumSheet: View {
                                     .font(.callout).foregroundStyle(.secondary)
                             }.frame(maxWidth: .infinity, alignment: .leading).padding(14)
                         } else {
-                            ForEach($fixes) { $fix in FixRow(fix: $fix) }
+                            ForEach($fixes) { $fix in
+                                FixRow(fix: Binding(get: { fix }, set: { new in
+                                    fix = new
+                                    // the file-name tidy embeds the disc correction's numbers —
+                                    // declining the correction unchecks the dependent renames too
+                                    if new.kind == .discOrder && !new.enabled {
+                                        for i in fixes.indices where fixes[i].needsDiscOrder { fixes[i].enabled = false }
+                                    }
+                                }))
+                            }
                         }
                     }
                 }
@@ -1959,7 +1980,10 @@ struct PerfectAlbumSheet: View {
         if let r = reconcile { AlbumReconcileStore.save(album.id, r) }
         guard hasChanges else { dismiss(); onApplied(); return }   // reconcile-only: nothing to write
         applying = true
-        let chosen = applyable
+        // belt and braces for the UI coupling above: renames built from the release
+        // correction must not run if the correction itself isn't being written
+        let discOn = fixes.contains { $0.kind == .discOrder && $0.enabled }
+        let chosen = applyable.filter { !($0.needsDiscOrder && !discOn) }
         let tagWrites = chosen.flatMap { $0.tagWrites }
         let moves = chosen.flatMap { $0.moves }
         let embeds = chosen.flatMap { $0.artEmbeds } + artEmbeds   // checklist art (none now) + the chosen cover
