@@ -1560,6 +1560,7 @@ struct AlbumFix: Identifiable {
     var moves: [(from: String, to: String)] = []
     var artEmbeds: [(rel: String, image: Data, mime: String)] = []
     var performerAdds: [(rel: String, name: String, role: String)] = []
+    var proposals: [TrackProposal] = []   // identify only: the per-track A/B data behind the lines
 
     var systemImage: String {
         switch kind {
@@ -1650,6 +1651,7 @@ enum AlbumPerfect {
         // no AcoustID key (Settings ⌘,) — the offline fixes still run.
         var idWrites: [(rel: String, field: String, value: String)] = []
         var idLines: [String] = []
+        var idProposals: [TrackProposal] = []
         var recIDByRel: [String: String] = [:]   // rel → MusicBrainz recording id (for credit enrichment)
         var seedRecID: String?
         let acoustIDKey = Identifier.configuredKey
@@ -1666,16 +1668,20 @@ enum AlbumPerfect {
                                                        curArtist: t.artist, curTitle: t.title, curAlbum: t.album,
                                                        curHasArt: hasArt, curComposer: comp, curLabel: label) else { continue }
                 if let rid = p.recordingID, !rid.isEmpty { recIDByRel[rel(t.url)] = rid; if seedRecID == nil { seedRecID = rid } }
+                var proposed = false
                 if nameChanged(t.title, p.newTitle) {
                     idWrites.append((rel(t.url), "title", p.newTitle))
                     idLines.append("“\(t.title.isEmpty ? t.url.lastPathComponent : t.title)” → “\(p.newTitle)”")
                     tracks[i].title = p.newTitle
+                    proposed = true
                 }
                 if nameChanged(t.artist, p.newArtist) {
                     idWrites.append((rel(t.url), "artist", p.newArtist))
                     idLines.append("artist: \(t.artist.isEmpty ? "—" : t.artist) → \(p.newArtist)")
                     tracks[i].artist = p.newArtist
+                    proposed = true
                 }
+                if proposed { idProposals.append(p) }   // retained for the v2 review roll-up
             }
         }
 
@@ -1701,7 +1707,8 @@ enum AlbumPerfect {
         if !liveIdWrites.isEmpty {
             let n = Set(liveIdWrites.map { $0.rel }).count
             fixes.append(AlbumFix(kind: .identify, summary: "Identify \(n) track\(n == 1 ? "" : "s") by sound (AcoustID)",
-                                  lines: idLines, enabled: true, applyable: true, tagWrites: liveIdWrites))
+                                  lines: idLines, enabled: true, applyable: true, tagWrites: liveIdWrites,
+                                  proposals: idProposals.filter { !removed.contains($0.relPath) }))
         }
         if !dupMoves.isEmpty {
             fixes.append(AlbumFix(kind: .duplicate,

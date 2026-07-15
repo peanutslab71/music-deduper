@@ -24,16 +24,29 @@ extension PerfectStore {
 final class PerfectV2Driver: ObservableObject {
     @Published var running = false
     @Published var progress = ""
-    @Published var lines: [String] = []            // session log shown in the window
-    @Published var deferredAlbums: [String] = []   // queued for review (Tier 2) — untouched
+    @Published var lines: [String] = []              // session log shown in the window
+    @Published var deferred: [DeferredAlbum] = []    // Tier 2 — untouched, awaiting a verdict
     private var cancelled = false
+    private var sessionID: String?
+
+    /// An album whose identify pass proposed a SUBSTANTIVE name change: nothing was
+    /// applied (every downstream fix was computed from the unaccepted names). The
+    /// review roll-up shows the A/B lines; Accept writes the names then re-analyzes
+    /// and applies the now-clean fix set, Keep leaves the album exactly as found.
+    struct DeferredAlbum: Identifiable {
+        let dir: URL
+        let files: [URL]
+        let fix: AlbumFix          // the identify fix, with its retained proposals
+        var id: String { dir.path }
+    }
 
     func cancel() { cancelled = true }
 
     func run(root: URL, store: PerfectStore) async {
         guard !running else { return }
-        running = true; cancelled = false; lines = []; deferredAlbums = []
+        running = true; cancelled = false; lines = []; deferred = []
         let session = UUID().uuidString
+        sessionID = session
         defer { running = false; progress = ""; store.loadRuns() }
 
         // ---- Phase 1: normalize, reusing the choices confirmed in the Normalize
@@ -69,28 +82,18 @@ final class PerfectV2Driver: ObservableObject {
                                                                    reconciledMatch: cached)
             if let r = reconcile { AlbumReconcileStore.save(album.dir.path, r) }
 
-            // Tier gating (v2 plan): an identify change means every downstream fix
-            // was computed from the identified names — defer the WHOLE album to the
-            // review roll-up (next increment) rather than auto-apply half of it.
+            // Tier gating (v2 plan): a SUBSTANTIVE identify change means every
+            // downstream fix was computed from the unaccepted names — defer the
+            // WHOLE album to the review roll-up rather than auto-apply half of it.
+            // Cosmetic/additive identify tidies auto-apply like any Tier-1 fix.
             // Compilation flagging is Phase 1's confirm checklist, never silent.
-            if fixes.contains(where: { $0.kind == .identify && $0.applyable }) {
-                deferredAlbums.append(album.dir.lastPathComponent)
+            if let idFix = fixes.first(where: { $0.kind == .identify && $0.applyable }),
+               idFix.proposals.contains(where: { $0.dominantNameKind == .substantive }) {
+                deferred.append(DeferredAlbum(dir: album.dir, files: album.files, fix: idFix))
                 continue
             }
-            let discOn = fixes.contains { $0.kind == .discOrder && $0.applyable && $0.enabled }
-            let chosen = fixes.filter { f in
-                f.applyable && f.enabled                    // enabled defaults honored —
-                && f.kind != .compilation                   // ambiguous splits stay queued
-                && !(f.needsDiscOrder && !discOn)
-            }
-            guard !chosen.isEmpty else { clean += 1; continue }
-            await PerfectStore.performLibraryOps(
-                root: root, summary: "Perfect v2 — \(album.dir.lastPathComponent)",
-                tagWrites: chosen.flatMap { $0.tagWrites },
-                moves: chosen.flatMap { $0.moves },
-                performerAdds: chosen.flatMap { $0.performerAdds },
-                sessionID: session)
-            applied += 1
+            if await applyTierOne(fixes, root: root, session: session,
+                                  name: album.dir.lastPathComponent) { applied += 1 } else { clean += 1 }
         }
 
         // ---- Final pass: re-file/merge on the CORRECTED tags, so a folder whose
@@ -111,8 +114,61 @@ final class PerfectV2Driver: ObservableObject {
         } else {
             lines.append("Cancelled — applied runs stay undoable from Runs")
         }
-        lines.append("Albums: \(applied) fixed · \(clean) already clean · \(deferredAlbums.count) deferred for review")
+        lines.append("Albums: \(applied) fixed · \(clean) already clean · \(deferred.count) deferred for review")
         ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
+    }
+
+    /// Apply an album's Tier-1 fix set (one reversible run): enabled defaults
+    /// honored, compilation flagging excluded (Phase-1 checklist), dependent
+    /// renames dropped when the disc fix isn't applied. Returns false if the
+    /// album needed nothing.
+    private func applyTierOne(_ fixes: [AlbumFix], root: URL, session: String, name: String) async -> Bool {
+        let discOn = fixes.contains { $0.kind == .discOrder && $0.applyable && $0.enabled }
+        let chosen = fixes.filter { f in
+            f.applyable && f.enabled
+            && f.kind != .compilation
+            && !(f.needsDiscOrder && !discOn)
+        }
+        guard !chosen.isEmpty else { return false }
+        await PerfectStore.performLibraryOps(
+            root: root, summary: "Perfect v2 — \(name)",
+            tagWrites: chosen.flatMap { $0.tagWrites },
+            moves: chosen.flatMap { $0.moves },
+            performerAdds: chosen.flatMap { $0.performerAdds },
+            sessionID: session)
+        return true
+    }
+
+    /// Review verdict: ACCEPT the proposed names — write them (their own run in
+    /// the same session), re-analyze the album so every dependent fix is computed
+    /// from the now-real tags, and apply that clean fix set.
+    func accept(_ d: DeferredAlbum, root: URL, store: PerfectStore) async {
+        guard !running else { return }
+        running = true
+        defer { running = false; progress = ""; store.loadRuns() }
+        let session = sessionID ?? UUID().uuidString
+        sessionID = session
+        progress = "Applying names — \(d.dir.lastPathComponent)"
+        await PerfectStore.performLibraryOps(root: root,
+                                             summary: "Perfect v2 — names for \(d.dir.lastPathComponent)",
+                                             tagWrites: d.fix.tagWrites, moves: [],
+                                             sessionID: session)
+        progress = "Re-checking — \(d.dir.lastPathComponent)"
+        let cached = AlbumReconcileStore.load(d.dir.path)
+        let (fixes, _, reconcile) = await AlbumPerfect.analyze(root: root, files: d.files,
+                                                               reconciledMatch: cached)
+        if let r = reconcile { AlbumReconcileStore.save(d.dir.path, r) }
+        _ = await applyTierOne(fixes, root: root, session: session, name: d.dir.lastPathComponent)
+        deferred.removeAll { $0.id == d.id }
+        lines.append("Accepted names — \(d.dir.lastPathComponent)")
+        ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
+    }
+
+    /// Review verdict: KEEP the album exactly as analyze found it — nothing was
+    /// applied for it, so declining is simply dropping it from the queue.
+    func keep(_ d: DeferredAlbum) {
+        deferred.removeAll { $0.id == d.id }
+        lines.append("Kept as-is — \(d.dir.lastPathComponent)")
     }
 
     /// One album folder = one directory that directly contains audio files.
@@ -165,9 +221,27 @@ struct PerfectV2View: View {
                 if !driver.lines.isEmpty {
                     Section("Session") { ForEach(driver.lines, id: \.self) { Text($0).font(.caption) } }
                 }
-                if !driver.deferredAlbums.isEmpty {
-                    Section("Deferred for review — name changes need your OK (untouched)") {
-                        ForEach(driver.deferredAlbums, id: \.self) { Text($0).font(.caption) }
+                if !driver.deferred.isEmpty {
+                    Section("Names to confirm — these albums are untouched until you decide") {
+                        ForEach(driver.deferred) { d in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(d.dir.lastPathComponent).fontWeight(.medium)
+                                    Text(d.fix.summary).font(.caption).foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button("Accept names") {
+                                        if let root { Task { await driver.accept(d, root: root, store: perfect) } }
+                                    }
+                                    .controlSize(.small).disabled(driver.running || root == nil)
+                                    Button("Keep as-is") { driver.keep(d) }
+                                        .controlSize(.small).disabled(driver.running)
+                                }
+                                ForEach(Array(d.fix.lines.enumerated()), id: \.offset) { _, line in
+                                    Text(line).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.vertical, 3)
+                        }
                     }
                 }
                 if driver.lines.isEmpty && !driver.running {
