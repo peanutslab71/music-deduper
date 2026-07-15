@@ -970,6 +970,18 @@ struct RunsView: View {
                 .controlSize(.small)
             Button(role: .destructive) { perfect.undo(run) } label: { Text("Revert") }
                 .controlSize(.small).disabled(perfect.busy)
+            // a session (one Perfect pass = many per-album runs) reverts as a unit,
+            // newest-first, so the library returns to exactly its pre-run state
+            if let s = run.session {
+                let n = perfect.runs.filter { $0.session == s && $0.root.path == run.root.path }.count
+                if n > 1 {
+                    Button(role: .destructive) { perfect.undoSession(s, root: run.root) } label: {
+                        Text("Revert session (\(n))")
+                    }
+                    .controlSize(.small).disabled(perfect.busy)
+                    .help("Undo all \(n) runs applied together in this Perfect session")
+                }
+            }
         }
         .padding(.vertical, 4)
         .help("Library: \(run.root.path)")

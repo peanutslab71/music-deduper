@@ -157,6 +157,7 @@ struct RunRecord: Identifiable {
     let artPromotions: [(rel: String, oldType: Int)]            // existing art retagged to front, for undo
     let artReplacements: [(rel: String, backup: String, oldType: Int)]  // art replaced; backup holds the old image
     let summary: String
+    var session: String? = nil   // groups the runs of one Perfect session for "Undo session"
 }
 
 /// The resumable working plan for one library: the (network-expensive) identify
@@ -3087,12 +3088,15 @@ final class PerfectStore: ObservableObject {
                          moves: [(from: String, to: String)] = [],
                          artEmbeds: [(rel: String, image: Data, mime: String)] = [],
                          performerAdds: [(rel: String, name: String, role: String)] = [],
+                         promoteArt: [String] = [],
+                         sessionID: String? = nil,
                          then: (@MainActor () -> Void)? = nil) {
         busy = true; status = "Applying…"
         Task {   // @MainActor-isolated (this method is on the store); disk work suspends off-main
             await Self.performLibraryOps(root: root, summary: summary,
                                          tagWrites: tagWrites, moves: moves, artEmbeds: artEmbeds,
-                                         performerAdds: performerAdds)
+                                         performerAdds: performerAdds,
+                                         promoteArt: promoteArt, sessionID: sessionID)
             // Cover art / paths on disk just changed — drop the cached thumbnails so the
             // grid and album covers reload from the files (clear() bumps ArtRefresh).
             ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
@@ -3107,7 +3111,9 @@ final class PerfectStore: ObservableObject {
                                               tagWrites: [(rel: String, field: String, value: String)],
                                               moves: [(from: String, to: String)],
                                               artEmbeds: [(rel: String, image: Data, mime: String)] = [],
-                                              performerAdds: [(rel: String, name: String, role: String)] = []) async {
+                                              performerAdds: [(rel: String, name: String, role: String)] = [],
+                                              promoteArt: [String] = [],
+                                              sessionID: String? = nil) async {
         let fm = FileManager.default
         let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
         let qRel = "Music Librarian Quarantine/\(stamp)"
@@ -3117,6 +3123,7 @@ final class PerfectStore: ObservableObject {
         var tagEdits: [(rel: String, field: String, old: String)] = []
         var perfEdits: [(rel: String, name: String, role: String)] = []   // credits added → undo removes them
         var artEdits: [String] = []                                   // art added where there was none → undo strips it
+        var artPromotions: [(rel: String, oldType: Int)] = []         // art retagged to front cover → undo re-types it
         var artReplacements: [(rel: String, backup: String, oldType: Int)] = []  // art replaced → undo restores backup
         var log = "Music Librarian — change log \(Date())\nLibrary: \(root.path)\n\n"
 
@@ -3167,6 +3174,18 @@ final class PerfectStore: ObservableObject {
                 log += rc == 0 ? "ART: \(e.rel)  ← unified cover (\(e.image.count) bytes)\n" : "FAILED art \(e.rel): rc \(rc)\n"
             }
         }
+        // promote non-front embedded art (picture type != 3) to Front Cover so players
+        // that only render type-3 pictures show it; recorded so undo re-types it back.
+        for rel in promoteArt {
+            let url = root.appendingPathComponent(rel)
+            guard fm.fileExists(atPath: url.path),
+                  md_has_artwork(url.path) == 1, md_has_front_cover(url.path) == 0 else { continue }
+            let oldType = Int(md_artwork_type(url.path))
+            if md_set_artwork_type(url.path, 3) == 0 {
+                artPromotions.append((rel, oldType))
+                log += "ART: \(rel)  promoted picture type \(oldType) → front cover\n"
+            }
+        }
         // longest source path first so a folder's files move before the folder
         for m in moves.sorted(by: { $0.from.count > $1.from.count }) {
             let toRel = m.to.isEmpty ? qRel + "/" + m.from : m.to
@@ -3177,7 +3196,30 @@ final class PerfectStore: ObservableObject {
             // that's not a collision, so allow it; only skip a genuinely different file.
             let caseOnly = from.path != to.path && from.path.lowercased() == to.path.lowercased()
             if !m.to.isEmpty && !caseOnly && fm.fileExists(atPath: to.path) {
-                log += "SKIP (target exists): \(toRel)\n"; continue
+                // If the sitting file is the SAME recording (matching size or duration),
+                // this source is a leftover duplicate — quarantine it (recorded, undoable)
+                // rather than stranding it outside the clean tree. A genuinely different
+                // track keeps the skip.
+                let sSize = (try? from.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
+                let dSize = (try? to.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -2
+                var sameTrack = (sSize == dSize)
+                if !sameTrack {
+                    let sd = await readMetadata(url: from, size: Int64(max(sSize, 0))).duration
+                    let dd = await readMetadata(url: to, size: Int64(max(dSize, 0))).duration
+                    if sd > 0 && dd > 0 { sameTrack = abs(sd - dd) <= 3.0 }
+                }
+                if sameTrack {
+                    let qTo = root.appendingPathComponent(qRel + "/" + m.from)
+                    do {
+                        try fm.createDirectory(at: qTo.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try fm.moveItem(at: from, to: qTo)
+                        ops.append((m.from, qRel + "/" + m.from))
+                        log += "DUPLICATE (target exists) → quarantine: \(m.from)\n"
+                    } catch { log += "FAILED \(m.from): \(error.localizedDescription)\n" }
+                } else {
+                    log += "SKIP (target exists, different track): \(toRel)\n"
+                }
+                continue
             }
             do {
                 try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -3194,18 +3236,37 @@ final class PerfectStore: ObservableObject {
                 log += "\(m.to.isEmpty ? "DELETE → quarantine" : "MOVE"): \(m.from) → \(toRel)\n"
             } catch { log += "FAILED \(m.from): \(error.localizedDescription)\n" }
         }
-        let total = ops.count + tagEdits.count + perfEdits.count + artEdits.count + artReplacements.count
+        // prune source folders the moves emptied (deepest first; a lone .DS_Store counts
+        // as empty). Never inside the quarantine; undo re-creates dirs when it restores.
+        var checkDirs = Set<String>()
+        for op in ops {
+            var cur = (op.from as NSString).deletingLastPathComponent
+            while !cur.isEmpty && cur != "." { checkDirs.insert(cur); cur = (cur as NSString).deletingLastPathComponent }
+        }
+        for rel in checkDirs.sorted(by: { $0.count > $1.count }) {
+            if rel.hasPrefix("Music Librarian Quarantine") { continue }
+            let dir = root.appendingPathComponent(rel)
+            guard let contents = try? fm.contentsOfDirectory(atPath: dir.path) else { continue }
+            if contents.allSatisfy({ $0 == ".DS_Store" }) {
+                for junk in contents { try? fm.removeItem(at: dir.appendingPathComponent(junk)) }
+                if (try? fm.removeItem(at: dir)) != nil { log += "REMOVED empty folder: \(rel)\n" }
+            }
+        }
+        let total = ops.count + tagEdits.count + perfEdits.count + artEdits.count
+                    + artPromotions.count + artReplacements.count
         log += "\n\(total) change(s). Restore with 'Undo this run'.\n"
         try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
-        let record: [String: Any] = [
+        var record: [String: Any] = [
             "date": ISO8601DateFormatter().string(from: Date()),
             "root": root.path, "summary": summary,
             "ops": ops.map { ["from": $0.from, "to": $0.to] },
             "tagEdits": tagEdits.map { ["rel": $0.rel, "field": $0.field, "old": $0.old] },
             "perfEdits": perfEdits.map { ["rel": $0.rel, "name": $0.name, "role": $0.role] },
-            "artEdits": artEdits, "artPromotions": [],
+            "artEdits": artEdits,
+            "artPromotions": artPromotions.map { ["rel": $0.rel, "oldType": String($0.oldType)] },
             "artReplacements": artReplacements.map { ["rel": $0.rel, "backup": $0.backup, "oldType": String($0.oldType)] }
         ]
+        if let sessionID { record["session"] = sessionID }
         if let data = try? JSONSerialization.data(withJSONObject: record) {
             try? data.write(to: quarantine.appendingPathComponent("run.json"))
         }
@@ -3260,7 +3321,8 @@ final class PerfectStore: ObservableObject {
         return RunRecord(id: folder.path, folder: folder, root: root, date: date,
                          ops: ops, tagEdits: tagEdits, perfEdits: perfEdits, artEdits: artEdits,
                          artPromotions: artPromotions, artReplacements: artReplacements,
-                         summary: obj["summary"] as? String ?? "\(n) changes")
+                         summary: obj["summary"] as? String ?? "\(n) changes",
+                         session: obj["session"] as? String)
     }
 
     /// Reverse a run: move each recorded change back (to → from), newest moves
@@ -3268,104 +3330,132 @@ final class PerfectStore: ObservableObject {
     func undo(_ run: RunRecord) {
         let root = run.root      // the library this run physically belongs to
         busy = true; status = "Undoing run in \(root.lastPathComponent)…"
+        let isCurrentLibrary = (self.root?.path == root.path)
+        Task {
+            let r = await Self.revertRun(run)
+            self.finishUndo(restored: r.restored, failed: r.failed, current: isCurrentLibrary)
+        }
+    }
+
+    /// Reverse EVERY run of one session, strictly newest-first and SEQUENTIALLY —
+    /// later runs' moves sit on top of earlier ones (per-album runs on top of the
+    /// normalizer's), so concurrent or out-of-order reverts would pull folders out
+    /// from under each other and fail silently.
+    func undoSession(_ session: String, root: URL) {
+        let members = runs.filter { $0.session == session && $0.root.path == root.path }
+            .sorted { $0.date > $1.date }
+        guard !members.isEmpty else { return }
+        busy = true; status = "Undoing session (\(members.count) run\(members.count == 1 ? "" : "s")) in \(root.lastPathComponent)…"
+        let isCurrentLibrary = (self.root?.path == root.path)
+        Task {
+            var restored = 0, failed = 0
+            for run in members {
+                let r = await Self.revertRun(run)
+                restored += r.restored; failed += r.failed
+            }
+            self.finishUndo(restored: restored, failed: failed, current: isCurrentLibrary)
+        }
+    }
+
+    /// The disk side of one run's revert — awaitable, so callers can sequence
+    /// several reverts (undoSession) instead of firing them off concurrently.
+    nonisolated static func revertRun(_ run: RunRecord) async -> (restored: Int, failed: Int) {
+        let root = run.root
         let folder = run.folder, ops = run.ops, tagEdits = run.tagEdits, perfEdits = run.perfEdits, artEdits = run.artEdits
         let artPromotions = run.artPromotions, artReplacements = run.artReplacements
-        let isCurrentLibrary = (self.root?.path == root.path)
-        Task.detached(priority: .userInitiated) {
-            let fm = FileManager.default
-            var restored = 0, failed = 0
+        let fm = FileManager.default
+        var restored = 0, failed = 0
 
-            // merge-aware restore: never clobber an existing directory (the emptied
-            // source folder of a merge is restored into one the file-restores have
-            // already rebuilt) — merge its contents in instead.
-            func restore(_ from: URL, _ to: URL) -> Bool {
-                let fromIsDir = (try? from.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-                // A case-only rename ("On" → "on") reverses to a `to` that case-folds to the
-                // SAME file as `from` on a case-insensitive volume. `toExists` is then a false
-                // positive — removing `to` would unlink the file itself and the move would then
-                // fail with no backup (silent data loss). Go via a temp name instead, exactly
-                // like the forward path, and never removeItem in that case.
-                let caseOnly = from.path != to.path && from.path.lowercased() == to.path.lowercased()
-                let toExists = fm.fileExists(atPath: to.path)
-                if fromIsDir && toExists && !caseOnly {
-                    for child in (try? fm.contentsOfDirectory(atPath: from.path)) ?? [] {
-                        _ = restore(from.appendingPathComponent(child), to.appendingPathComponent(child))
-                    }
-                    try? fm.removeItem(at: from)   // now-empty source shell
-                    return true
+        // merge-aware restore: never clobber an existing directory (the emptied
+        // source folder of a merge is restored into one the file-restores have
+        // already rebuilt) — merge its contents in instead.
+        func restore(_ from: URL, _ to: URL) -> Bool {
+            let fromIsDir = (try? from.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+            // A case-only rename ("On" → "on") reverses to a `to` that case-folds to the
+            // SAME file as `from` on a case-insensitive volume. `toExists` is then a false
+            // positive — removing `to` would unlink the file itself and the move would then
+            // fail with no backup (silent data loss). Go via a temp name instead, exactly
+            // like the forward path, and never removeItem in that case.
+            let caseOnly = from.path != to.path && from.path.lowercased() == to.path.lowercased()
+            let toExists = fm.fileExists(atPath: to.path)
+            if fromIsDir && toExists && !caseOnly {
+                for child in (try? fm.contentsOfDirectory(atPath: from.path)) ?? [] {
+                    _ = restore(from.appendingPathComponent(child), to.appendingPathComponent(child))
                 }
-                do {
-                    try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    if caseOnly {
-                        let tmp = to.deletingLastPathComponent().appendingPathComponent(".mdtmp-\(to.lastPathComponent)")
-                        try? fm.removeItem(at: tmp)
-                        try fm.moveItem(at: from, to: tmp)
-                        try fm.moveItem(at: tmp, to: to)
-                    } else {
-                        if toExists { try? fm.removeItem(at: to) }
-                        try fm.moveItem(at: from, to: to)
-                    }
-                    return true
-                } catch { return false }
+                try? fm.removeItem(at: from)   // now-empty source shell
+                return true
             }
-
-            // deepest `to` first so files come out before their quarantined parent
-            for op in ops.reversed().sorted(by: { $0.to.count > $1.to.count }) {
-                let from = root.appendingPathComponent(op.to)     // where it is now
-                let to = root.appendingPathComponent(op.from)      // where it belongs
-                guard fm.fileExists(atPath: from.path) else { continue }
-                if restore(from, to) { restored += 1 } else { failed += 1 }
-            }
-
-            // restore tag rewrites — the files are back at their original paths now, so
-            // write each old value back. REVERSED: if one run wrote the same field twice
-            // (e.g. album consensus in step 0 then Organise, or identify then the artist
-            // split), replaying in reverse means the FIRST write's recorded old value —
-            // the true original — is applied last and wins. Forward order would leave the
-            // intermediate value on disk.
-            for edit in tagEdits.reversed() {
-                let url = root.appendingPathComponent(edit.rel)
-                guard fm.fileExists(atPath: url.path) else { failed += 1; continue }
-                do { try Self.writeField(url, edit.field, to: edit.old); restored += 1 } catch { failed += 1 }
-            }
-            // remove any performer credits this run added
-            for edit in perfEdits {
-                let url = root.appendingPathComponent(edit.rel)
-                guard fm.fileExists(atPath: url.path) else { continue }
-                Self.removePerformer(url, name: edit.name, role: edit.role); restored += 1
-            }
-            // strip any cover art this run added
-            for rel in artEdits {
-                let url = root.appendingPathComponent(rel)
-                guard fm.fileExists(atPath: url.path) else { continue }
-                _ = md_remove_artwork(url.path); restored += 1
-            }
-            // put any promoted picture back to its original type (non-destructive)
-            for (rel, oldType) in artPromotions {
-                let url = root.appendingPathComponent(rel)
-                guard fm.fileExists(atPath: url.path) else { continue }
-                _ = md_set_artwork_type(url.path, Int32(oldType)); restored += 1
-            }
-            // restore any replaced art from its backup (read BEFORE the quarantine
-            // folder is removed below), then put the original picture type back
-            for (rel, backup, oldType) in artReplacements {
-                let url = root.appendingPathComponent(rel)
-                guard fm.fileExists(atPath: url.path),
-                      let bdata = try? Data(contentsOf: folder.appendingPathComponent(backup)) else { continue }
-                let mime = bdata.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
-                let rc = bdata.withUnsafeBytes { buf in
-                    md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(bdata.count), mime)
+            do {
+                try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if caseOnly {
+                    let tmp = to.deletingLastPathComponent().appendingPathComponent(".mdtmp-\(to.lastPathComponent)")
+                    try? fm.removeItem(at: tmp)
+                    try fm.moveItem(at: from, to: tmp)
+                    try fm.moveItem(at: tmp, to: to)
+                } else {
+                    if toExists { try? fm.removeItem(at: to) }
+                    try fm.moveItem(at: from, to: to)
                 }
-                if rc == 0 { _ = md_set_artwork_type(url.path, Int32(oldType)); restored += 1 }
-            }
-
-            try? fm.removeItem(at: folder)
-            let qroot = root.appendingPathComponent("Music Librarian Quarantine")
-            if let empty = try? fm.contentsOfDirectory(atPath: qroot.path), empty.isEmpty {
-                try? fm.removeItem(at: qroot)
-            }
-            await self.finishUndo(restored: restored, failed: failed, current: isCurrentLibrary)
+                return true
+            } catch { return false }
         }
+
+        // deepest `to` first so files come out before their quarantined parent
+        for op in ops.reversed().sorted(by: { $0.to.count > $1.to.count }) {
+            let from = root.appendingPathComponent(op.to)     // where it is now
+            let to = root.appendingPathComponent(op.from)      // where it belongs
+            guard fm.fileExists(atPath: from.path) else { continue }
+            if restore(from, to) { restored += 1 } else { failed += 1 }
+        }
+
+        // restore tag rewrites — the files are back at their original paths now, so
+        // write each old value back. REVERSED: if one run wrote the same field twice
+        // (e.g. album consensus in step 0 then Organise, or identify then the artist
+        // split), replaying in reverse means the FIRST write's recorded old value —
+        // the true original — is applied last and wins. Forward order would leave the
+        // intermediate value on disk.
+        for edit in tagEdits.reversed() {
+            let url = root.appendingPathComponent(edit.rel)
+            guard fm.fileExists(atPath: url.path) else { failed += 1; continue }
+            do { try Self.writeField(url, edit.field, to: edit.old); restored += 1 } catch { failed += 1 }
+        }
+        // remove any performer credits this run added
+        for edit in perfEdits {
+            let url = root.appendingPathComponent(edit.rel)
+            guard fm.fileExists(atPath: url.path) else { continue }
+            Self.removePerformer(url, name: edit.name, role: edit.role); restored += 1
+        }
+        // strip any cover art this run added
+        for rel in artEdits {
+            let url = root.appendingPathComponent(rel)
+            guard fm.fileExists(atPath: url.path) else { continue }
+            _ = md_remove_artwork(url.path); restored += 1
+        }
+        // put any promoted picture back to its original type (non-destructive)
+        for (rel, oldType) in artPromotions {
+            let url = root.appendingPathComponent(rel)
+            guard fm.fileExists(atPath: url.path) else { continue }
+            _ = md_set_artwork_type(url.path, Int32(oldType)); restored += 1
+        }
+        // restore any replaced art from its backup (read BEFORE the quarantine
+        // folder is removed below), then put the original picture type back
+        for (rel, backup, oldType) in artReplacements {
+            let url = root.appendingPathComponent(rel)
+            guard fm.fileExists(atPath: url.path),
+                  let bdata = try? Data(contentsOf: folder.appendingPathComponent(backup)) else { continue }
+            let mime = bdata.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
+            let rc = bdata.withUnsafeBytes { buf in
+                md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(bdata.count), mime)
+            }
+            if rc == 0 { _ = md_set_artwork_type(url.path, Int32(oldType)); restored += 1 }
+        }
+
+        try? fm.removeItem(at: folder)
+        let qroot = root.appendingPathComponent("Music Librarian Quarantine")
+        if let empty = try? fm.contentsOfDirectory(atPath: qroot.path), empty.isEmpty {
+            try? fm.removeItem(at: qroot)
+        }
+        return (restored, failed)
     }
 
     private func finishUndo(restored: Int, failed: Int, current: Bool) {
