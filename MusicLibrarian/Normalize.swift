@@ -65,10 +65,33 @@ enum Normalizer {
         for (key, ts) in byAlbum {
             guard ts.count >= 3 else { continue }
             if ts.contains(where: { $0.isCompilation }) { continue }   // already flagged → groups anyway
-            let primaries = Set(ts.map {
-                Organiser.artistKey(Organiser.primaryArtist($0.artist.isEmpty ? $0.albumArtist : $0.artist))
-            }.filter { !$0.isEmpty })
-            guard primaries.count >= 2 else { continue }
+            let credits = ts.map { $0.artist.isEmpty ? $0.albumArtist : $0.artist }
+            var primCounts: [String: (name: String, n: Int)] = [:]
+            for c in credits {
+                let p = Organiser.primaryArtist(c)
+                let k = Organiser.artistKey(p)
+                guard !k.isEmpty else { continue }
+                primCounts[k] = (p, (primCounts[k]?.n ?? 0) + 1)
+            }
+            guard primCounts.count >= 2 else { continue }
+            // An album DOMINATED by one primary artist is that artist's album with
+            // guests, not a compilation — "Best Of Bowie" with one "Queen & David
+            // Bowie" duet must not become Various Artists.
+            let total = primCounts.values.reduce(0) { $0 + $1.n }
+            if let dom = primCounts.max(by: { $0.value.n < $1.value.n }) {
+                if Double(dom.value.n) >= 0.75 * Double(total) { continue }
+                // A minority credit that CONTAINS the dominant artist ("Queen &
+                // David Bowie" contains "David Bowie") is a collaboration, not a
+                // second album artist — if every minority credit is one, skip.
+                let domFold = Organiser.fold(dom.value.name)
+                if !domFold.isEmpty {
+                    let strangers = credits.filter {
+                        Organiser.artistKey(Organiser.primaryArtist($0)) != dom.key
+                        && !Organiser.fold($0).contains(domFold)
+                    }
+                    if strangers.isEmpty { continue }
+                }
+            }
             let aa = ts.map { $0.albumArtist }.filter { !$0.isEmpty }
             let counts = Dictionary(grouping: aa, by: { $0 }).mapValues { $0.count }
             let dominant = counts.max { (a: (key: String, value: Int), b: (key: String, value: Int)) -> Bool in
@@ -83,7 +106,7 @@ enum Normalizer {
                 .max { $0.value.count < $1.value.count }?.key ?? key
             out.append(CompilationCandidate(key: key, display: display,
                                             foldKeys: Set(names.map { Organiser.fold(Organiser.stripDiscSuffix($0).clean) }),
-                                            artists: primaries.count, tracks: ts.count))
+                                            artists: primCounts.count, tracks: ts.count))
         }
         return out.sorted { $0.display.lowercased() < $1.display.lowercased() }
     }

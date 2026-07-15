@@ -103,6 +103,20 @@ enum OrganiseLogicTests {
         let declined = Normalizer.plan(editions, declinedMerges: Set(eplan.mergeGroups.map { $0.key }))
         checkI("declined merge honored", declined.mergeGroups.count, 0)
 
+        // ---- compilationCandidates: dominated albums and duets are NOT compilations ----
+        func ct(_ n: Int, ar: String, al: String) -> OrganiseInput {
+            OrganiseInput(rel: "X/\(al)/\(String(format: "%02d", n)) T\(n).mp3", ext: "mp3",
+                          artist: ar, albumArtist: "", album: al, title: "T\(n)", trackNo: n, discNo: 0)
+        }
+        // 22 Bowie tracks + 1 duet credited "Queen & David Bowie" — a guest, not a comp
+        let bowie = (1...22).map { ct($0, ar: "David Bowie", al: "Best Of Bowie") }
+                  + [ct(23, ar: "Queen & David Bowie", al: "Best Of Bowie")]
+        checkI("dominated album not a compilation", Normalizer.compilationCandidates(bowie).count, 0)
+        // 4 genuinely different artists, one each — a real compilation
+        let xmas = [ct(1, ar: "Al Green", al: "Merry Xmas!"), ct(2, ar: "Elvis Presley", al: "Merry Xmas!"),
+                    ct(3, ar: "Billie Holiday", al: "Merry Xmas!"), ct(4, ar: "Dusty Springfield", al: "Merry Xmas!")]
+        checkI("real compilation still flagged", Normalizer.compilationCandidates(xmas).count, 1)
+
         // ---- planOne blank-title fallback: filename minus extension + number ----
         let blank = OrganiseInput(rel: "Black Sabbath/Greatest Hits/01 Paranoid.m4p", ext: "m4p",
                                   artist: "Black Sabbath", albumArtist: "Black Sabbath",
