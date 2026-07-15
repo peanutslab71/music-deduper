@@ -200,6 +200,38 @@ struct ArtworkReviewItem: Identifiable {
     var mbids: [String] = [] // release MBIDs (from identify), for Cover Art Archive lookups
 }
 
+/// One album folder found by the scan. Derived from the folder layout
+/// (…/Artist/Album/track) so it exists for EVERY album, identified or not — the
+/// Artwork step uses it to let you replace any cover, even one that's present but wrong.
+struct ScannedAlbum: Identifiable {
+    let id: String          // album folder path
+    let artist: String      // grandparent folder name
+    let album: String       // parent folder name
+    let files: [String]     // root-relative track paths
+}
+
+/// Tracks a Perfect run found suspiciously short with no full-length twin — likely
+/// truncated/damaged. Information only; NEVER auto-removed. Mirrors the per-album
+/// "Possibly damaged" flag so batch and per-album Perfect surface the same files.
+struct DamagedAlbumReport: Identifiable {
+    let id = UUID()
+    let artist: String
+    let album: String
+    let lines: [String]   // "“Title” — 0:03 (album typical 2:25)"
+}
+
+/// One album a Perfect run found to be incomplete: what release it matched and how
+/// many of its tracks are absent. The full matched tracklist is persisted per album
+/// folder so the Album Inspector can grey out the missing rows afterwards.
+struct MissingAlbumReport: Identifiable {
+    let id = UUID()
+    let artist: String
+    let album: String
+    let missing: Int
+    let total: Int
+    let missingTitles: [String]   // "Disc d · n. Title" for the change log
+}
+
 // MARK: - Found cover art (preview before it's embedded)
 
 /// A single lightweight "artwork changed" signal. AlbumCover observes ONLY this
@@ -610,6 +642,9 @@ final class PerfectStore: ObservableObject {
     private var chainTags = false
     @Published var progress = ""
     @Published var findings: [PerfectFinding] = []
+    // Every album folder found by the scan (Artist/Album/track layout), so the Artwork
+    // step can offer a cover change on ANY album — not only the ones AcoustID matched.
+    @Published var scannedAlbums: [ScannedAlbum] = []
     @Published var renames: [RenameProposal] = []
     // one artist-centric list, folding folder merges and tag fixes together
     @Published var artists: [ArtistIssue] = []
@@ -627,7 +662,7 @@ final class PerfectStore: ObservableObject {
     /// Reset the whole Perfect wizard back to the choose-a-library screen.
     func resetWizard() {
         showCompletionSummary = false
-        proposals = []; findings = []; artists = []; renames = []
+        proposals = []; findings = []; artists = []; renames = []; scannedAlbums = []
         diagnosed = false; didIdentify = false; enriched = false; wizardStep = 1
         artworkStagePlanned = false; artworkStageDone = false; artworkNeedsReview = []
         ArtworkChoices.shared.clearAll()
@@ -636,6 +671,7 @@ final class PerfectStore: ObservableObject {
         organisePlans = []; dedupClusters = []; dedupTracks = []
         compilationCandidates = []; confirmedCompilations = []
         albumMergeCandidates = []; declinedAlbumMerges = []
+        missingTrackReports = []; damagedTrackReports = []
         lastRunSummary = nil
         clearPlan()                      // starting over discards the saved plan for this library
         root = nil                       // → PerfectView shows the intro / new-library screen
@@ -765,9 +801,12 @@ final class PerfectStore: ObservableObject {
         organise()
     }
 
-    /// Flag-less compilation candidates: an album title shared by ≥2 distinct artists
-    /// with NO album-artist on any track, non-generic name. Flagged albums are marked
-    /// flagged=true (auto). For the Organise step's confirmation list.
+    /// Flag-less compilation candidates: an album whose tracks span ≥2 distinct artists
+    /// with NO album-artist on any track — the structural signature of a various-artists
+    /// release (a normal album carries a consistent album-artist). Only SURFACED for the
+    /// user to confirm on the Organise step; nothing here auto-applies, so there's no
+    /// hardcoded title vocabulary deciding what is or isn't a compilation. Albums already
+    /// carrying the compilation flag are marked flagged=true.
     nonisolated static func compilationCandidates(from inputs: [OrganiseInput]) -> [CompilationCandidate] {
         struct Acc { var album = ""; var artists = Set<String>(); var count = 0; var anyAA = false; var anyFlag = false }
         var by: [String: Acc] = [:]
@@ -782,11 +821,8 @@ final class PerfectStore: ObservableObject {
             if t.isCompilation { acc.anyFlag = true }
             by[key] = acc
         }
-        let generic: Set<String> = ["greatest hits", "the greatest hits", "hits", "live", "best of",
-                                    "the best of", "collection", "the collection", "compilation",
-                                    "essential", "the essential", "gold", "anthology"]
         return by.compactMap { (key, acc) -> CompilationCandidate? in
-            let heuristic = acc.artists.count >= 2 && !acc.anyAA && !generic.contains(key)
+            let heuristic = acc.artists.count >= 2 && !acc.anyAA
             guard heuristic || acc.anyFlag else { return nil }
             return CompilationCandidate(id: key, album: acc.album, artists: Array(acc.artists).sorted(),
                                         trackCount: acc.count, flagged: acc.anyFlag)
@@ -794,6 +830,15 @@ final class PerfectStore: ObservableObject {
     }
     @Published var composerFirstClassical = false   // classical → Composer-first folders
     @Published var renumberTracks = false           // assign a clean 1…N per album/disc
+    // Missing-track reconcile for the whole run: after the clean tree is built, check
+    // each real album against MusicBrainz/Discogs/Deezer and remember which tracks it's
+    // missing (persisted per album folder so the Album Inspector greys them out later).
+    // Network-heavy, so it's a toggle — off means a quick run stays offline.
+    @Published var checkMissingTracks: Bool = (UserDefaults.standard.object(forKey: "perfectCheckMissing") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(checkMissingTracks, forKey: "perfectCheckMissing") }
+    }
+    @Published var missingTrackReports: [MissingAlbumReport] = []   // filled by the last Apply
+    @Published var damagedTrackReports: [DamagedAlbumReport] = []    // suspiciously-short files, info-only
     // category-level toggles (the mockup's bulk on/off buttons)
     @Published var applyNames = true       // identify: artist/title/album corrections
     @Published var applyArtwork = true     // add missing cover art
@@ -1052,6 +1097,7 @@ final class PerfectStore: ObservableObject {
             // (anywhere below) so we can flag the truly-empty ones afterwards.
             var dirHasContent = Set<String>()
             var allDirs: [URL] = []
+            var audioByFolder: [String: [URL]] = [:]   // album folder path → its audio files
 
             if let en = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
                                       options: []) {
@@ -1076,6 +1122,9 @@ final class PerfectStore: ObservableObject {
                         p = p.deletingLastPathComponent()
                     }
 
+                    if Self.isAudio(u) {
+                        audioByFolder[u.deletingLastPathComponent().path, default: []].append(u)
+                    }
                     if let junkReason = Self.junkReason(u) {
                         found.append(PerfectFinding(kind: .junk, url: u, relPath: rel,
                                                     detail: junkReason, bytes: size, accepted: true))
@@ -1146,9 +1195,31 @@ final class PerfectStore: ObservableObject {
                 return true
             }
 
+            // one entry per album folder (…/Artist/Album/track), for the Artwork step's
+            // "change any cover" grid — covers albums AcoustID never matched. PREFER the
+            // files' own album / album-artist TAGS (so the online cover search uses real
+            // metadata), and fall back to the folder names only when the tags are blank —
+            // a mislabelled folder shouldn't drive the lookup when the tag is right. One
+            // representative read per folder keeps it cheap.
+            let albums: [ScannedAlbum] = audioByFolder.compactMap { (folder, urls) in
+                guard folder != root.path else { return nil }   // loose files at the top aren't an album
+                let dir = URL(fileURLWithPath: folder)
+                // `folder` is a track's PARENT (album) folder, so its lastPathComponent is
+                // the album name — never the literal quarantine name. Match on the relative
+                // path prefix (as elsewhere) so discarded albums don't leak into the grid.
+                if Self.rel(dir, root).hasPrefix("Music Librarian Quarantine") { return nil }
+                let sample = urls.first
+                let tagAlbum = sample.flatMap { Self.readField($0, "album") } ?? ""
+                let tagArtist = sample.flatMap { Self.readField($0, "albumartist") ?? Self.readField($0, "artist") } ?? ""
+                let album = Organiser.isPlaceholderAlbum(tagAlbum) ? dir.lastPathComponent : tagAlbum
+                let artist = tagArtist.isEmpty ? dir.deletingLastPathComponent().lastPathComponent : tagArtist
+                return ScannedAlbum(id: folder, artist: artist, album: album,
+                                    files: urls.map { Self.rel($0, root) })
+            }.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+
             let (ff, fo, fb) = (files, folders, bytes)
             let fg = folderGroups
-            await self.finishDiagnose(found: found, folderGroups: fg,
+            await self.finishDiagnose(found: found, folderGroups: fg, albums: albums,
                                       renames: filteredRenames.sorted { $0.relPath.lowercased() < $1.relPath.lowercased() },
                                       files: ff, folders: fo, bytes: fb, cancelled: box.cancelled)
         }
@@ -1157,9 +1228,10 @@ final class PerfectStore: ObservableObject {
     private func setProgress(_ s: String) { progress = s }
 
     private func finishDiagnose(found: [PerfectFinding], folderGroups fg: [FolderGroup],
-                               renames r: [RenameProposal],
+                               albums: [ScannedAlbum], renames r: [RenameProposal],
                                files: Int, folders: Int, bytes: Int64, cancelled: Bool) {
         findings = found.sorted { $0.relPath.lowercased() < $1.relPath.lowercased() }
+        if !cancelled { scannedAlbums = albums }
         // gate by thoroughness (junk/empties/DRM always; renames Standard+; merges Thorough)
         folderGroups = fg
         renames = thoroughness.doesRenames ? r : []
@@ -1568,17 +1640,44 @@ final class PerfectStore: ObservableObject {
                                 artist: p.newArtist.isEmpty ? p.curArtist : p.newArtist,
                                 album: p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum)
         }
-        // Group by album TAG (artist + album), not folder — so it batches even when
-        // an album's tracks are loose or one-per-folder. One release lookup then
-        // covers the whole album. Tracks with no album tag can't be grouped, so
-        // each gets a unique key and takes the direct per-track path. Order is
-        // preserved so the feed still moves top-to-bottom.
+        // Group by album so ONE release lookup covers the whole album — including a
+        // VARIOUS-ARTISTS compilation, whose tracks have different artists but share an
+        // album. (Grouping by artist+album used to fragment a compilation into singles,
+        // so it never batched and missed the album-wide credits per-album Perfect finds.)
+        // The exception: a GENERIC title shared by ≥2 artists ("Greatest Hits", "Live")
+        // is usually two different albums colliding, so those sub-split by artist to
+        // avoid seeding one from the other's release. Tracks with no album tag stay
+        // single. Order is preserved so the feed still moves top-to-bottom.
         var order: [String] = []
         var groups: [String: [EnrichTarget]] = [:]
+        var albumOrder: [String] = []
+        var byAlbum: [String: [EnrichTarget]] = [:]
         for (i, t) in targets.enumerated() {
-            let key = t.album.isEmpty ? "single#\(i)" : Self.foldKey(t.artist) + "|" + Self.foldKey(t.album)
-            if groups[key] == nil { order.append(key) }
-            groups[key, default: []].append(t)
+            let key = t.album.isEmpty ? "single#\(i)" : "alb|" + Self.foldKey(t.album)
+            if byAlbum[key] == nil { albumOrder.append(key) }
+            byAlbum[key, default: []].append(t)
+        }
+        let confirmedComps = confirmedCompilations
+        for key in albumOrder {
+            let ts = byAlbum[key]!
+            let distinctArtists = Set(ts.map { Self.foldKey($0.artist) }.filter { !$0.isEmpty })
+            let compKey = Organiser.fold(Organiser.stripDiscSuffix(ts.first?.album ?? "").clean)
+            let isComp = confirmedComps.contains(compKey)
+            // Keep an album in ONE group (one release lookup) when it's single-artist OR a
+            // CONFIRMED various-artists compilation. If ≥2 different artists share a title
+            // but it isn't a confirmed compilation, they're most likely different albums
+            // (two "Debut"s by different artists) → sub-split by artist so one doesn't get
+            // seeded from the other's release credits.
+            if distinctArtists.count >= 2 && !isComp {
+                for t in ts {
+                    let sk = key + "|" + Self.foldKey(t.artist)
+                    if groups[sk] == nil { order.append(sk) }
+                    groups[sk, default: []].append(t)
+                }
+            } else {
+                order.append(key)
+                groups[key] = ts
+            }
         }
         let total = targets.count
         Self.creditsLog("=== Credits run: \(total) tracks in \(order.count) album-group(s) ===", reset: true)
@@ -2192,6 +2291,7 @@ final class PerfectStore: ObservableObject {
         let renumberOrg = renumberTracks
         let compsOrg = confirmedCompilations
         let declinedMergesOrg = declinedAlbumMerges
+        let checkMissing = checkMissingTracks
         commitTotal = accTagEdits.count
             + accEnrich.reduce(0) { $0 + $1.2.count }
             + accPerf.reduce(0) { $0 + $1.2.count }
@@ -2223,7 +2323,16 @@ final class PerfectStore: ObservableObject {
                 guard fm.fileExists(atPath: from.path) else { return false }
                 do {
                     try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    try fm.moveItem(at: from, to: to)
+                    if from.path != to.path && from.path.lowercased() == to.path.lowercased() {
+                        // case-only rename: go via a temp name so a case-insensitive
+                        // filesystem actually applies it
+                        let tmp = to.deletingLastPathComponent().appendingPathComponent(".mdtmp-\(to.lastPathComponent)")
+                        try? fm.removeItem(at: tmp)
+                        try fm.moveItem(at: from, to: tmp)
+                        try fm.moveItem(at: tmp, to: to)
+                    } else {
+                        try fm.moveItem(at: from, to: to)
+                    }
                     ops.append((fromRel, toRel))
                     return true
                 } catch { log += "FAILED \(fromRel): \(error.localizedDescription)\n"; return false }
@@ -2240,6 +2349,78 @@ final class PerfectStore: ObservableObject {
                     log += "TAG: \(rel)  \(field) '\(old)' → '\(new)'\n"
                 } catch { log += "FAILED tag \(rel) \(field): \(error.localizedDescription)\n" }
                 await bump("Writing names & tags")
+            }
+
+            // 0a2) STUFFED ARTIST TAGS → primary artist + performer credits (Roon shape),
+            //      applied here BEFORE organise so each track files under its clean primary
+            //      artist. Same detector per-album Perfect uses; only the CONFIDENT cases
+            //      (machine-joined "A,B" or "A feat. B") auto-apply — ambiguous spaced lists
+            //      that could be a band name are logged for review, not changed. Reversible
+            //      (artist tagEdit + performer perfEdit). m4p can't be written, so skipped.
+            if !box.cancelled, let en = fm.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                while let u = en.nextObject() as? URL {
+                    if box.cancelled { break }
+                    guard Self.isAudio(u), u.pathExtension.lowercased() != "m4p",
+                          !u.path.contains("Music Librarian Quarantine"),
+                          let cur = Self.readField(u, "artist"),
+                          let split = TrackProposal.splitArtistCredit(cur), split.primary != cur else { continue }
+                    let rel = Self.rel(u, root)
+                    guard split.confident else {
+                        log += "ARTIST LIST (left for review — open in the Album Inspector): \(rel): \(cur)\n"; continue
+                    }
+                    do {
+                        try Self.writeField(u, "artist", to: split.primary)
+                        tagEdits.append((rel, "artist", cur))
+                        let credited = split.performers.map { $0.name }.joined(separator: ", ")
+                        log += "ARTIST SPLIT: \(rel): \(cur) → \(split.primary) + credits: \(credited)\n"
+                    } catch { log += "FAILED artist split \(rel): \(error.localizedDescription)\n"; continue }
+                    for p in split.performers where md_has_performer(u.path, p.name, p.role) == 0 {
+                        do { try Self.addPerformer(u, name: p.name, role: p.role); perfEdits.append((rel, p.name, p.role)) }
+                        catch {}
+                    }
+                    await bump("Tidying artist credits")
+                }
+            }
+
+            // 0a3) DISC ORDER — a multi-disc set flattened into one folder with no disc
+            //      tags interleaves track numbers (1,1,2,2,…). Assign disc numbers by
+            //      occurrence (ordered by file name) BEFORE organise, so it files them as
+            //      a proper multi-disc album. Same detector per-album Perfect uses.
+            if !box.cancelled {
+                func leadInt(_ s: String?) -> Int { Int((s ?? "").split(separator: "/").first.map(String.init) ?? "") ?? 0 }
+                var byFolder: [String: [(url: URL, track: Int, disc: Int)]] = [:]
+                if let en = fm.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                    while let u = en.nextObject() as? URL {
+                        if box.cancelled { break }
+                        guard Self.isAudio(u), !u.path.contains("Music Librarian Quarantine") else { continue }
+                        let tn = leadInt(Self.readField(u, "track"))
+                        guard tn > 0 else { continue }
+                        byFolder[u.deletingLastPathComponent().path, default: []].append((u, tn, leadInt(Self.readField(u, "disc"))))
+                    }
+                }
+                for (_, items) in byFolder {
+                    if box.cancelled { break }
+                    let dup = Dictionary(grouping: items, by: { $0.track }).contains { $0.value.count > 1 }
+                    // Only the shape this is for: a multi-disc set flattened into one folder
+                    // with NO disc tags, so track numbers repeat. If ANY track already has a
+                    // disc number, it's a correctly-tagged album (perhaps with one accidental
+                    // duplicate) — don't rewrite everyone's disc down to 1.
+                    guard dup, items.allSatisfy({ $0.disc == 0 }) else { continue }
+                    var seen: [Int: Int] = [:]
+                    for it in items.sorted(by: { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }) {
+                        let key = it.disc * 1000 + it.track
+                        let newDisc = (seen[key] ?? 0) + 1
+                        seen[key] = newDisc
+                        guard it.disc != newDisc else { continue }
+                        let rel = Self.rel(it.url, root)
+                        do {
+                            try Self.writeField(it.url, "disc", to: String(newDisc))
+                            tagEdits.append((rel, "disc", it.disc == 0 ? "" : String(it.disc)))
+                            log += "DISC: \(rel)  track \(it.track) → disc \(newDisc)\n"
+                        } catch { log += "FAILED disc \(rel): \(error.localizedDescription)\n" }
+                        await bump("Assigning disc numbers")
+                    }
+                }
             }
 
             // 0b) enrichment gap-fills — only fill a field that is actually BLANK,
@@ -2296,22 +2477,31 @@ final class PerfectStore: ObservableObject {
                     for (url, rel) in cj.files {
                         if box.cancelled { break }
                         await bump("Setting chosen cover art")
+                        var mayOverwrite = true
                         if md_has_artwork(url.path) == 1 {
+                            // Must have a verified backup before replacing existing art —
+                            // otherwise undo can't restore it. If the copy or the backup
+                            // write fails, leave the current cover untouched.
+                            mayOverwrite = false
                             var bl: Int32 = 0, bt: Int32 = 0
                             if let bbuf = md_copy_artwork(url.path, &bl, &bt) {
                                 let bdata = Data(bytes: bbuf, count: Int(bl)); free(bbuf)
                                 try? fm.createDirectory(at: artBackupDir, withIntermediateDirectories: true)
                                 let name = "\(bIdx).img"; bIdx += 1
-                                try? bdata.write(to: artBackupDir.appendingPathComponent(name))
-                                artReplacements.append((rel, "artwork-backups/" + name, Int(bt)))
-                            }
+                                if (try? bdata.write(to: artBackupDir.appendingPathComponent(name))) != nil {
+                                    artReplacements.append((rel, "artwork-backups/" + name, Int(bt)))
+                                    mayOverwrite = true
+                                } else { bIdx -= 1; log += "SKIP art \(rel): backup write failed, cover kept\n" }
+                            } else { log += "SKIP art \(rel): couldn't read existing cover to back up, kept\n" }
                         } else {
                             artEdits.append(rel)   // was blank → undo just strips it
                         }
-                        let rc = cj.image.withUnsafeBytes { buf in
-                            md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(cj.image.count), mime)
+                        if mayOverwrite {
+                            let rc = cj.image.withUnsafeBytes { buf in
+                                md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(cj.image.count), mime)
+                            }
+                            log += rc == 0 ? "ART: \(rel)  ← chosen cover (\(cj.image.count) bytes)\n" : "FAILED art \(rel): rc \(rc)\n"
                         }
-                        log += rc == 0 ? "ART: \(rel)  ← chosen cover (\(cj.image.count) bytes)\n" : "FAILED art \(rel): rc \(rc)\n"
                     }
                 }
             }
@@ -2494,37 +2684,47 @@ final class PerfectStore: ObservableObject {
                                            compilations: compsOrg, mergeAlbums: mergesOrg)
                 for p in plans {
                     if box.cancelled { break }
-                    guard let target = p.targetRel, target != p.rel else { continue }
+                    guard let target = p.targetRel else { continue }   // nil = couldn't place; leave it
                     let src = root.appendingPathComponent(p.rel)
                     guard fm.fileExists(atPath: src.path) else { continue }
-                    // Collision: the clean-tree destination is already occupied. If the
-                    // sitting file is the SAME recording (matching size, or matching
-                    // duration), this source is a leftover duplicate the dedup pass didn't
-                    // fold in — quarantine it rather than stranding it in a stray folder.
-                    let dst = root.appendingPathComponent(target)
-                    if fm.fileExists(atPath: dst.path) {
-                        let sSize = (try? src.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
-                        let dSize = (try? dst.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -2
-                        var sameTrack = (sSize == dSize)
-                        if !sameTrack {
-                            let sd = await readMetadata(url: src, size: Int64(max(sSize, 0))).duration
-                            let dd = await readMetadata(url: dst, size: Int64(max(dSize, 0))).duration
-                            if sd > 0 && dd > 0 { sameTrack = abs(sd - dd) <= 3.0 }
+                    let willMove = target != p.rel
+                    if willMove {
+                        // Collision: the clean-tree destination is already occupied. If the
+                        // sitting file is the SAME recording (matching size, or matching
+                        // duration), this source is a leftover duplicate the dedup pass didn't
+                        // fold in — quarantine it rather than stranding it in a stray folder.
+                        let dst = root.appendingPathComponent(target)
+                        // A case-only rename on a case-insensitive volume makes the target
+                        // "exist" (it's the SAME file) — that's a rename, not a collision.
+                        let caseOnly = src.path != dst.path && src.path.lowercased() == dst.path.lowercased()
+                        if !caseOnly && fm.fileExists(atPath: dst.path) {
+                            let sSize = (try? src.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
+                            let dSize = (try? dst.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -2
+                            var sameTrack = (sSize == dSize)
+                            if !sameTrack {
+                                let sd = await readMetadata(url: src, size: Int64(max(sSize, 0))).duration
+                                let dd = await readMetadata(url: dst, size: Int64(max(dSize, 0))).duration
+                                if sd > 0 && dd > 0 { sameTrack = abs(sd - dd) <= 3.0 }
+                            }
+                            if sameTrack {
+                                if move(p.rel, qRel + "/" + p.rel) { log += "DUPLICATE (target exists) → quarantine: \(p.rel)\n" }
+                            } else {
+                                log += "SKIPPED (target exists, different track): \(p.rel) → \(target)\n"
+                            }
+                            await bump("Reorganising files")
+                            continue
                         }
-                        if sameTrack {
-                            if move(p.rel, qRel + "/" + p.rel) { log += "DUPLICATE (target exists) → quarantine: \(p.rel)\n" }
-                        } else {
-                            log += "SKIPPED (target exists, different track): \(p.rel) → \(target)\n"
-                        }
-                        await bump("Reorganising files")
-                        continue
                     }
+                    // Write the self-describing tags (album-artist / album / disc / track) even
+                    // when the file DOESN'T move — an album already in the right folder still
+                    // needs its album-artist consensus filled, or per-album Perfect re-proposes
+                    // it forever. Only changed fields are written.
                     for (field, value) in p.tagWrites {
                         let old = Self.readField(src, field) ?? ""
                         if old == value { continue }
                         do { try Self.writeField(src, field, to: value); tagEdits.append((p.rel, field, old)) } catch {}
                     }
-                    if move(p.rel, target) { log += "MOVED: \(p.rel) → \(target)\n" }
+                    if willMove, move(p.rel, target) { log += "MOVED: \(p.rel) → \(target)\n" }
                     await bump("Reorganising files")
                 }
             }
@@ -2545,6 +2745,121 @@ final class PerfectStore: ObservableObject {
                         for junk in contents { try? fm.removeItem(at: dir.appendingPathComponent(junk)) }
                         if (try? fm.removeItem(at: dir)) != nil { log += "REMOVED empty folder: \(rel)\n" }
                     }
+                }
+            }
+
+            // 5) ALBUM ANALYSIS on the final tree — the same checks per-album "Perfect
+            //    this album" runs, so the two flows surface the same things:
+            //    (a) POSSIBLY-DAMAGED files (offline, always) — a track much shorter than
+            //        its album's typical length, likely truncated. Info only, never removed.
+            //    (b) MISSING-TRACK reconcile (network, gated by the toggle) — remembered per
+            //        album folder so the Album Inspector greys the gaps out later.
+            //    One disk pass (buildTracksFromDisk) gives tags + durations for both.
+            var missingReports: [MissingAlbumReport] = []
+            var damagedReports: [DamagedAlbumReport] = []
+            if !box.cancelled {
+                let diskTracks = await Self.buildTracksFromDisk(root: root, fm: fm)
+                var byFolder: [String: [Track]] = [:]
+                for t in diskTracks {
+                    byFolder[t.url.deletingLastPathComponent().path, default: []].append(t)
+                }
+                // real albums only — skip loose/junk folders and one-offs the checks can't help
+                let albums = byFolder.filter { $0.value.count >= 2 && !Organiser.albumOrEmpty($0.value.first?.album ?? "").isEmpty }
+                    .sorted { $0.key < $1.key }
+                let mb = MusicBrainzClient()
+                var idx = 0
+                for (folder, tracks) in albums {
+                    if box.cancelled { break }
+                    idx += 1
+                    // Album by consensus (not just the first file, whose tag may carry a
+                    // stray edition marker), and the lookup artist chosen the SAME way
+                    // per-album Perfect does: a various-artists folder searches under
+                    // "Various Artists" whether or not it was ticked as a compilation (this
+                    // only affects the read-only lookup, never writes the compilation flag).
+                    let realAlbums = tracks.map { $0.album }.filter { !$0.isEmpty && !Organiser.isPlaceholderAlbum($0) }
+                    let album = Organiser.stripDiscSuffix(Organiser.canonicalAlbumDisplay(realAlbums.isEmpty ? tracks.map { $0.album } : realAlbums)).clean
+                    let primaryArtists = Set(tracks.map { normText($0.artist.isEmpty ? $0.albumArtist : $0.artist) }.filter { !$0.isEmpty })
+                    let aaCounts = Dictionary(grouping: tracks.map { $0.albumArtist }.filter { !$0.isEmpty }, by: { $0 }).mapValues { $0.count }
+                    let dominantAA = aaCounts.max(by: { $0.value < $1.value })?.key ?? ""
+                    let aaAgree = tracks.filter { !$0.albumArtist.isEmpty && $0.albumArtist == dominantAA }.count
+                    let looksComp = primaryArtists.count >= 2 &&
+                        (dominantAA.isEmpty || normText(dominantAA) == "various artists" || Double(aaAgree) < Double(tracks.count) * 0.6)
+                    let mostCommonArtist = Dictionary(grouping: tracks.map { $0.artist }.filter { !$0.isEmpty }, by: { $0 }).mapValues { $0.count }.max(by: { $0.value < $1.value })?.key ?? ""
+                    let artist = looksComp ? "Various Artists" : (dominantAA.isEmpty ? mostCommonArtist : dominantAA)
+
+                    // (a) possibly-damaged — same heuristic as per-album Perfect
+                    let durs = tracks.map { $0.duration }.filter { $0 > 0 }.sorted()
+                    let median = durs.isEmpty ? 0 : durs[durs.count / 2]
+                    let shorties = tracks.filter { $0.duration > 0 && $0.duration <= 40 && median > 90 && $0.duration < median * 0.5 }
+                    if !shorties.isEmpty {
+                        let dlines = shorties.map { "“\($0.title.isEmpty ? $0.name : $0.title)” — \(fmtDur($0.duration)) (album typical \(fmtDur(median)))" }
+                        damagedReports.append(DamagedAlbumReport(artist: artist, album: album.isEmpty ? (tracks.first?.album ?? "") : album, lines: dlines))
+                        log += "\nPOSSIBLY DAMAGED in “\(album)” (unusually short, kept for review):\n"
+                        for l in dlines { log += "  · \(l)\n" }
+                    }
+
+                    // (b) missing tracks — reconcile online, gated
+                    guard checkMissing, tracks.count >= 4, !album.isEmpty else { continue }
+                    await self.setCommitProgress("Checking for missing tracks (\(idx) of \(albums.count))", done: done)
+                    let discCount = max(1, Set(tracks.map { $0.discNo == 0 ? 1 : $0.discNo }).count)
+                    guard let match = await mb.bestRelease(artist: artist, album: album,
+                                                           haveTitles: tracks.map { $0.title }, discCount: discCount)
+                    else { continue }
+                    // fuzzy (one-typo) matching — parity with per-album Perfect
+                    let missing = match.tracks
+                        .filter { slot in !tracks.contains { TrackProposal.fuzzyTitleMatch($0.title, slot.title) } }
+                        .sorted { ($0.disc, $0.track) < ($1.disc, $1.track) }
+                    // always remember the matched tracklist so the inspector can show gaps
+                    AlbumReconcileStore.save(folder, match)
+
+                    // Correct disc & track numbers FROM the matched release when the on-disk
+                    // tags are broken — a flattened multi-disc set with duplicate (disc,track)
+                    // keys (every track wrongly tagged one disc). The release is authoritative
+                    // for which disc a title is on. Reversible; parity with per-album Perfect.
+                    let dupKeys = Dictionary(grouping: tracks, by: { $0.discNo * 1000 + $0.trackNo }).contains { $0.value.count > 1 }
+                    // Health gate — parity with per-album Perfect: duplicate KEYS with
+                    // unique titles is a correctable flattened rip, but many duplicate
+                    // TITLES means several editions mixed together; correcting from one
+                    // release would guess, so refuse and flag for manual attention.
+                    let messyTitles = Organiser.looksDuplicatedMess(foldedTitles: tracks.map { TrackProposal.hardFold($0.title) })
+                    if dupKeys && messyTitles {
+                        log += "\nNEEDS ATTENTION “\(album)”: several editions look mixed together (duplicate titles) — disc/track correction skipped; untangle the folder by hand.\n"
+                    }
+                    if dupKeys && !messyTitles {
+                        let slotByTitle = Dictionary(match.tracks.map { (TrackProposal.typoFold($0.title).lowercased(), $0) },
+                                                     uniquingKeysWith: { a, _ in a })
+                        let multiDisc = match.discCount > 1
+                        for t in tracks {
+                            if box.cancelled { break }
+                            guard let slot = slotByTitle[TrackProposal.typoFold(t.title).lowercased()] else { continue }
+                            let rel = Self.rel(t.url, root)
+                            if t.discNo != slot.disc {
+                                do { try Self.writeField(t.url, "disc", to: String(slot.disc))
+                                     tagEdits.append((rel, "disc", t.discNo == 0 ? "" : String(t.discNo))) } catch {}
+                            }
+                            if t.trackNo != slot.track {
+                                do { try Self.writeField(t.url, "track", to: String(slot.track))
+                                     tagEdits.append((rel, "track", t.trackNo == 0 ? "" : String(t.trackNo))) } catch {}
+                            }
+                            // Rename the file to match the corrected numbers IN THE SAME RUN, so
+                            // the on-disk name and the tag agree (no second Perfect pass needed).
+                            let prefix = multiDisc ? "\(slot.disc)-\(Organiser.pad2(slot.track))" : Organiser.pad2(slot.track)
+                            let newName = "\(prefix) \(Organiser.safe(t.title)).\(t.url.pathExtension)"
+                            if newName != t.url.lastPathComponent {
+                                let parent = (rel as NSString).deletingLastPathComponent
+                                let toRel = parent.isEmpty ? newName : parent + "/" + newName
+                                if move(rel, toRel) { log += "RENAMED (disc-fix): \(rel) → \(toRel)\n" }
+                            }
+                        }
+                    }
+
+                    guard !missing.isEmpty else { continue }
+                    let lines = missing.map { "Disc \($0.disc) · \($0.track). \($0.title)" }
+                    missingReports.append(MissingAlbumReport(artist: artist, album: match.title,
+                                                             missing: missing.count, total: match.tracks.count,
+                                                             missingTitles: lines))
+                    log += "\nMISSING from “\(match.title)” (\(missing.count) of \(match.tracks.count)):\n"
+                    for l in lines { log += "  · \(l)\n" }
                 }
             }
 
@@ -2572,13 +2887,17 @@ final class PerfectStore: ObservableObject {
                 try? fm.removeItem(at: quarantine)
             }
             await self.finishCommit(count: total, quarantine: quarantine, cancelled: wasCancelled,
-                                    flagged: flaggedArt.map { ArtworkReviewItem(artist: $0.artist, album: $0.album, files: $0.files, mbids: $0.mbids) })
+                                    flagged: flaggedArt.map { ArtworkReviewItem(artist: $0.artist, album: $0.album, files: $0.files, mbids: $0.mbids) },
+                                    missing: missingReports, damaged: damagedReports)
         }
     }
 
     private func finishCommit(count: Int, quarantine: URL, cancelled: Bool = false,
-                              flagged: [ArtworkReviewItem] = []) {
+                              flagged: [ArtworkReviewItem] = [], missing: [MissingAlbumReport] = [],
+                              damaged: [DamagedAlbumReport] = []) {
         busy = false
+        missingTrackReports = missing.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+        damagedTrackReports = damaged.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
         // the summary dialog is set BEFORE committing flips false so the view's
         // onChange sees it and shows the "all done" sheet (not just a dismiss).
         showCompletionSummary = !cancelled && count > 0
@@ -2698,13 +3017,20 @@ final class PerfectStore: ObservableObject {
                 let url = root.appendingPathComponent(rel)
                 guard fm.fileExists(atPath: url.path) else { continue }
                 var l: Int32 = 0, t: Int32 = 0
-                if let b = md_copy_artwork(url.path, &l, &t) {
-                    let bd = Data(bytes: b, count: Int(l)); free(b)
-                    try? fm.createDirectory(at: backupDir, withIntermediateDirectories: true)
-                    let name = "\(idx).img"; idx += 1
-                    try? bd.write(to: backupDir.appendingPathComponent(name))
-                    artReplacements.append((rel, "artwork-backups/" + name, Int(t)))
+                var mayOverwrite = true
+                if md_has_artwork(url.path) == 1 {
+                    mayOverwrite = false                          // need a verified backup first
+                    if let b = md_copy_artwork(url.path, &l, &t) {
+                        let bd = Data(bytes: b, count: Int(l)); free(b)
+                        try? fm.createDirectory(at: backupDir, withIntermediateDirectories: true)
+                        let name = "\(idx).img"; idx += 1
+                        if (try? bd.write(to: backupDir.appendingPathComponent(name))) != nil {
+                            artReplacements.append((rel, "artwork-backups/" + name, Int(t)))
+                            mayOverwrite = true
+                        } else { idx -= 1; log += "SKIP art \(rel): backup write failed, cover kept\n" }
+                    } else { log += "SKIP art \(rel): couldn't read existing cover to back up, kept\n" }
                 } else { artEdits.append(rel) }
+                guard mayOverwrite else { continue }
                 let rc = image.withUnsafeBytes { buf in
                     md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(image.count), mime)
                 }
@@ -2759,10 +3085,17 @@ final class PerfectStore: ObservableObject {
     func applyLibraryRun(root: URL, summary: String,
                          tagWrites: [(rel: String, field: String, value: String)] = [],
                          moves: [(from: String, to: String)] = [],
+                         artEmbeds: [(rel: String, image: Data, mime: String)] = [],
+                         performerAdds: [(rel: String, name: String, role: String)] = [],
                          then: (@MainActor () -> Void)? = nil) {
         busy = true; status = "Applying…"
         Task {   // @MainActor-isolated (this method is on the store); disk work suspends off-main
-            await Self.performLibraryOps(root: root, summary: summary, tagWrites: tagWrites, moves: moves)
+            await Self.performLibraryOps(root: root, summary: summary,
+                                         tagWrites: tagWrites, moves: moves, artEmbeds: artEmbeds,
+                                         performerAdds: performerAdds)
+            // Cover art / paths on disk just changed — drop the cached thumbnails so the
+            // grid and album covers reload from the files (clear() bumps ArtRefresh).
+            ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
             self.busy = false; self.status = ""; self.loadRuns(); then?()
         }
     }
@@ -2772,7 +3105,9 @@ final class PerfectStore: ObservableObject {
     /// thing is one undoable entry in Runs.
     nonisolated static func performLibraryOps(root: URL, summary: String,
                                               tagWrites: [(rel: String, field: String, value: String)],
-                                              moves: [(from: String, to: String)]) async {
+                                              moves: [(from: String, to: String)],
+                                              artEmbeds: [(rel: String, image: Data, mime: String)] = [],
+                                              performerAdds: [(rel: String, name: String, role: String)] = []) async {
         let fm = FileManager.default
         let stamp = { let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"; return f.string(from: Date()) }()
         let qRel = "Music Librarian Quarantine/\(stamp)"
@@ -2780,6 +3115,9 @@ final class PerfectStore: ObservableObject {
         try? fm.createDirectory(at: quarantine, withIntermediateDirectories: true)
         var ops: [(from: String, to: String)] = []
         var tagEdits: [(rel: String, field: String, old: String)] = []
+        var perfEdits: [(rel: String, name: String, role: String)] = []   // credits added → undo removes them
+        var artEdits: [String] = []                                   // art added where there was none → undo strips it
+        var artReplacements: [(rel: String, backup: String, oldType: Int)] = []  // art replaced → undo restores backup
         var log = "Music Librarian — change log \(Date())\nLibrary: \(root.path)\n\n"
 
         for w in tagWrites {
@@ -2789,20 +3127,74 @@ final class PerfectStore: ObservableObject {
             do { try writeField(url, w.field, to: w.value); tagEdits.append((w.rel, w.field, old))
                  log += "TAG: \(w.rel)  \(w.field) '\(old)' → '\(w.value)'\n" } catch {}
         }
+        // performer credits — added to the musician-credits list, recorded so undo
+        // removes exactly what was added. Skip any already present (idempotent).
+        for p in performerAdds {
+            let url = root.appendingPathComponent(p.rel)
+            guard fm.fileExists(atPath: url.path), md_has_performer(url.path, p.name, p.role) == 0 else { continue }
+            do { try addPerformer(url, name: p.name, role: p.role); perfEdits.append((p.rel, p.name, p.role))
+                 log += "CREDIT: \(p.rel)  + \(p.name) (\(p.role))\n" } catch {}
+        }
+        // Embed artwork BEFORE any moves so the recorded rels are the files' original
+        // paths (undo reverses moves first, then restores art by rel). Existing art is
+        // backed up (artReplacements); a blank track's added art is recorded in artEdits.
+        if !artEmbeds.isEmpty {
+            let artBackupDir = quarantine.appendingPathComponent("artwork-backups", isDirectory: true)
+            var bIdx = 0
+            for e in artEmbeds {
+                let url = root.appendingPathComponent(e.rel)
+                guard fm.fileExists(atPath: url.path) else { continue }
+                var mayOverwrite = true
+                if md_has_artwork(url.path) == 1 {
+                    mayOverwrite = false                          // need a verified backup first
+                    var bl: Int32 = 0, bt: Int32 = 0
+                    if let bbuf = md_copy_artwork(url.path, &bl, &bt) {
+                        let bdata = Data(bytes: bbuf, count: Int(bl)); free(bbuf)
+                        try? fm.createDirectory(at: artBackupDir, withIntermediateDirectories: true)
+                        let name = "\(bIdx).img"; bIdx += 1
+                        if (try? bdata.write(to: artBackupDir.appendingPathComponent(name))) != nil {
+                            artReplacements.append((e.rel, "artwork-backups/" + name, Int(bt)))
+                            mayOverwrite = true
+                        } else { bIdx -= 1; log += "SKIP art \(e.rel): backup write failed, cover kept\n" }
+                    } else { log += "SKIP art \(e.rel): couldn't read existing cover to back up, kept\n" }
+                } else {
+                    artEdits.append(e.rel)   // was blank → undo just strips it
+                }
+                guard mayOverwrite else { continue }
+                let rc = e.image.withUnsafeBytes { buf in
+                    md_set_artwork(url.path, buf.bindMemory(to: CChar.self).baseAddress, Int32(e.image.count), e.mime)
+                }
+                log += rc == 0 ? "ART: \(e.rel)  ← unified cover (\(e.image.count) bytes)\n" : "FAILED art \(e.rel): rc \(rc)\n"
+            }
+        }
         // longest source path first so a folder's files move before the folder
         for m in moves.sorted(by: { $0.from.count > $1.from.count }) {
             let toRel = m.to.isEmpty ? qRel + "/" + m.from : m.to
             let from = root.appendingPathComponent(m.from), to = root.appendingPathComponent(toRel)
             guard fm.fileExists(atPath: from.path) else { continue }
-            if !m.to.isEmpty && fm.fileExists(atPath: to.path) { log += "SKIP (target exists): \(toRel)\n"; continue }
+            // A case-only rename ("… On …" → "… on …") on a case-insensitive volume
+            // makes `to` look like it already exists (it's the SAME file as `from`) —
+            // that's not a collision, so allow it; only skip a genuinely different file.
+            let caseOnly = from.path != to.path && from.path.lowercased() == to.path.lowercased()
+            if !m.to.isEmpty && !caseOnly && fm.fileExists(atPath: to.path) {
+                log += "SKIP (target exists): \(toRel)\n"; continue
+            }
             do {
                 try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try fm.moveItem(at: from, to: to)
+                if caseOnly {
+                    // go via a temp name so a case-insensitive filesystem actually applies it
+                    let tmp = to.deletingLastPathComponent().appendingPathComponent(".mdtmp-\(to.lastPathComponent)")
+                    try? fm.removeItem(at: tmp)
+                    try fm.moveItem(at: from, to: tmp)
+                    try fm.moveItem(at: tmp, to: to)
+                } else {
+                    try fm.moveItem(at: from, to: to)
+                }
                 ops.append((m.from, toRel))
                 log += "\(m.to.isEmpty ? "DELETE → quarantine" : "MOVE"): \(m.from) → \(toRel)\n"
             } catch { log += "FAILED \(m.from): \(error.localizedDescription)\n" }
         }
-        let total = ops.count + tagEdits.count
+        let total = ops.count + tagEdits.count + perfEdits.count + artEdits.count + artReplacements.count
         log += "\n\(total) change(s). Restore with 'Undo this run'.\n"
         try? log.write(to: quarantine.appendingPathComponent("changelog.txt"), atomically: true, encoding: .utf8)
         let record: [String: Any] = [
@@ -2810,7 +3202,9 @@ final class PerfectStore: ObservableObject {
             "root": root.path, "summary": summary,
             "ops": ops.map { ["from": $0.from, "to": $0.to] },
             "tagEdits": tagEdits.map { ["rel": $0.rel, "field": $0.field, "old": $0.old] },
-            "perfEdits": [], "artEdits": [], "artPromotions": [], "artReplacements": []
+            "perfEdits": perfEdits.map { ["rel": $0.rel, "name": $0.name, "role": $0.role] },
+            "artEdits": artEdits, "artPromotions": [],
+            "artReplacements": artReplacements.map { ["rel": $0.rel, "backup": $0.backup, "oldType": String($0.oldType)] }
         ]
         if let data = try? JSONSerialization.data(withJSONObject: record) {
             try? data.write(to: quarantine.appendingPathComponent("run.json"))
@@ -2886,8 +3280,14 @@ final class PerfectStore: ObservableObject {
             // already rebuilt) — merge its contents in instead.
             func restore(_ from: URL, _ to: URL) -> Bool {
                 let fromIsDir = (try? from.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                // A case-only rename ("On" → "on") reverses to a `to` that case-folds to the
+                // SAME file as `from` on a case-insensitive volume. `toExists` is then a false
+                // positive — removing `to` would unlink the file itself and the move would then
+                // fail with no backup (silent data loss). Go via a temp name instead, exactly
+                // like the forward path, and never removeItem in that case.
+                let caseOnly = from.path != to.path && from.path.lowercased() == to.path.lowercased()
                 let toExists = fm.fileExists(atPath: to.path)
-                if fromIsDir && toExists {
+                if fromIsDir && toExists && !caseOnly {
                     for child in (try? fm.contentsOfDirectory(atPath: from.path)) ?? [] {
                         _ = restore(from.appendingPathComponent(child), to.appendingPathComponent(child))
                     }
@@ -2896,8 +3296,15 @@ final class PerfectStore: ObservableObject {
                 }
                 do {
                     try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    if toExists { try? fm.removeItem(at: to) }
-                    try fm.moveItem(at: from, to: to)
+                    if caseOnly {
+                        let tmp = to.deletingLastPathComponent().appendingPathComponent(".mdtmp-\(to.lastPathComponent)")
+                        try? fm.removeItem(at: tmp)
+                        try fm.moveItem(at: from, to: tmp)
+                        try fm.moveItem(at: tmp, to: to)
+                    } else {
+                        if toExists { try? fm.removeItem(at: to) }
+                        try fm.moveItem(at: from, to: to)
+                    }
                     return true
                 } catch { return false }
             }
@@ -2910,9 +3317,13 @@ final class PerfectStore: ObservableObject {
                 if restore(from, to) { restored += 1 } else { failed += 1 }
             }
 
-            // restore tag rewrites — the files are back at their original paths now,
-            // so write each old artist spelling back into place.
-            for edit in tagEdits {
+            // restore tag rewrites — the files are back at their original paths now, so
+            // write each old value back. REVERSED: if one run wrote the same field twice
+            // (e.g. album consensus in step 0 then Organise, or identify then the artist
+            // split), replaying in reverse means the FIRST write's recorded old value —
+            // the true original — is applied last and wins. Forward order would leave the
+            // intermediate value on disk.
+            for edit in tagEdits.reversed() {
                 let url = root.appendingPathComponent(edit.rel)
                 guard fm.fileExists(atPath: url.path) else { failed += 1; continue }
                 do { try Self.writeField(url, edit.field, to: edit.old); restored += 1 } catch { failed += 1 }

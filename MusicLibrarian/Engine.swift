@@ -58,7 +58,10 @@ struct Track: Identifiable, Hashable {
         return s
     }
     var formatLabel: String {
-        (lossless ? "◆ " : "") + codec.uppercased() + (bitrate > 0 ? " \(bitrate)k" : "")
+        // fall back to the size÷duration estimate so a VBR / un-estimated file still
+        // shows a bitrate instead of a bare "MP3"
+        let kbps = bitrate > 0 ? bitrate : Int(effectiveKbps.rounded())
+        return (lossless ? "◆ " : "") + codec.uppercased() + (kbps > 0 ? " \(kbps)k" : "")
     }
 }
 
@@ -240,7 +243,8 @@ func buildClusters(_ tracks: inout [Track], mode: MatchMode, tol: Double,
     let normed: [N] = tracks.map { t in
         let a = (mode == .aggressive) ? normLoose(t.displayArtist) : normText(t.displayArtist)
         let ti = (mode == .aggressive) ? normLoose(t.title) : normText(t.title)
-        return N(i: t.id, a: a, ti: ti, al: normText(t.album), base: baseName(t.name))
+        // edition-folded album key, so "Album" and "Album (Deluxe Edition)" copies cluster
+        return N(i: t.id, a: a, ti: ti, al: Organiser.canonicalAlbumKey(t.album), base: baseName(t.name))
     }
     var buckets: [String: [N]] = [:]
     for n in normed { buckets[n.a + "\u{0}" + n.ti, default: []].append(n) }

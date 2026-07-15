@@ -109,6 +109,11 @@ struct PerfectView: View {
     @State private var expanded: Set<String> = []   // all sections collapsed initially — reads as a summary
     @State private var showSettings = false
     @State private var queueIndex = 0                // position in the step-through review queue
+    // A/B preview: a ~30s clip of the PROPOSED match, so a queue item can be checked
+    // by ear against the original file. Fetched on demand, cached per proposal.
+    @State private var previewURL: [UUID: URL] = [:]
+    @State private var previewLoading: Set<UUID> = []
+    @State private var previewMissing: Set<UUID> = []   // no preview found for these
     @State private var savedFlash = false            // brief "Saved" toast after a queue decision
     @State private var showResetConfirm = false      // "Start over" confirmation
     @ObservedObject private var creds = APICredentials.shared   // live API-key status
@@ -313,6 +318,8 @@ struct PerfectView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
+            if !store.missingTrackReports.isEmpty { missingTracksSummary }
+            if !store.damagedTrackReports.isEmpty { damagedTracksSummary }
             HStack(spacing: 8) {
                 if let q = store.lastQuarantine {
                     Button {
@@ -335,6 +342,63 @@ struct PerfectView: View {
         .padding(24)
         .frame(width: 480)
         .interactiveDismissDisabled()
+    }
+
+    /// After Apply: albums the run found to be incomplete. Read-only — there's nothing
+    /// to write for a track you don't have; the gaps are remembered so the Album
+    /// Inspector greys them out. The full list is in the change log.
+    private var missingTracksSummary: some View {
+        let reports = store.missingTrackReports
+        let totalMissing = reports.reduce(0) { $0 + $1.missing }
+        return VStack(alignment: .leading, spacing: 6) {
+            Label("\(totalMissing) missing track(s) across \(reports.count) album(s)",
+                  systemImage: "questionmark.square.dashed")
+                .font(.caption).fontWeight(.semibold).foregroundStyle(.orange)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(reports) { r in
+                        Text("\(r.artist.isEmpty ? "" : r.artist + " — ")\(r.album): missing \(r.missing) of \(r.total)")
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .frame(maxHeight: 120)
+            Text("Open an album in the Library to see exactly which tracks are missing (greyed out).")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.08)))
+    }
+
+    /// After Apply: files that look truncated/damaged (much shorter than their album's
+    /// typical length). Nothing was removed — this is for you to check and re-rip.
+    private var damagedTracksSummary: some View {
+        let reports = store.damagedTrackReports
+        let total = reports.reduce(0) { $0 + $1.lines.count }
+        return VStack(alignment: .leading, spacing: 6) {
+            Label("\(total) track(s) look unusually short — possibly damaged, kept for you to check",
+                  systemImage: "exclamationmark.triangle")
+                .font(.caption).fontWeight(.semibold).foregroundStyle(.orange)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(reports) { r in
+                        ForEach(r.lines, id: \.self) { line in
+                            Text("\(r.album.isEmpty ? "" : r.album + " · ")\(line)")
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 100)
+            Text("Nothing was deleted. Re-rip or replace these if they really are broken.")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.08)))
     }
 
     // MARK: header
@@ -636,6 +700,9 @@ struct PerfectView: View {
                     .onChange(of: store.renumberTracks) { _ in
                         if !store.organisePlans.isEmpty { store.organise() }
                     }
+                Toggle("Check for missing tracks", isOn: $store.checkMissingTracks)
+                    .toggleStyle(.checkbox).controlSize(.small)
+                    .help("After the clean tree is built, check each album online (MusicBrainz, Discogs, Deezer) and remember which tracks it's missing, so the Album Inspector can grey them out. Uses the network — turn off for a quick offline run.")
                 Toggle("Composer-first for classical", isOn: $store.composerFirstClassical)
                     .toggleStyle(.checkbox).controlSize(.small)
                     .onChange(of: store.composerFirstClassical) { _ in
@@ -837,6 +904,7 @@ struct PerfectView: View {
                 if step == 2 || step == 7 { nameChangeSummary }
                 if step == 2 || step == 3 { identifiedNote }
                 if step == 7 && !store.artworkNeedsReview.isEmpty { artworkReviewSection }
+                if step == 7 { anyAlbumArtworkDisclosure }
                 if visibleAlbums.isEmpty && !store.identifying && !store.enriching {
                     emptyStageNote
                 }
@@ -926,9 +994,48 @@ struct PerfectView: View {
         }
     }
 
-    // All albums (from the current proposals), so any one can be opened for a
-    // cover change — not just the auto-flagged ones.
+    // EVERY album the scan found (folder-based), so any one can be opened for a cover
+    // change — not just the AcoustID-matched ones. Where identify corrected an album's
+    // name, that name is shown; unidentified albums show by their folder. This is what
+    // lets you fix a cover that's present but wrong on an album we never matched.
     private var artAlbumGroups: [(artist: String, album: String, files: [String])] {
+        // Prefer the FINAL organise plan so the grid shows the corrected tree — one card per
+        // album AS IT WILL BE after Apply (editions merged, duplicates folded, husks gone) —
+        // instead of the raw pre-Perfect folders. Group by the destination Album Artist/Album
+        // folder; carry each track's ORIGINAL path (art is embedded before the move).
+        if !store.organisePlans.isEmpty {
+            var byAlbum: [String: (artist: String, album: String, files: [String])] = [:]
+            for p in store.organisePlans {
+                let finalRel = p.targetRel ?? p.rel
+                if finalRel.hasPrefix("Music Librarian Quarantine") { continue }   // being discarded
+                let folder = (finalRel as NSString).deletingLastPathComponent
+                guard !folder.isEmpty, folder != "." else { continue }
+                let album = (folder as NSString).lastPathComponent
+                let artist = ((folder as NSString).deletingLastPathComponent as NSString).lastPathComponent
+                var e = byAlbum[folder] ?? (artist, album, [])
+                e.files.append(p.rel)
+                byAlbum[folder] = e
+            }
+            if !byAlbum.isEmpty {
+                return byAlbum.values.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+            }
+        }
+
+        // Fallbacks when Organise hasn't been previewed (files are still in their scanned
+        // folders): use the scan list, with identify's corrected names where we have them.
+        var nameByFolder: [String: (artist: String, album: String)] = [:]
+        for p in store.proposals {
+            let folder = p.url.deletingLastPathComponent().path
+            let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
+            let album = Organiser.stripDiscSuffix(p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum).clean
+            if !album.isEmpty, nameByFolder[folder] == nil { nameByFolder[folder] = (artist, album) }
+        }
+        if !store.scannedAlbums.isEmpty {
+            return store.scannedAlbums.map { a in
+                let named = nameByFolder[a.id]
+                return (named?.artist ?? a.artist, named?.album ?? a.album, a.files)
+            }.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+        }
         var byAlbum: [String: (artist: String, album: String, files: [String])] = [:]
         for p in store.proposals {
             let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
@@ -939,6 +1046,25 @@ struct PerfectView: View {
             byAlbum[key] = e
         }
         return byAlbum.values.sorted { ($0.artist.lowercased(), $0.album.lowercased()) < ($1.artist.lowercased(), $1.album.lowercased()) }
+    }
+
+    /// On the final Review: spotted a cover that's wrong (even one that's present)?
+    /// Every album is here — pick it to choose a new cover, identified or not.
+    @ViewBuilder private var anyAlbumArtworkDisclosure: some View {
+        let groups = artAlbumGroups
+        if !groups.isEmpty {
+            DisclosureGroup {
+                artworkAllAlbumsGrid.padding(.top, 6)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "photo.on.rectangle.angled").foregroundStyle(.secondary)
+                    Text("Change a cover on any album (\(groups.count))").font(.callout)
+                    Text("including ones with a cover that's just wrong").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.05)))
+        }
     }
 
     private var artworkAllAlbumsGrid: some View {
@@ -1290,14 +1416,23 @@ struct PerfectView: View {
 
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 6) {
-                            playButton(p.url)
                             Text(p.newTitle.isEmpty ? p.curTitle : p.newTitle).font(.headline)
                             Text(String(format: "%.0f%% by sound", p.score * 100))
                                 .font(.caption2).foregroundStyle(p.score >= 0.9 ? .green : .orange)
                             Spacer()
                             changeKindTags(p)
                         }
-                        scrubber(p.url)
+                        // A/B: play your file vs a preview of the proposed match — hear
+                        // both; picking one switches playback (one player) so you can
+                        // confirm the identification is really the same song.
+                        HStack(spacing: 8) {
+                            playButton(p.url)
+                            Text("your file").font(.caption2).foregroundStyle(.teal)
+                            Text("vs").font(.caption2).foregroundStyle(.tertiary)
+                            proposedPlayButton(p)
+                            Spacer()
+                        }
+                        scrubber(audio.playingURL ?? p.url)
                         // who/what this track is — so a decision is possible even with no cover
                         Text("\(p.newArtist.isEmpty ? p.curArtist : p.newArtist) · \(p.chosenAlbum.isEmpty ? p.curAlbum : p.chosenAlbum)")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
@@ -1509,6 +1644,46 @@ struct PerfectView: View {
                 .font(.system(size: 18)).foregroundStyle(drm ? Color.secondary : (playing ? Color.red : Color.teal))
         }.buttonStyle(.plain).disabled(drm)
         .help(drm ? "Protected (DRM) — this file can't be played or re-encoded" : (playing ? "Stop" : "Listen"))
+    }
+
+    /// Play a ~30s preview of the PROPOSED match (from iTunes/Deezer), so you can
+    /// hear whether it's really the same song as your file. Playing it switches
+    /// playback away from the original (one player), which is the A/B compare.
+    @ViewBuilder private func proposedPlayButton(_ p: TrackProposal) -> some View {
+        let loading = previewLoading.contains(p.id)
+        let missing = previewMissing.contains(p.id)
+        let tmp = previewURL[p.id]
+        let playing = tmp != nil && audio.playingURL == tmp
+        Button { playProposedPreview(p) } label: {
+            HStack(spacing: 3) {
+                if loading { ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 18, height: 18) }
+                else {
+                    Image(systemName: missing ? "waveform.slash" : (playing ? "stop.circle.fill" : "waveform.circle"))
+                        .font(.system(size: 18))
+                        .foregroundStyle(missing ? Color.secondary : (playing ? Color.red : Color.purple))
+                }
+                Text("match").font(.caption2).foregroundStyle(missing ? Color.secondary : Color.purple)
+            }
+        }
+        .buttonStyle(.plain).disabled(loading || missing)
+        .help(missing ? "No online preview found for the proposed match"
+                      : "Hear a short preview of the proposed match to check it's the same song")
+    }
+
+    private func playProposedPreview(_ p: TrackProposal) {
+        if let tmp = previewURL[p.id] { audio.toggle(tmp); return }
+        guard !previewLoading.contains(p.id), !previewMissing.contains(p.id) else { return }
+        let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
+        let title = p.newTitle.isEmpty ? p.curTitle : p.newTitle
+        previewLoading.insert(p.id)
+        Task {
+            let url = await CoverArtClient().trackPreview(artist: artist, title: title)
+            await MainActor.run {
+                previewLoading.remove(p.id)
+                if let url { previewURL[p.id] = url; audio.toggle(url) }
+                else { previewMissing.insert(p.id) }
+            }
+        }
     }
 
     /// A seek bar so you can skip through the track while reviewing it.

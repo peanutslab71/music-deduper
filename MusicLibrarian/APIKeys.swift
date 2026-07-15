@@ -157,9 +157,22 @@ struct SettingsView: View {
             } footer: {
                 Text("MusicBrainz and the Cover Art Archive are free and need no key, but ask every app to include a contact (an email or URL) so they can reach you if a query misbehaves. Not a login. Leave blank to use the app default. Limited to about 1 request/second.")
             }
+
+            Section {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("MusicBrainz & the Cover Art Archive — track data, credits and cover art", systemImage: "checkmark.circle")
+                    Label("Deezer — extra cover art and full tracklists for finding missing tracks", systemImage: "checkmark.circle")
+                    Label("iTunes Search — extra cover art", systemImage: "checkmark.circle")
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            } header: {
+                Text("Also used — no key needed")
+            } footer: {
+                Text("These free services need no sign-up. AcoustID above is the only key you have to register for; a Discogs token is optional.")
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 470, height: 560)
+        .frame(width: 470, height: 660)
     }
 }
 
