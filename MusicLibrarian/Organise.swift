@@ -248,7 +248,16 @@ enum Organiser {
         } else {
             prefix = ""
         }
-        let titleSafe = safe(t.title.isEmpty ? (t.rel as NSString).lastPathComponent : t.title)
+        // A blank title falls back to the file NAME — minus its extension and any
+        // leading 1–3 digit track number, so "01 Paranoid.m4p" becomes "Paranoid"
+        // (not "01 01 Paranoid.m4p.m4p"). A 4-digit year ("1999 - Song") is kept.
+        let fallbackTitle: String = {
+            let base = ((t.rel as NSString).lastPathComponent as NSString).deletingPathExtension
+            let stripped = base.replacingOccurrences(of: #"^\s*\d{1,3}[.\-_ ]+"#, with: "",
+                                                     options: .regularExpression)
+            return stripped.isEmpty ? base : stripped
+        }()
+        let titleSafe = safe(t.title.isEmpty ? fallbackTitle : t.title)
         let filename = prefix.isEmpty ? "\(titleSafe).\(t.ext)" : "\(prefix) \(titleSafe).\(t.ext)"
 
         return OrganisePlan(rel: t.rel, targetRel: folder + "/" + filename, flag: nil, tagWrites: writes)

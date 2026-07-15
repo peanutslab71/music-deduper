@@ -103,6 +103,20 @@ enum OrganiseLogicTests {
         let declined = Normalizer.plan(editions, declinedMerges: Set(eplan.mergeGroups.map { $0.key }))
         checkI("declined merge honored", declined.mergeGroups.count, 0)
 
+        // ---- planOne blank-title fallback: filename minus extension + number ----
+        let blank = OrganiseInput(rel: "Black Sabbath/Greatest Hits/01 Paranoid.m4p", ext: "m4p",
+                                  artist: "Black Sabbath", albumArtist: "Black Sabbath",
+                                  album: "Greatest Hits", title: "", trackNo: 1, discNo: 0)
+        let bp = Organiser.plan([blank])
+        check("blank-title fallback name",
+              ((bp.first?.targetRel ?? "") as NSString).lastPathComponent, "01 Paranoid.m4p")
+        let yearName = OrganiseInput(rel: "Prince/B-Sides/1999 - Single Mix.mp3", ext: "mp3",
+                                     artist: "Prince", albumArtist: "Prince",
+                                     album: "B-Sides", title: "", trackNo: 7, discNo: 0)
+        let yp = Organiser.plan([yearName])
+        check("4-digit year kept in fallback",
+              ((yp.first?.targetRel ?? "") as NSString).lastPathComponent, "07 1999 - Single Mix.mp3")
+
         // ---- looksDuplicatedMess: editions-mixed folder vs healthy shapes ----
         // Legends shape: 3 editions of the same compilation flattened together.
         let legends = (1...17).flatMap { n in ["song \(n)", "song \(n)", "song \(n)"] }
