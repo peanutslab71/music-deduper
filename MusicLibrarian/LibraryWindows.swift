@@ -548,10 +548,14 @@ struct LibraryAlbumSheet: View {
         .frame(maxWidth: .infinity)
     }
 
+    /// Sentinel "disc" for the extras section (on-disk tracks the release doesn't list).
+    private var extrasDisc: Int { Int.max }
+
     /// True when the album spans more than one disc — either from the tracks' own disc
-    /// tags, or from a reconciled multi-disc release.
+    /// tags, or from a reconciled multi-disc release — or when a reconciled view has an
+    /// extras section that needs its own header to stay distinguishable.
     private var showDiscHeaders: Bool {
-        if let e = expected { return e.discCount > 1 }
+        if let e = expected { return e.discCount > 1 || discSections.count > 1 }
         return Set(tracks.map { $0.discNo }).subtracting([0]).count > 1 || tracks.contains { $0.discNo > 1 }
     }
 
@@ -568,9 +572,15 @@ struct LibraryAlbumSheet: View {
                                      uniquingKeysWith: { a, _ in a })
             var used = Set<Int>()
             var byDisc: [Int: [InspectorRow]] = [:]
+            var slotTotals: [Int: Int] = [:]   // denominator = the RELEASE's slots only
             for slot in e.tracks.sorted(by: { ($0.disc, $0.track) < ($1.disc, $1.track) }) {
+                slotTotals[slot.disc, default: 0] += 1
                 let key = TrackProposal.typoFold(slot.title).lowercased()
-                if let t = byTitle[key], !used.contains(t.id) {
+                var match = byTitle[key].flatMap { used.contains($0.id) ? nil : $0 }
+                if match == nil {   // near-miss title (one typo) — don't strand it as missing
+                    match = tracks.first { !used.contains($0.id) && TrackProposal.fuzzyTitleMatch($0.title, slot.title) }
+                }
+                if let t = match {
                     // Show the RELEASE's track number (rows are in release order); the file's
                     // own number is meaningless for a flattened multi-disc set.
                     used.insert(t.id); byDisc[slot.disc, default: []].append(.have(t, slotTrack: slot.track))
@@ -580,17 +590,20 @@ struct LibraryAlbumSheet: View {
                                                                    title: slot.title, lengthMs: slot.lengthMs))
                 }
             }
-            // On-disk tracks the matched release doesn't list (bonus/hidden/edition extras)
-            // must still appear so they can be played, renamed, tagged or deleted here —
-            // the release match only needs 60% title overlap, so up to 40% can be extras.
-            for t in tracks where !used.contains(t.id) {
-                byDisc[t.discNo == 0 ? 1 : t.discNo, default: []].append(.have(t, slotTrack: 0))
-            }
-            return byDisc.keys.sorted().map { d in
+            var sections = byDisc.keys.sorted().map { d -> (disc: Int, rows: [InspectorRow], have: Int, total: Int) in
                 let rows = byDisc[d]!
                 let have = rows.reduce(0) { if case .have = $1 { return $0 + 1 }; return $0 }
-                return (d, rows, have, rows.count)
+                return (d, rows, have, slotTotals[d] ?? rows.count)
             }
+            // On-disk tracks the matched release doesn't list (bonus/hidden/edition extras)
+            // must still appear so they can be played, renamed, tagged or deleted here —
+            // but in their OWN section, never folded into a disc's "have of total" count
+            // (the release match only needs 60% title overlap, so up to 40% can be extras).
+            let extras = tracks.filter { !used.contains($0.id) }
+            if !extras.isEmpty {
+                sections.append((extrasDisc, extras.map { .have($0, slotTrack: 0) }, extras.count, extras.count))
+            }
+            return sections
         } else {
             var byDisc: [Int: [InspectorRow]] = [:]
             for t in tracks { byDisc[t.discNo == 0 ? 1 : t.discNo, default: []].append(.have(t, slotTrack: 0)) }
@@ -602,9 +615,11 @@ struct LibraryAlbumSheet: View {
 
     private func discHeader(_ disc: Int, have: Int, total: Int) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: "opticaldisc").font(.system(size: 11)).foregroundStyle(.secondary)
-            Text("Disc \(disc)").font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary).textCase(.uppercase)
-            if expected != nil {
+            Image(systemName: disc == extrasDisc ? "plus.square.on.square" : "opticaldisc")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            Text(disc == extrasDisc ? "Not on this release" : "Disc \(disc)")
+                .font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary).textCase(.uppercase)
+            if expected != nil && disc != extrasDisc {
                 Text("\(have) of \(total)").font(.system(size: 11)).foregroundStyle(have < total ? Color.orange : Color.secondary)
             }
             Spacer()
@@ -1339,6 +1354,7 @@ struct AlbumFix: Identifiable {
         case filename = "File names"
         case missing = "Missing tracks"
         case damaged = "Possibly damaged"
+        case health = "Needs attention"
     }
     let id = UUID()
     let kind: Kind
@@ -1366,6 +1382,7 @@ struct AlbumFix: Identifiable {
         case .filename: return "character.cursor.ibeam"
         case .missing: return "circle.dotted"
         case .damaged: return "exclamationmark.triangle"
+        case .health: return "hand.raised"
         }
     }
     var changeCount: Int { tagWrites.count + moves.count + artEmbeds.count + performerAdds.count }
@@ -1708,9 +1725,9 @@ enum AlbumPerfect {
         var discCorrected = false   // 4b rewrote kept's numbers from the release
         if let match = match {
             if reconcile != nil {   // list the gaps only on a fresh reconcile (else it's noise)
-                let haveFolded = Set(kept.map { TrackProposal.typoFold($0.title).lowercased() })
+                // fuzzy (one-typo) matching, so a near-miss title isn't shown as missing
                 let missing = match.tracks
-                    .filter { !haveFolded.contains(TrackProposal.typoFold($0.title).lowercased()) }
+                    .filter { slot in !kept.contains { TrackProposal.fuzzyTitleMatch($0.title, slot.title) } }
                     .sorted { ($0.disc, $0.track) < ($1.disc, $1.track) }
                 if !missing.isEmpty {
                     let lines = missing.map { "Disc \($0.disc) · \($0.track). \($0.title)" }
@@ -1724,7 +1741,23 @@ enum AlbumPerfect {
             // disc). Update the in-memory tracks too so the file-name tidy below uses the
             // corrected numbers. Authoritative source = the release, not a guess.
             let dupKeys = Dictionary(grouping: kept, by: { $0.discNo * 1000 + $0.trackNo }).contains { $0.value.count > 1 }
-            if dupKeys {
+            // Health gate: duplicate KEYS with unique titles is a healthy flattened rip
+            // (correctable from the release, below) — but many duplicate TITLES means
+            // several editions mixed in one folder, and correcting numbers from a single
+            // release would guess. Refuse and ask for manual attention instead.
+            let messyTitles = Organiser.looksDuplicatedMess(foldedTitles: kept.map { TrackProposal.hardFold($0.title) })
+            if dupKeys && messyTitles {
+                var byFold: [String: (title: String, n: Int)] = [:]
+                for t in kept {
+                    let f = TrackProposal.hardFold(t.title)
+                    byFold[f] = (t.title, (byFold[f]?.n ?? 0) + 1)
+                }
+                let lines = byFold.values.filter { $0.n > 1 }.sorted { $0.n > $1.n }
+                    .map { "“\($0.title)” × \($0.n)" }
+                fixes.append(AlbumFix(kind: .health,
+                                      summary: "This folder looks like several editions mixed together (\(lines.count) title\(lines.count == 1 ? "" : "s") duplicated) — automatic disc/track correction is unsafe here; untangle it by hand first",
+                                      lines: lines, enabled: false, applyable: false))
+            } else if dupKeys {
                 let slotByTitle = Dictionary(match.tracks.map { (TrackProposal.typoFold($0.title).lowercased(), $0) },
                                              uniquingKeysWith: { a, _ in a })
                 var writes: [(rel: String, field: String, value: String)] = []

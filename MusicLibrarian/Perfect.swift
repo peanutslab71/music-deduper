@@ -2805,9 +2805,9 @@ final class PerfectStore: ObservableObject {
                     guard let match = await mb.bestRelease(artist: artist, album: album,
                                                            haveTitles: tracks.map { $0.title }, discCount: discCount)
                     else { continue }
-                    let have = Set(tracks.map { TrackProposal.typoFold($0.title).lowercased() })
+                    // fuzzy (one-typo) matching — parity with per-album Perfect
                     let missing = match.tracks
-                        .filter { !have.contains(TrackProposal.typoFold($0.title).lowercased()) }
+                        .filter { slot in !tracks.contains { TrackProposal.fuzzyTitleMatch($0.title, slot.title) } }
                         .sorted { ($0.disc, $0.track) < ($1.disc, $1.track) }
                     // always remember the matched tracklist so the inspector can show gaps
                     AlbumReconcileStore.save(folder, match)
@@ -2817,7 +2817,15 @@ final class PerfectStore: ObservableObject {
                     // keys (every track wrongly tagged one disc). The release is authoritative
                     // for which disc a title is on. Reversible; parity with per-album Perfect.
                     let dupKeys = Dictionary(grouping: tracks, by: { $0.discNo * 1000 + $0.trackNo }).contains { $0.value.count > 1 }
-                    if dupKeys {
+                    // Health gate — parity with per-album Perfect: duplicate KEYS with
+                    // unique titles is a correctable flattened rip, but many duplicate
+                    // TITLES means several editions mixed together; correcting from one
+                    // release would guess, so refuse and flag for manual attention.
+                    let messyTitles = Organiser.looksDuplicatedMess(foldedTitles: tracks.map { TrackProposal.hardFold($0.title) })
+                    if dupKeys && messyTitles {
+                        log += "\nNEEDS ATTENTION “\(album)”: several editions look mixed together (duplicate titles) — disc/track correction skipped; untangle the folder by hand.\n"
+                    }
+                    if dupKeys && !messyTitles {
                         let slotByTitle = Dictionary(match.tracks.map { (TrackProposal.typoFold($0.title).lowercased(), $0) },
                                                      uniquingKeysWith: { a, _ in a })
                         let multiDisc = match.discCount > 1

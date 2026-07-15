@@ -149,6 +149,25 @@ struct TrackProposal: Identifiable, Codable {
         return String(scalars).components(separatedBy: " ").filter { !$0.isEmpty }.joined(separator: " ")
     }
 
+    /// Do two titles name the same track, tolerating ONE typo? Exact hardFold equality
+    /// first, then (for titles long enough that one edit can't flip identity — "Future
+    /// Shock"/"Futureshock" match, "Part 1"/"Part 2" must not) Levenshtein ≤ 1 on the
+    /// folded strings. Used wherever a release slot is matched to an on-disk track, so
+    /// a near-miss title isn't stranded as both "missing" and an extra.
+    /// NOTE: hardFold's semantics are load-bearing for classifyChange — extend matching
+    /// here, never by loosening the fold.
+    static func fuzzyTitleMatch(_ a: String, _ b: String) -> Bool {
+        let fa = hardFold(a), fb = hardFold(b)
+        if fa == fb { return true }
+        guard fa.count >= 5, fb.count >= 5 else { return false }
+        // A purely numeric difference is a DIFFERENT track ("Part 1" vs "Part 2",
+        // "Vol. 3" vs "Vol. 4"), never a typo — refuse to fuzz across digits.
+        if fa.filter({ !$0.isNumber }) == fb.filter({ !$0.isNumber }), fa.contains(where: \.isNumber) || fb.contains(where: \.isNumber) {
+            return false
+        }
+        return Organiser.editDistanceAtMost1(fa, fb)
+    }
+
     /// Split a stuffed artist tag into a PRIMARY artist plus guest/session performers,
     /// the Roon-correct shape (one artist per track; everyone else is a credit). Returns
     /// nil when it's a single act or a real band/duo we must not break.

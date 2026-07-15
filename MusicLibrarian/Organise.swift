@@ -330,6 +330,42 @@ enum Organiser {
                 .trimmingCharacters(in: .whitespaces)
     }
 
+    /// True when two already-folded strings are within ONE edit (insert/delete/
+    /// substitute) of each other — the typo tolerance for title matching. Pure and
+    /// Foundation-only so the fold policy stays at the call site and this is testable
+    /// via Tests/run.sh.
+    static func editDistanceAtMost1(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        let x = Array(a), y = Array(b)
+        if abs(x.count - y.count) > 1 { return false }
+        var i = 0, j = 0, edits = 0
+        while i < x.count && j < y.count {
+            if x[i] == y[j] { i += 1; j += 1; continue }
+            edits += 1
+            if edits > 1 { return false }
+            if x.count == y.count { i += 1; j += 1 }   // substitution
+            else if x.count > y.count { i += 1 }       // deletion from a
+            else { j += 1 }                            // insertion into a
+        }
+        return edits + (x.count - i) + (y.count - j) <= 1
+    }
+
+    /// True when a folder's (already-folded) titles look like several editions mixed
+    /// together — MANY tracks sharing a title, the shape of a duplicated multi-edition
+    /// mess. A healthy flattened multi-disc rip has duplicate (disc,track) KEYS but
+    /// unique titles, and must NOT trip this; a couple of reprises/interludes is also
+    /// fine (thresholds: ≥6 tracks AND ≥40% of the folder involved in duplication).
+    /// Callers use it to refuse automatic disc/track correction and ask for manual
+    /// attention.
+    static func looksDuplicatedMess(foldedTitles: [String]) -> Bool {
+        let titles = foldedTitles.filter { !$0.isEmpty }
+        guard titles.count >= 8 else { return false }
+        var counts: [String: Int] = [:]
+        for t in titles { counts[t, default: 0] += 1 }
+        let dup = counts.values.filter { $0 > 1 }.reduce(0, +)   // tracks sharing a title
+        return dup >= 6 && Double(dup) >= 0.4 * Double(titles.count)
+    }
+
     /// Detected album-merge groups: one canonical album whose files carry ≥2 genuinely
     /// different raw names (an edition suffix or a stray copy), under one artist folder.
     /// These are surfaced in Organise for the user to confirm before folding together.
