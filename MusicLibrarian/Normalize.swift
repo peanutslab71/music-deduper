@@ -101,6 +101,9 @@ enum Normalizer {
             }
             let agree = dominant.map { Double($0.value) / Double(ts.count) } ?? 0
             let isVA = dominant.map { Organiser.artistKey($0.key) == "variousartists" } ?? false
+            // Already grouped under Various Artists → nothing left to confirm; a
+            // candidate row here would be a no-op toggle. (Ungrouping = undo the run.)
+            if isVA && agree >= 0.6 { continue }
             guard dominant == nil || isVA || agree < 0.6 else { continue }
             let names = ts.map { Organiser.albumOrEmpty($0.album) }.filter { !$0.isEmpty }
             let display = Dictionary(grouping: names, by: { $0 })
@@ -156,7 +159,18 @@ enum Normalizer {
             if comps.count >= 3 { add(comps[0]) }   // Artist/Album/file layout only
         }
         var canonicalByKey: [String: String] = [:]
-        for (key, spellings) in groups where spellings.count > 1 {
+        for (key, rawSpellings) in groups where rawSpellings.count > 1 {
+            // Fold filesystem RENDERINGS into their tag spelling: the folder for
+            // "AC/DC" can only ever be called "AC-DC" (safe()), so that pair is not
+            // a variance to unify — without this the row re-appears forever.
+            var spellings = rawSpellings
+            for (name, n) in rawSpellings {
+                if let original = rawSpellings.keys.first(where: { $0 != name && Organiser.safe($0) == name }) {
+                    spellings[original, default: 0] += n
+                    spellings.removeValue(forKey: name)
+                }
+            }
+            guard spellings.count > 1 else { continue }
             let ranked = spellings.sorted { $0.value != $1.value ? $0.value > $1.value
                                                                  : $0.key.lowercased() < $1.key.lowercased() }
             let canonical = canonicalArtistOverrides[key] ?? ranked[0].key

@@ -117,6 +117,21 @@ enum OrganiseLogicTests {
                     ct(3, ar: "Billie Holiday", al: "Merry Xmas!"), ct(4, ar: "Dusty Springfield", al: "Merry Xmas!")]
         checkI("real compilation still flagged", Normalizer.compilationCandidates(xmas).count, 1)
 
+        // a folder named with the SAFE rendering of the tag ("AC-DC" for "AC/DC")
+        // is not a spelling variance — nothing to unify
+        let acdc = Normalizer.Input(tracks: (1...4).map { n in
+            OrganiseInput(rel: "AC-DC/High Voltage/0\(n) T\(n).mp3", ext: "mp3",
+                          artist: "AC/DC", albumArtist: "AC/DC", album: "High Voltage",
+                          title: "T\(n)", trackNo: n, discNo: 0)
+        })
+        checkI("safe-rendered folder not a variant", Normalizer.plan(acdc).unifications.count, 0)
+        // an album already grouped under Various Artists offers nothing to confirm
+        let grouped = xmas.map { t -> OrganiseInput in
+            var c = t; c.albumArtist = "Various Artists"
+            return c
+        }
+        checkI("already-VA album not re-offered", Normalizer.compilationCandidates(grouped).count, 0)
+
         // ---- planOne blank-title fallback: filename minus extension + number ----
         let blank = OrganiseInput(rel: "Black Sabbath/Greatest Hits/01 Paranoid.m4p", ext: "m4p",
                                   artist: "Black Sabbath", albumArtist: "Black Sabbath",
