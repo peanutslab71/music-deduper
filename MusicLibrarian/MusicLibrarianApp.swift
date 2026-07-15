@@ -47,6 +47,10 @@ struct MusicLibrarianApp: App {
                 Divider()
                 Button("Show/Hide Player Bar") { PlayerBarController.shared.toggleManual() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
+                Divider()
+                // Perfect v2, Phase 1 — headless normalize preview. Writes a dry-run
+                // report of what the cross-folder normalizer WOULD do; applies nothing.
+                Button("Normalize Preview (Dry Run)…") { NormalizeDryRun.run() }
             }
             CommandGroup(replacing: .help) {
                 Button("Music Librarian Help") {
@@ -186,6 +190,82 @@ struct AboutView: View {
     private func aboutLink(_ label: String, _ url: String, icon: String) -> some View {
         Link(destination: URL(string: url)!) {
             SwiftUI.Label(label, systemImage: icon)
+        }
+    }
+}
+
+/// Perfect v2, Phase 1 — the hidden Normalize preview. Choose a library, plan the
+/// cross-folder normalize headlessly (Normalizer.plan), and open a dry-run report
+/// of every proposed change. NOTHING is applied; the real confirm-and-apply
+/// surface arrives with the v2 driver.
+enum NormalizeDryRun {
+    @MainActor static func run() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.prompt = "Preview Normalize"
+        panel.message = "Choose a music library — a dry-run report is written; nothing is changed."
+        guard panel.runModal() == .OK, let root = panel.url else { return }
+        Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            let tracks = PerfectStore.organiseInputsFromDisk(root: root, fm: fm)
+
+            // junk files + folders with no audio anywhere inside (quarantine excluded)
+            let audioExts: Set<String> = ["mp3", "m4a", "m4p", "m4b", "aac", "flac", "ogg",
+                                          "opus", "wav", "aiff", "aif", "wma", "ape", "wv"]
+            var junk: [String] = [], allDirs: [String] = []
+            var audioDirs = Set<String>()
+            let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+            if let en = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey]) {
+                for case let u as URL in en {
+                    guard u.path.hasPrefix(rootPrefix) else { continue }
+                    let rel = String(u.path.dropFirst(rootPrefix.count))
+                    guard !rel.isEmpty, !rel.hasPrefix("Music Librarian Quarantine") else { continue }
+                    if (try? u.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                        allDirs.append(rel)
+                    } else if Normalizer.isJunkFileName(u.lastPathComponent) {
+                        junk.append(rel)
+                    } else if audioExts.contains(u.pathExtension.lowercased()) {
+                        var d = (rel as NSString).deletingLastPathComponent
+                        while !d.isEmpty { audioDirs.insert(d); d = (d as NSString).deletingLastPathComponent }
+                    }
+                }
+            }
+            let empties = allDirs.filter { !audioDirs.contains($0) }
+
+            let plan = Normalizer.plan(.init(tracks: tracks, junkRels: junk, emptyDirRels: empties))
+
+            var report = "Music Librarian — Normalize DRY RUN \(Date())\nLibrary: \(root.path)\n"
+            report += "NOTHING has been changed. On apply, unchanged tag values are skipped.\n\n"
+            if !plan.unifications.isEmpty {
+                report += "ARTIST SPELLINGS TO UNIFY (\(plan.unifications.count)):\n"
+                for u in plan.unifications {
+                    report += "  → \(u.canonical)   ["
+                        + u.variants.map { "\($0.name) ×\($0.count)" }.joined(separator: ", ") + "]\n"
+                }
+                report += "\n"
+            }
+            if !plan.mergeGroups.isEmpty {
+                report += "EDITION / DISC-SPLIT MERGES (\(plan.mergeGroups.count)):\n"
+                for g in plan.mergeGroups {
+                    report += "  → \(g.display)   [" + g.rawNames.joined(separator: " | ") + "]\n"
+                }
+                report += "\n"
+            }
+            let quarantines = plan.moves.filter { $0.to.isEmpty }
+            let realMoves = plan.moves.filter { !$0.to.isEmpty }
+            report += "JUNK / EMPTY FOLDERS → QUARANTINE (\(quarantines.count)):\n"
+            for q in quarantines { report += "  ✕ \(q.from)\n" }
+            report += "\nMOVES (\(realMoves.count)):\n"
+            for m in realMoves { report += "  \(m.from)\n    → \(m.to)\n" }
+            report += "\nTAG WRITES (\(plan.tagWrites.count); unchanged values are no-ops on apply):\n"
+            for w in plan.tagWrites.prefix(1000) { report += "  \(w.rel): \(w.field) = \(w.value)\n" }
+            if plan.tagWrites.count > 1000 { report += "  … and \(plan.tagWrites.count - 1000) more\n" }
+
+            let out = fm.temporaryDirectory
+                .appendingPathComponent("normalize-dryrun-\(Int(Date().timeIntervalSince1970)).txt")
+            try? report.write(to: out, atomically: true, encoding: .utf8)
+            await MainActor.run { NSWorkspace.shared.open(out) }
         }
     }
 }

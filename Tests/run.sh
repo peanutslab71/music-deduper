@@ -6,5 +6,5 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 out="$(mktemp -d)/ml-logic-tests"
-swiftc "$here/../MusicLibrarian/Organise.swift" "$here/OrganiseLogicTests.swift" -o "$out"
+swiftc "$here/../MusicLibrarian/Organise.swift" "$here/../MusicLibrarian/Normalize.swift" "$here/OrganiseLogicTests.swift" -o "$out"
 "$out"

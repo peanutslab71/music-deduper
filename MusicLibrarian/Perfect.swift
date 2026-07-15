@@ -1321,13 +1321,7 @@ final class PerfectStore: ObservableObject {
 
     /// Normalise an artist folder name to a collision key: drops a leading
     /// "The"/trailing ", The", unifies & and "and", strips punctuation/spaces.
-    nonisolated static func artistKey(_ name: String) -> String {
-        var s = name.lowercased()
-        s = s.replacingOccurrences(of: " & ", with: " and ")
-        if s.hasSuffix(", the") { s = "the " + s.dropLast(5) }
-        if s.hasPrefix("the ") { s = String(s.dropFirst(4)) }
-        return s.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
-    }
+    nonisolated static func artistKey(_ name: String) -> String { Organiser.artistKey(name) }
 
     func cancel() { cancelFlag.cancelled = true; cancelRequested = true }
 

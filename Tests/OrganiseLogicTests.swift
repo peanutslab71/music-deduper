@@ -60,6 +60,49 @@ enum OrganiseLogicTests {
         check("different titles rejected", b(Organiser.editDistanceAtMost1("paranoid", "iron man")), "false")
         check("length gap >1 rejected",    b(Organiser.editDistanceAtMost1("intro", "intromission")), "false")
 
+        // ---- Normalizer (Phase 1): artist unification, junk, merges, idempotency ----
+        func mk(_ rel: String, ar: String, aa: String = "", al: String, ti: String, tr: Int) -> OrganiseInput {
+            OrganiseInput(rel: rel, ext: (rel as NSString).pathExtension.lowercased(),
+                          artist: ar, albumArtist: aa, album: al, title: ti, trackNo: tr, discNo: 0)
+        }
+        let lib = Normalizer.Input(
+            tracks: [
+                mk("The Buzzcocks/Singles/01 Boredom.mp3",  ar: "The Buzzcocks", al: "Singles", ti: "Boredom", tr: 1),
+                mk("The Buzzcocks/Singles/02 Fiction.mp3",  ar: "The Buzzcocks", al: "Singles", ti: "Fiction", tr: 2),
+                mk("Buzzcocks/Another Bite/01 Promises.mp3", ar: "Buzzcocks",    al: "Another Bite", ti: "Promises", tr: 1),
+            ],
+            junkRels: ["The Buzzcocks/Singles/.DS_Store"],
+            emptyDirRels: ["Old Empty Folder"])
+        let nplan = Normalizer.plan(lib)
+        checkI("one artist to unify", nplan.unifications.count, 1)
+        check ("canonical = most-backed spelling", nplan.unifications.first?.canonical ?? "", "The Buzzcocks")
+        check ("split spelling retagged",
+               b(nplan.tagWrites.contains { $0.rel == "Buzzcocks/Another Bite/01 Promises.mp3"
+                                            && $0.field == "artist" && $0.value == "The Buzzcocks" }), "true")
+        check ("junk quarantined",
+               b(nplan.moves.contains { $0.from == "The Buzzcocks/Singles/.DS_Store" && $0.to.isEmpty }), "true")
+        check ("empty folder quarantined",
+               b(nplan.moves.contains { $0.from == "Old Empty Folder" && $0.to.isEmpty }), "true")
+        check ("split folder folds into canonical",
+               b(nplan.moves.contains { $0.from == "Buzzcocks/Another Bite/01 Promises.mp3"
+                                        && $0.to.hasPrefix("The Buzzcocks/") }), "true")
+        // idempotency: applying the plan and planning again proposes nothing
+        let after = Normalizer.simulate(lib, applying: nplan)
+        checkI("no track dropped", after.tracks.count, 3)
+        let nplan2 = Normalizer.plan(after)
+        checkI("second pass: no moves", nplan2.moves.count, 0)
+        checkI("second pass: no tag writes", nplan2.tagWrites.count, 0)
+
+        // edition split is detected as a merge group, and a decline is honored
+        let editions = Normalizer.Input(tracks: [
+            mk("Curtis/Best Of/01 Move On Up.mp3",          ar: "Curtis", al: "Best Of", ti: "Move On Up", tr: 1),
+            mk("Curtis/Best Of [Castle]/02 Superfly.mp3",   ar: "Curtis", al: "Best Of [Castle]", ti: "Superfly", tr: 2),
+        ])
+        let eplan = Normalizer.plan(editions)
+        checkI("edition merge detected", eplan.mergeGroups.count, 1)
+        let declined = Normalizer.plan(editions, declinedMerges: Set(eplan.mergeGroups.map { $0.key }))
+        checkI("declined merge honored", declined.mergeGroups.count, 0)
+
         // ---- looksDuplicatedMess: editions-mixed folder vs healthy shapes ----
         // Legends shape: 3 editions of the same compilation flattened together.
         let legends = (1...17).flatMap { n in ["song \(n)", "song \(n)", "song \(n)"] }

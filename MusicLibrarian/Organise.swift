@@ -330,6 +330,18 @@ enum Organiser {
                 .trimmingCharacters(in: .whitespaces)
     }
 
+    /// Fold an artist name to its grouping key: lowercased, "&"→"and", leading or
+    /// trailing "The" dropped, non-alphanumerics stripped — so "The Buzzcocks",
+    /// "Buzzcocks" and "Buzzcocks, The" group together. (Moved from PerfectStore so
+    /// the Foundation-only normalizer and tests can use it; PerfectStore delegates.)
+    static func artistKey(_ name: String) -> String {
+        var s = name.lowercased()
+        s = s.replacingOccurrences(of: " & ", with: " and ")
+        if s.hasSuffix(", the") { s = "the " + s.dropLast(5) }
+        if s.hasPrefix("the ") { s = String(s.dropFirst(4)) }
+        return s.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
+    }
+
     /// True when two already-folded strings are within ONE edit (insert/delete/
     /// substitute) of each other — the typo tolerance for title matching. Pure and
     /// Foundation-only so the fold policy stays at the call site and this is testable
