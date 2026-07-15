@@ -203,6 +203,12 @@ here too** *(was lost with the step-1 findings panel)* as an info-only section.
 - **Every album-scoped row anywhere leads with the artist** ("Al Green — Love
   & Happiness…"), in the roll-up, the Normalize window, and any future list.
   Album names alone are ambiguous; this was reported three separate times.
+- **Decide in batch, apply in batch.** Verdicts are instant, offline ticks
+  across the whole queue; nothing applies until one "Apply all decisions"
+  runs the batch (per album: write accepted names → re-analyze → apply
+  dependent fixes, one undoable run each, "Album N of M" progress). Never
+  block the user on a network re-analyze between judgments; partial passes
+  are fine — undecided albums stay queued.
 - **A "Duplicates to decide by ear" section joins the roll-up**: same-slot
   twins whose durations differ (auto-dedup rightly refuses) and
   different-track move collisions (the Elvis 2-22 case) become first-class
