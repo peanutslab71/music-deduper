@@ -143,6 +143,14 @@ enum OrganiseLogicTests {
         }
         checkI("already-VA album not re-offered", Normalizer.compilationCandidates(grouped).count, 0)
 
+        // ---- titleFromFilename: number stripped, compounding healed, titles kept ----
+        check("number stripped",           Organiser.titleFromFilename("01 Paranoid.m4p"), "Paranoid")
+        check("compounded prefixes heal",  Organiser.titleFromFilename("12 12 12 Sabbath Bloody Sabbath.m4p"), "Sabbath Bloody Sabbath")
+        check("real numeric title kept",   Organiser.titleFromFilename("05 99 Problems.mp3"), "99 Problems")
+        check("4-digit year untouched",    Organiser.titleFromFilename("1999 - Single Mix.mp3"), "1999 - Single Mix")
+        check("disc-track prefix stripped", Organiser.titleFromFilename("1-05 Song.mp3"), "Song")
+        check("all-number name survives",  Organiser.titleFromFilename("01.mp3"), "01")
+
         // ---- planOne blank-title fallback: filename minus extension + number ----
         let blank = OrganiseInput(rel: "Black Sabbath/Greatest Hits/01 Paranoid.m4p", ext: "m4p",
                                   artist: "Black Sabbath", albumArtist: "Black Sabbath",

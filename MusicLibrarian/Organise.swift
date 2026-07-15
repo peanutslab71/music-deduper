@@ -255,16 +255,9 @@ enum Organiser {
         } else {
             prefix = ""
         }
-        // A blank title falls back to the file NAME — minus its extension and any
-        // leading 1–3 digit track number, so "01 Paranoid.m4p" becomes "Paranoid"
-        // (not "01 01 Paranoid.m4p.m4p"). A 4-digit year ("1999 - Song") is kept.
-        let fallbackTitle: String = {
-            let base = ((t.rel as NSString).lastPathComponent as NSString).deletingPathExtension
-            let stripped = base.replacingOccurrences(of: #"^\s*\d{1,3}[.\-_ ]+"#, with: "",
-                                                     options: .regularExpression)
-            return stripped.isEmpty ? base : stripped
-        }()
-        let titleSafe = safe(t.title.isEmpty ? fallbackTitle : t.title)
+        // A blank title falls back to the cleaned file NAME (titleFromFilename), so
+        // "01 Paranoid.m4p" becomes "Paranoid" — never "01 01 Paranoid.m4p.m4p".
+        let titleSafe = safe(t.title.isEmpty ? titleFromFilename(t.rel) : t.title)
         let filename = prefix.isEmpty ? "\(titleSafe).\(t.ext)" : "\(prefix) \(titleSafe).\(t.ext)"
 
         return OrganisePlan(rel: t.rel, targetRel: folder + "/" + filename, flag: nil, tagWrites: writes)
@@ -344,6 +337,26 @@ enum Organiser {
         k = k.replacingOccurrences(of: #"\b(the|a|an)\b"#, with: " ", options: .regularExpression)
         return k.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
                 .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// A working title derived from a FILE NAME (used when the title tag is blank):
+    /// extension gone, leading track-number group stripped — including a disc-track
+    /// shape ("1-05 ") — and REPEATS of that same group stripped too, so a name
+    /// damaged by prefix-compounding ("12 12 12 Sabbath….m4p") self-heals. Only
+    /// exact repeats are consumed: "05 99 Problems" keeps its real title
+    /// "99 Problems", and a 4-digit year ("1999 - Song") is never touched.
+    static func titleFromFilename(_ name: String) -> String {
+        let base = ((name as NSString).lastPathComponent as NSString).deletingPathExtension
+        var s = base
+        var firstGroup: String? = nil
+        while let r = s.range(of: #"^\s*\d{1,3}(-\d{1,3})?[.\-_ ]+"#, options: .regularExpression) {
+            let group = String(s[r]).trimmingCharacters(in: .whitespaces)
+            if let f = firstGroup, f != group { break }   // the number, plus exact repeats of it
+            firstGroup = group
+            s = String(s[r.upperBound...])
+            if s.isEmpty { break }
+        }
+        return s.isEmpty ? base : s
     }
 
     /// Fold an artist name to its grouping key: lowercased, "&"→"and", leading or

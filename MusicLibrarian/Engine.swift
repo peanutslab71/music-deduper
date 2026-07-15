@@ -211,7 +211,12 @@ func readMetadata(url: URL, size: Int64) async -> Track {
     if albumArtist.isEmpty, let s = PerfectStore.readField(url, "albumartist"), !s.isEmpty { albumArtist = s }
 
     if title.isEmpty {
-        title = url.deletingPathExtension().lastPathComponent
+        // Cleaned stem, NOT the raw filename: the raw name keeps its track-number
+        // prefix, and every consumer that composes "NN Title" (the per-album
+        // filename tidy, Organise) would then compound prefixes run after run
+        // ("01 Paranoid" → "01 01 Paranoid" → …). titleFromFilename also heals
+        // names already damaged that way.
+        title = Organiser.titleFromFilename(url.lastPathComponent)
     }
     return Track(id: 0, url: url, name: url.lastPathComponent, relDir: "",
                  size: size, ext: ext, title: title, artist: artist, album: album,
