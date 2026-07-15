@@ -1002,6 +1002,187 @@ struct RunsView: View {
     }()
 }
 
+// MARK: - Normalize (Perfect v2, Phase 1) — confirm & apply the cross-folder normalizer
+
+/// The Phase-1 confirm surface: scan a library, show what the normalizer proposes
+/// (artist spellings, edition merges, compilation groupings, junk/empties, moves),
+/// let the user adjust, and apply everything as ONE reversible, session-stamped run.
+struct NormalizeView: View {
+    @EnvironmentObject private var perfect: PerfectStore
+    @State private var root: URL? = UserDefaults.standard.string(forKey: "libraryBrowserRoot")
+        .map { URL(fileURLWithPath: $0) }
+    @State private var input: Normalizer.Input?
+    @State private var compCandidates: [Normalizer.CompilationCandidate] = []
+    @State private var choices = Normalizer.Choices()
+    @State private var plan: Normalizer.Plan?
+    @State private var scanning = false
+    @State private var appliedSummary: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            if scanning {
+                ProgressView("Reading the library…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let plan {
+                content(plan)
+            } else {
+                Text("Choose a library and it will be scanned — nothing is changed until you apply.")
+                    .foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(minWidth: 700, minHeight: 460)
+        .onAppear { if input == nil { rescan() } }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "wand.and.rays").foregroundStyle(.teal)
+            Text("Normalize").font(.headline)
+            if let root { Text(root.lastPathComponent).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+            Spacer()
+            if let s = appliedSummary {
+                Label(s, systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green)
+            }
+            Button("Choose Library…") { choose() }
+            Button { rescan() } label: { Image(systemName: "arrow.clockwise") }
+                .disabled(root == nil || scanning)
+        }
+        .padding(10)
+    }
+
+    @ViewBuilder private func content(_ plan: Normalizer.Plan) -> some View {
+        List {
+            if !plan.unifications.isEmpty {
+                Section("Artist spellings to unify — pick the name to keep") {
+                    ForEach(plan.unifications) { u in
+                        HStack {
+                            Menu(u.canonical) {
+                                ForEach(u.variants, id: \.name) { v in
+                                    Button("\(v.name)  (\(v.count) file\(v.count == 1 ? "" : "s"))") {
+                                        choices.artistOverrides[u.key] = v.name; recompute()
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: 260, alignment: .leading)
+                            Text(u.variants.map { "\($0.name) ×\($0.count)" }.joined(separator: " · "))
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            Spacer()
+                        }
+                    }
+                }
+            }
+            if !allMergeGroups.isEmpty {
+                Section("Same album, split folders — merge into one") {
+                    ForEach(allMergeGroups, id: \.key) { g in
+                        Toggle(isOn: mergeBinding(g.key)) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(g.display)
+                                Text(g.rawNames.joined(separator: "  |  ")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                        }
+                    }
+                }
+            }
+            if !compCandidates.isEmpty {
+                Section("Looks like compilations — group under Various Artists") {
+                    ForEach(compCandidates) { c in
+                        Toggle(isOn: compBinding(c.key)) {
+                            Text("\(c.display) — \(c.artists) artists, \(c.tracks) tracks")
+                        }
+                    }
+                }
+            }
+            Section("This run") {
+                let quarantined = plan.moves.filter { $0.to.isEmpty }.count
+                let moved = plan.moves.count - quarantined
+                Text("\(plan.tagWrites.count) tag write(s) · \(moved) move(s) · \(quarantined) junk/empty item(s) → quarantine")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Applied as one run — undo it from Runs at any time. Unchanged tag values are skipped.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            HStack {
+                Spacer()
+                Button("Apply normalize") { apply() }
+                    .buttonStyle(.borderedProminent).tint(.teal)
+                    .disabled(plan.isEmpty || perfect.busy)
+            }
+            .padding(10).background(.bar)
+        }
+    }
+
+    /// Every detected merge group (including declined ones, so they stay visible
+    /// to re-enable) — the plan only contains the accepted ones.
+    private var allMergeGroups: [Organiser.MergeGroup] {
+        guard let input else { return [] }
+        return Organiser.albumMergeCandidates(input.tracks)
+    }
+
+    private func mergeBinding(_ key: String) -> Binding<Bool> {
+        Binding(get: { !choices.declinedMerges.contains(key) },
+                set: { on in
+                    choices.declinedMerges.removeAll { $0 == key }
+                    if !on { choices.declinedMerges.append(key) }
+                    recompute()
+                })
+    }
+
+    private func compBinding(_ key: String) -> Binding<Bool> {
+        Binding(get: { !choices.declinedCompilations.contains(key) },
+                set: { on in
+                    choices.declinedCompilations.removeAll { $0 == key }
+                    if !on { choices.declinedCompilations.append(key) }
+                    recompute()
+                })
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false; panel.canChooseDirectories = true
+        panel.prompt = "Scan"
+        guard panel.runModal() == .OK, let u = panel.url else { return }
+        root = u; rescan()
+    }
+
+    private func rescan() {
+        guard let root else { return }
+        scanning = true; appliedSummary = nil
+        Task.detached(priority: .userInitiated) {
+            let scanned = PerfectStore.scanForNormalize(root: root)
+            let comps = Normalizer.compilationCandidates(scanned.tracks)
+            let saved = Normalizer.ChoicesStore.load(root.path)
+            await MainActor.run {
+                input = scanned; compCandidates = comps; choices = saved
+                recompute(); scanning = false
+            }
+        }
+    }
+
+    private func recompute() {
+        guard let input, let root else { return }
+        Normalizer.ChoicesStore.save(root.path, choices)
+        let confirmedFolds = compCandidates
+            .filter { !choices.declinedCompilations.contains($0.key) }
+            .reduce(into: Set<String>()) { $0.formUnion($1.foldKeys) }
+        plan = Normalizer.plan(input,
+                               canonicalArtistOverrides: choices.artistOverrides,
+                               declinedMerges: Set(choices.declinedMerges),
+                               confirmedCompilations: confirmedFolds)
+    }
+
+    private func apply() {
+        guard let plan, let root else { return }
+        perfect.applyLibraryRun(root: root, summary: "Normalized library — Phase 1",
+                                tagWrites: plan.tagWrites, moves: plan.moves,
+                                sessionID: UUID().uuidString) {
+            appliedSummary = "Applied — undo from Runs"
+            rescan()   // idempotency made visible: the fresh plan should be empty
+        }
+    }
+}
+
 // MARK: - Logs (structured, per run — a spreadsheet of every change)
 
 private struct LogRow: Identifiable {

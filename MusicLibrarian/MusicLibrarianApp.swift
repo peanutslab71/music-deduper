@@ -48,8 +48,9 @@ struct MusicLibrarianApp: App {
                 Button("Show/Hide Player Bar") { PlayerBarController.shared.toggleManual() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                 Divider()
-                // Perfect v2, Phase 1 — headless normalize preview. Writes a dry-run
-                // report of what the cross-folder normalizer WOULD do; applies nothing.
+                // Perfect v2, Phase 1 — the cross-folder normalizer.
+                LibraryMenuButton("Normalize", "normalize", "n")
+                // Headless preview: writes a dry-run report; applies nothing.
                 Button("Normalize Preview (Dry Run)…") { NormalizeDryRun.run() }
             }
             CommandGroup(replacing: .help) {
@@ -75,6 +76,9 @@ struct MusicLibrarianApp: App {
         }
         Window("Logs", id: "logs") {
             LogsView().environmentObject(perfect)
+        }
+        Window("Normalize", id: "normalize") {
+            NormalizeView().environmentObject(perfect)
         }
     }
 }
@@ -208,32 +212,8 @@ enum NormalizeDryRun {
         guard panel.runModal() == .OK, let root = panel.url else { return }
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
-            let tracks = PerfectStore.organiseInputsFromDisk(root: root, fm: fm)
-
-            // junk files + folders with no audio anywhere inside (quarantine excluded)
-            let audioExts: Set<String> = ["mp3", "m4a", "m4p", "m4b", "aac", "flac", "ogg",
-                                          "opus", "wav", "aiff", "aif", "wma", "ape", "wv"]
-            var junk: [String] = [], allDirs: [String] = []
-            var audioDirs = Set<String>()
-            let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
-            if let en = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey]) {
-                for case let u as URL in en {
-                    guard u.path.hasPrefix(rootPrefix) else { continue }
-                    let rel = String(u.path.dropFirst(rootPrefix.count))
-                    guard !rel.isEmpty, !rel.hasPrefix("Music Librarian Quarantine") else { continue }
-                    if (try? u.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
-                        allDirs.append(rel)
-                    } else if Normalizer.isJunkFileName(u.lastPathComponent) {
-                        junk.append(rel)
-                    } else if audioExts.contains(u.pathExtension.lowercased()) {
-                        var d = (rel as NSString).deletingLastPathComponent
-                        while !d.isEmpty { audioDirs.insert(d); d = (d as NSString).deletingLastPathComponent }
-                    }
-                }
-            }
-            let empties = allDirs.filter { !audioDirs.contains($0) }
-
-            let plan = Normalizer.plan(.init(tracks: tracks, junkRels: junk, emptyDirRels: empties))
+            let scanned = PerfectStore.scanForNormalize(root: root)
+            let plan = Normalizer.plan(scanned)
 
             var report = "Music Librarian — Normalize DRY RUN \(Date())\nLibrary: \(root.path)\n"
             report += "NOTHING has been changed. On apply, unchanged tag values are skipped.\n\n"

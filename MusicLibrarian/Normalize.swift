@@ -42,6 +42,52 @@ enum Normalizer {
         var isEmpty: Bool { tagWrites.isEmpty && moves.isEmpty }
     }
 
+    /// A many-artists album that LOOKS like a compilation (same shape as the batch
+    /// heuristic): ≥2 distinct primary artists and no dominant non-VA album-artist.
+    /// Surfaced for confirmation — never flagged silently; a confirmed candidate's
+    /// foldKeys feed Organiser.plan's `compilations` so its tracks group under
+    /// Various Artists across folders.
+    struct CompilationCandidate: Identifiable {
+        let key: String            // canonicalAlbumKey (stable across editions)
+        let display: String        // most common raw album name
+        let foldKeys: Set<String>  // fold(stripDiscSuffix(...)) variants Organiser.plan matches on
+        let artists: Int
+        let tracks: Int
+        var id: String { key }
+    }
+
+    static func compilationCandidates(_ tracks: [OrganiseInput]) -> [CompilationCandidate] {
+        var byAlbum: [String: [OrganiseInput]] = [:]
+        for t in tracks where !Organiser.albumOrEmpty(t.album).isEmpty {
+            byAlbum[Organiser.canonicalAlbumKey(t.album), default: []].append(t)
+        }
+        var out: [CompilationCandidate] = []
+        for (key, ts) in byAlbum {
+            guard ts.count >= 3 else { continue }
+            if ts.contains(where: { $0.isCompilation }) { continue }   // already flagged → groups anyway
+            let primaries = Set(ts.map {
+                Organiser.artistKey(Organiser.primaryArtist($0.artist.isEmpty ? $0.albumArtist : $0.artist))
+            }.filter { !$0.isEmpty })
+            guard primaries.count >= 2 else { continue }
+            let aa = ts.map { $0.albumArtist }.filter { !$0.isEmpty }
+            let counts = Dictionary(grouping: aa, by: { $0 }).mapValues { $0.count }
+            let dominant = counts.max { (a: (key: String, value: Int), b: (key: String, value: Int)) -> Bool in
+                if a.value != b.value { return a.value < b.value }
+                return a.key.count > b.key.count
+            }
+            let agree = dominant.map { Double($0.value) / Double(ts.count) } ?? 0
+            let isVA = dominant.map { Organiser.artistKey($0.key) == "variousartists" } ?? false
+            guard dominant == nil || isVA || agree < 0.6 else { continue }
+            let names = ts.map { Organiser.albumOrEmpty($0.album) }.filter { !$0.isEmpty }
+            let display = Dictionary(grouping: names, by: { $0 })
+                .max { $0.value.count < $1.value.count }?.key ?? key
+            out.append(CompilationCandidate(key: key, display: display,
+                                            foldKeys: Set(names.map { Organiser.fold(Organiser.stripDiscSuffix($0).clean) }),
+                                            artists: primaries.count, tracks: ts.count))
+        }
+        return out.sorted { $0.display.lowercased() < $1.display.lowercased() }
+    }
+
     /// Name-level junk that is safe to quarantine on sight: OS metadata litter and
     /// interrupted-operation debris. Zero-byte and stray non-music files are the
     /// scanner's judgement, not this list's.
@@ -126,6 +172,37 @@ enum Normalizer {
             if let target = p.targetRel, target != p.rel { plan.moves.append((p.rel, target)) }
         }
         return plan
+    }
+
+    /// Everything the user decided on the Phase-1 confirm surface, persisted per
+    /// library so a re-run (or the v2 driver) seeds from the same choices.
+    struct Choices: Codable {
+        var artistOverrides: [String: String] = [:]   // artistKey → chosen spelling
+        var declinedMerges: [String] = []             // canonicalAlbumKey of declined edition merges
+        var declinedCompilations: [String] = []       // CompilationCandidate.key of declined groupings
+    }
+
+    enum ChoicesStore {
+        private static func hash(_ s: String) -> String {
+            var h: UInt64 = 5381; for b in s.utf8 { h = (h &* 33) &+ UInt64(b) }; return String(h, radix: 16)
+        }
+        private static func file(_ rootPath: String) -> URL? {
+            let fm = FileManager.default
+            guard let base = try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                         appropriateFor: nil, create: true) else { return nil }
+            let dir = base.appendingPathComponent("Music Librarian/normalize-choices", isDirectory: true)
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            return dir.appendingPathComponent("\(hash(rootPath)).json")
+        }
+        static func load(_ rootPath: String) -> Choices {
+            guard let u = file(rootPath), let d = try? Data(contentsOf: u),
+                  let c = try? JSONDecoder().decode(Choices.self, from: d) else { return Choices() }
+            return c
+        }
+        static func save(_ rootPath: String, _ c: Choices) {
+            guard let u = file(rootPath), let d = try? JSONEncoder().encode(c) else { return }
+            try? d.write(to: u)
+        }
     }
 
     /// Test/preview helper: apply a plan to the in-memory inputs the way

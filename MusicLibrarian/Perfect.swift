@@ -1848,6 +1848,35 @@ final class PerfectStore: ObservableObject {
     /// Build organise inputs by reading the tags ON DISK (no in-memory overlay) —
     /// used by the final Apply, which re-plans the tree AFTER the tag/dedup writes
     /// so placement reflects the final state. Nonisolated → runs in the commit task.
+    /// Everything Phase-1 Normalize needs from disk: every track's tags plus the
+    /// junk files and no-audio-anywhere folders (quarantine excluded). The planning
+    /// itself is pure (Normalizer.plan) — this is its one disk-reading feeder.
+    nonisolated static func scanForNormalize(root: URL, fm: FileManager = .default) -> Normalizer.Input {
+        let tracks = organiseInputsFromDisk(root: root, fm: fm)
+        let audioExts: Set<String> = ["mp3", "m4a", "m4p", "m4b", "aac", "flac", "ogg",
+                                      "opus", "wav", "aiff", "aif", "wma", "ape", "wv"]
+        var junk: [String] = [], allDirs: [String] = []
+        var audioDirs = Set<String>()
+        let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        if let en = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey]) {
+            for case let u as URL in en {
+                guard u.path.hasPrefix(rootPrefix) else { continue }
+                let rel = String(u.path.dropFirst(rootPrefix.count))
+                guard !rel.isEmpty, !rel.hasPrefix("Music Librarian Quarantine") else { continue }
+                if (try? u.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                    allDirs.append(rel)
+                } else if Normalizer.isJunkFileName(u.lastPathComponent) {
+                    junk.append(rel)
+                } else if audioExts.contains(u.pathExtension.lowercased()) {
+                    var d = (rel as NSString).deletingLastPathComponent
+                    while !d.isEmpty { audioDirs.insert(d); d = (d as NSString).deletingLastPathComponent }
+                }
+            }
+        }
+        let empties = allDirs.filter { !audioDirs.contains($0) }
+        return Normalizer.Input(tracks: tracks, junkRels: junk, emptyDirRels: empties)
+    }
+
     nonisolated static func organiseInputsFromDisk(root: URL, fm: FileManager) -> [OrganiseInput] {
         var inputs: [OrganiseInput] = []
         guard let en = fm.enumerator(at: root, includingPropertiesForKeys: nil) else { return inputs }
