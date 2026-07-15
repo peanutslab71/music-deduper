@@ -3530,6 +3530,22 @@ final class PerfectStore: ObservableObject {
             if rc == 0 { _ = md_set_artwork_type(url.path, Int32(oldType)); restored += 1 }
         }
 
+        // prune the now-empty folders this run CREATED (the targets of its moves) —
+        // a reverted merge/organise otherwise leaves its destination folders behind
+        // as empty shells. Only genuinely-empty (or .DS_Store-only) dirs go.
+        var createdDirs = Set<String>()
+        for op in ops where !op.to.hasPrefix("Music Librarian Quarantine") {
+            var cur = (op.to as NSString).deletingLastPathComponent
+            while !cur.isEmpty && cur != "." { createdDirs.insert(cur); cur = (cur as NSString).deletingLastPathComponent }
+        }
+        for rel in createdDirs.sorted(by: { $0.count > $1.count }) {
+            let dir = root.appendingPathComponent(rel)
+            if let contents = try? fm.contentsOfDirectory(atPath: dir.path),
+               contents.allSatisfy({ $0 == ".DS_Store" }) {
+                for junk in contents { try? fm.removeItem(at: dir.appendingPathComponent(junk)) }
+                try? fm.removeItem(at: dir)
+            }
+        }
         try? fm.removeItem(at: folder)
         let qroot = root.appendingPathComponent("Music Librarian Quarantine")
         if let empty = try? fm.contentsOfDirectory(atPath: qroot.path), empty.isEmpty {
