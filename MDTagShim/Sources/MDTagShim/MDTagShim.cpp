@@ -218,9 +218,13 @@ static int performerEdit(const char *path, const char *name, const char *role, b
         if (!f.isValid()) return -1;
         TagLib::ID3v2::Tag *tag = f.ID3v2Tag(true);
         TagLib::PropertyMap props = tag->properties();
-        TagLib::String key = TagLib::String("PERFORMER:") + rl;
+        // Key MUST be uppercase: TagLib's PropertyMap silently REJECTS keys with
+        // lowercase letters (insert no-ops, save still succeeds), so a role like
+        // "guitar" would never be written — and the has-check (which uppercases)
+        // then re-adds the same credit on every run.
+        TagLib::String key = (TagLib::String("PERFORMER:") + rl).upper();
         if (add) props.insert(key, TagLib::StringList(nm));
-        else     props.erase(key.upper());   // TagLib upper-cases keys on the way out
+        else     props.erase(key);
         tag->setProperties(props);
         return saveMpeg(f, tag) ? 0 : -2;
     }
