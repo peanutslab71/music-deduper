@@ -52,6 +52,7 @@ enum Normalizer {
         let display: String        // most common raw album name
         let foldKeys: Set<String>  // fold(stripDiscSuffix(...)) variants Organiser.plan matches on
         let artists: Int
+        let artistNames: [String]  // the distinct primary artists, most tracks first
         let tracks: Int
         var id: String { key }
     }
@@ -104,9 +105,12 @@ enum Normalizer {
             let names = ts.map { Organiser.albumOrEmpty($0.album) }.filter { !$0.isEmpty }
             let display = Dictionary(grouping: names, by: { $0 })
                 .max { $0.value.count < $1.value.count }?.key ?? key
+            let ranked = primCounts.values.sorted { $0.n != $1.n ? $0.n > $1.n
+                                                                : $0.name.lowercased() < $1.name.lowercased() }
             out.append(CompilationCandidate(key: key, display: display,
                                             foldKeys: Set(names.map { Organiser.fold(Organiser.stripDiscSuffix($0).clean) }),
-                                            artists: primCounts.count, tracks: ts.count))
+                                            artists: primCounts.count,
+                                            artistNames: ranked.map { $0.name }, tracks: ts.count))
         }
         return out.sorted { $0.display.lowercased() < $1.display.lowercased() }
     }

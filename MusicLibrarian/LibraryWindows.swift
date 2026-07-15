@@ -1077,7 +1077,7 @@ struct NormalizeView: View {
                     ForEach(allMergeGroups, id: \.key) { g in
                         Toggle(isOn: mergeBinding(g.key)) {
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(g.display)
+                                Text(g.artist.isEmpty ? g.display : "\(g.artist) — \(g.display)")
                                 Text(g.rawNames.joined(separator: "  |  ")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                             }
                         }
@@ -1088,7 +1088,12 @@ struct NormalizeView: View {
                 Section("Looks like compilations — group under Various Artists") {
                     ForEach(compCandidates) { c in
                         Toggle(isOn: compBinding(c.key)) {
-                            Text("\(c.display) — \(c.artists) artists, \(c.tracks) tracks")
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("\(c.display) — \(c.artists) artists, \(c.tracks) tracks")
+                                Text(c.artistNames.prefix(6).joined(separator: " · ")
+                                     + (c.artistNames.count > 6 ? " · …" : ""))
+                                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
                         }
                     }
                 }
