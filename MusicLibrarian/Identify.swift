@@ -168,6 +168,19 @@ struct TrackProposal: Identifiable, Codable {
         return Organiser.editDistanceAtMost1(fa, fb)
     }
 
+    /// Two names that are VARIANTS of one another: one's words are a subset of the
+    /// other's ("Sonnet 18" / "Sonnet No 18", "Intro" / "Intro (Live)") or they are
+    /// within one typo. AcoustID can return either form on different runs, so a
+    /// variant change must NEVER auto-apply — it would oscillate A→B→A forever —
+    /// it queues for a review verdict, which settles it once.
+    static func nameVariant(_ a: String, _ b: String) -> Bool {
+        let fa = hardFold(a), fb = hardFold(b)
+        guard !fa.isEmpty, !fb.isEmpty else { return false }
+        if fuzzyTitleMatch(a, b) { return true }
+        let ta = Set(fa.components(separatedBy: " ")), tb = Set(fb.components(separatedBy: " "))
+        return ta.isSubset(of: tb) || tb.isSubset(of: ta)
+    }
+
     /// Split a stuffed artist tag into a PRIMARY artist plus guest/session performers,
     /// the Roon-correct shape (one artist per track; everyone else is a credit). Returns
     /// nil when it's a single act or a real band/duo we must not break.

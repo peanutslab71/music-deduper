@@ -86,10 +86,16 @@ final class PerfectV2Driver: ObservableObject {
             // Tier gating (v2 plan): a SUBSTANTIVE identify change means every
             // downstream fix was computed from the unaccepted names — defer the
             // WHOLE album to the review roll-up rather than auto-apply half of it.
-            // Cosmetic/additive identify tidies auto-apply like any Tier-1 fix.
+            // VARIANT changes (word-subset or one-typo pairs) also defer: AcoustID
+            // can return either form on different runs, so auto-applying them
+            // oscillates A→B→A forever; a verdict settles them once.
             // Compilation flagging is Phase 1's confirm checklist, never silent.
             if let idFix = fixes.first(where: { $0.kind == .identify && $0.applyable }),
-               idFix.proposals.contains(where: { $0.dominantNameKind == .substantive }) {
+               idFix.proposals.contains(where: {
+                   $0.dominantNameKind == .substantive
+                   || TrackProposal.nameVariant($0.curTitle, $0.newTitle)
+                   || TrackProposal.nameVariant($0.curArtist, $0.newArtist)
+               }) {
                 deferred.append(DeferredAlbum(dir: album.dir, files: album.files, fix: idFix))
                 continue
             }
