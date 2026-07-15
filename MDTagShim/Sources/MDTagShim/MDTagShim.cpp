@@ -207,6 +207,15 @@ static TagLib::ByteVector sanitizePicture(const TagLib::ByteVector &in) {
 //   • mp4  — a freeform PERFORMER atom valued "name (role)" (MP4 has no native
 //            per-instrument credit; the ":role" property key is an invalid atom).
 // add=true inserts, false erases exactly what was added.
+// The PropertyMap key an MP3 credit round-trips under. TIPL involvement roles
+// come back as top-level properties; everything else is a TMCL musician credit.
+static TagLib::String mp3CreditKey(const TagLib::String &role) {
+    TagLib::String u = role.upper();
+    if (u == "ARRANGER" || u == "ENGINEER" || u == "PRODUCER" || u == "MIXER" || u == "DJMIXER")
+        return u;
+    return TagLib::String("PERFORMER:") + u;
+}
+
 static int performerEdit(const char *path, const char *name, const char *role, bool add) {
     if (path == nullptr || name == nullptr || role == nullptr) return -3;
     TagLib::String nm(name, TagLib::String::UTF8);
@@ -218,13 +227,26 @@ static int performerEdit(const char *path, const char *name, const char *role, b
         if (!f.isValid()) return -1;
         TagLib::ID3v2::Tag *tag = f.ID3v2Tag(true);
         TagLib::PropertyMap props = tag->properties();
-        // Key MUST be uppercase: TagLib's PropertyMap silently REJECTS keys with
-        // lowercase letters (insert no-ops, save still succeeds), so a role like
-        // "guitar" would never be written — and the has-check (which uppercases)
-        // then re-adds the same credit on every run.
-        TagLib::String key = (TagLib::String("PERFORMER:") + rl).upper();
-        if (add) props.insert(key, TagLib::StringList(nm));
-        else     props.erase(key);
+        // Key MUST be uppercase (TagLib rejects lowercase keys silently), and the
+        // role CLASS decides its home: production roles (producer/engineer/…) live
+        // in the involved-people list and round-trip as TOP-LEVEL properties —
+        // "PERFORMER:PRODUCER" would save into IPLS/TIPL but read back as
+        // "PRODUCER", so a has-check on the PERFORMER key re-adds it forever.
+        // Musician roles (guitar/…) are TMCL credits under "PERFORMER:<role>".
+        TagLib::String key = mp3CreditKey(rl);
+        if (add) {
+            auto it = props.find(key);
+            if (it == props.end() || !it->second.contains(nm))   // idempotent
+                props.insert(key, TagLib::StringList(nm));
+        } else {
+            auto it = props.find(key);
+            if (it != props.end()) {
+                TagLib::StringList kept;
+                for (const auto &v : it->second) if (v != nm) kept.append(v);
+                props.erase(key);
+                if (!kept.isEmpty()) props.insert(key, kept);
+            }
+        }
         tag->setProperties(props);
         return saveMpeg(f, tag) ? 0 : -2;
     }
@@ -277,9 +299,12 @@ extern "C" int md_has_performer(const char *path, const char *name, const char *
         TagLib::MPEG::File f(path);
         if (!f.isValid() || !f.ID3v2Tag()) return 0;
         TagLib::PropertyMap props = f.ID3v2Tag()->properties();
-        TagLib::String key = (TagLib::String("PERFORMER:") + rl).upper();
-        auto it = props.find(key);
-        if (it != props.end()) { for (const auto &v : it->second) if (v == nm) return 1; }
+        // check the role's canonical key AND the legacy PERFORMER form (older
+        // writes / v2.4 TMCL round-trips), so no historic credit re-adds
+        for (const TagLib::String &key : { mp3CreditKey(rl), (TagLib::String("PERFORMER:") + rl).upper() }) {
+            auto it = props.find(key);
+            if (it != props.end()) { for (const auto &v : it->second) if (v == nm) return 1; }
+        }
         return 0;
     }
     case MD_FLAC: {
