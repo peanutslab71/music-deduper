@@ -172,7 +172,12 @@ final class PerfectV2Driver: ObservableObject {
         let (fixes, _, reconcile) = await AlbumPerfect.analyze(root: root, files: d.files,
                                                                reconciledMatch: cached)
         if let r = reconcile { AlbumReconcileStore.save(d.dir.path, r) }
-        _ = await applyTierOne(fixes, root: root, session: session, name: d.dir.lastPathComponent)
+        // The user's verdict PINS the names: the re-analyze exists to compute the
+        // dependent fixes from them, never to relitigate them — a fresh identify
+        // pass can flip-flop (scoring shifts once the tag changes) and would
+        // silently overwrite the decision made seconds earlier.
+        _ = await applyTierOne(fixes.filter { $0.kind != .identify },
+                               root: root, session: session, name: d.dir.lastPathComponent)
         deferred.removeAll { $0.id == d.id }
         lines.append("Accepted names — \(d.dir.lastPathComponent)")
         ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
