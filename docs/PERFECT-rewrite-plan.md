@@ -193,6 +193,23 @@ to choose* reuses `PerfectAlbumSheet`'s `coverPanel`/`CoverThumb` +
 (reuse `missingTracksSummary`/`damagedTracksSummary`). **DRM findings surface
 here too** *(was lost with the step-1 findings panel)* as an info-only section.
 
+**Roll-up UX decisions (from verification on the test library, 2026-07-15):**
+- **Verdicts are PER TRACK, transactions per album.** Some of an album's
+  proposed names will be right and others wrong; the user ticks each track's
+  A/B individually. One "Apply decisions" per album then writes the accepted
+  subset, re-analyzes, and applies the dependent fixes — decision granularity
+  track-level, apply atomicity album-level (the identify-entanglement fix is
+  unchanged).
+- **Every album-scoped row anywhere leads with the artist** ("Al Green — Love
+  & Happiness…"), in the roll-up, the Normalize window, and any future list.
+  Album names alone are ambiguous; this was reported three separate times.
+- **A "Duplicates to decide by ear" section joins the roll-up**: same-slot
+  twins whose durations differ (auto-dedup rightly refuses) and
+  different-track move collisions (the Elvis 2-22 case) become first-class
+  review items with play-A/B buttons and keep-A / keep-B / keep-both-renumbered
+  verdicts — one surface for every listen-and-decide judgment in the session,
+  instead of orange text in Normalize and silent co-location.
+
 ### `performLibraryOps` additions (shared, small)
 - **Same-recording collision → quarantine** *(was lost — also required for
   Phase-1 idempotency)*: port `commit()` step 3's size/duration check; today's
