@@ -22,6 +22,7 @@
 		DE0000000000000000000053 /* PerfectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE0000000000000000000051 /* PerfectView.swift */; };
 		DE00000000000000000000B1 /* APIKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE00000000000000000000B0 /* APIKeys.swift */; };
 		DE00000000000000000000C1 /* Normalize.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE00000000000000000000C0 /* Normalize.swift */; };
+		DE00000000000000000000C3 /* PerfectV2.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE00000000000000000000C2 /* PerfectV2.swift */; };
 		DE0000000000000000000040 /* AMSMB2 in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000042 /* AMSMB2 */; };
 		DE0000000000000000000043 /* AMSMB2 in Embed Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000042 /* AMSMB2 */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		DE0000000000000000000070 /* MDTagShim in Frameworks */ = {isa = PBXBuildFile; productRef = DE0000000000000000000071 /* MDTagShim */; };
@@ -45,6 +46,7 @@
 		DE0000000000000000000051 /* PerfectView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfectView.swift; sourceTree = "<group>"; };
 		DE00000000000000000000B0 /* APIKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIKeys.swift; sourceTree = "<group>"; };
 		DE00000000000000000000C0 /* Normalize.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Normalize.swift; sourceTree = "<group>"; };
+		DE00000000000000000000C2 /* PerfectV2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfectV2.swift; sourceTree = "<group>"; };
 		DE0000000000000000000028 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -106,6 +108,7 @@
 				DE0000000000000000000055 /* Identify.swift */,
 				DE00000000000000000000A1 /* Organise.swift */,
 				DE00000000000000000000C0 /* Normalize.swift */,
+				DE00000000000000000000C2 /* PerfectV2.swift */,
 				DE00000000000000000000A3 /* LibraryWindows.swift */,
 				DE0000000000000000000051 /* PerfectView.swift */,
 				DE00000000000000000000B0 /* APIKeys.swift */,
@@ -205,6 +208,7 @@
 				DE0000000000000000000054 /* Identify.swift in Sources */,
 				DE00000000000000000000A0 /* Organise.swift in Sources */,
 				DE00000000000000000000C1 /* Normalize.swift in Sources */,
+				DE00000000000000000000C3 /* PerfectV2.swift in Sources */,
 				DE00000000000000000000A2 /* LibraryWindows.swift in Sources */,
 				DE0000000000000000000053 /* PerfectView.swift in Sources */,
 				DE00000000000000000000B1 /* APIKeys.swift in Sources */,
