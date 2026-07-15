@@ -298,6 +298,23 @@ here too** *(was lost with the step-1 findings panel)* as an info-only section.
 8. **Delete** `commit()` + stage methods/flags + chrome + `PerfectPlan`;
    confirm Transfer untouched; final green build.
 
+**Sequencing revision (2026-07-16, after the verification pass):** steps 7–8
+are GATED on capability parity, not just the checklist. The old wizard still
+uniquely provides capabilities v2 lacks; it stays as the shipping path until
+v2 has:
+- **6a. Album-name resolution** — consume the album side of identify
+  (`chosenAlbum`/candidates + folder consensus + `Identifier.searchAlbum`, as
+  batch `reconcileAlbums` did), substantive album changes routed to review.
+  Blank-album files currently sit flagged and unrescued in v2.
+- **6b. Cover art surface** — the roll-up's cover chooser (fill missing,
+  choose/replace, unify; front-cover promotion is already plumbed).
+- **6c. DRM manifest surface** — the findings list died with the wizard
+  chrome; give protected tracks a v2 home (info-only).
+- **6d. Driver settings** — thoroughness + the missing-track network gate
+  (the driver currently always reconciles).
+- Plus the recorded roll-up work: per-track verdicts, batch apply,
+  duplicates-by-ear, kept-album persistence, global Revert-library.
+
 ## Verification (always on a COPY of `~/Documents/iTunes Testing Small`)
 - **Pure-logic tests** — all new pure logic **must live in Foundation-only,
   swiftc-compilable files** added to `Tests/run.sh`'s compile line
