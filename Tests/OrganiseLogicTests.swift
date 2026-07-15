@@ -117,6 +117,17 @@ enum OrganiseLogicTests {
                     ct(3, ar: "Billie Holiday", al: "Merry Xmas!"), ct(4, ar: "Dusty Springfield", al: "Merry Xmas!")]
         checkI("real compilation still flagged", Normalizer.compilationCandidates(xmas).count, 1)
 
+        // a confirmed compilation is stamped compilation=1 so the grouping STICKS:
+        // a later plan with no confirmation set must not pull the box apart again
+        let compKeys = Set(xmas.map { Organiser.fold(Organiser.stripDiscSuffix($0.album).clean) })
+        let cplan = Normalizer.plan(Normalizer.Input(tracks: xmas), confirmedCompilations: compKeys)
+        check("compilation flag written",
+              b(cplan.tagWrites.contains { $0.field == "compilation" && $0.value == "1" }), "true")
+        let afterComp = Normalizer.simulate(Normalizer.Input(tracks: xmas), applying: cplan)
+        let cplan2 = Normalizer.plan(afterComp)   // NO confirmation set this time
+        check("VA grouping sticks without the set",
+              b(!cplan2.moves.contains { !$0.to.isEmpty }), "true")
+
         // a folder named with the SAFE rendering of the tag ("AC-DC" for "AC/DC")
         // is not a spelling variance — nothing to unify
         let acdc = Normalizer.Input(tracks: (1...4).map { n in

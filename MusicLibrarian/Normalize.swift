@@ -261,6 +261,7 @@ enum Normalizer {
             case "title":       t.title = w.value
             case "disc":        t.discNo = Int(w.value) ?? t.discNo
             case "track":       t.trackNo = Int(w.value) ?? t.trackNo
+            case "compilation": t.isCompilation = w.value.hasPrefix("1")
             default: break
             }
             byRel[w.rel] = t

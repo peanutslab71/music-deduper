@@ -158,6 +158,7 @@ struct RunRecord: Identifiable {
     let artReplacements: [(rel: String, backup: String, oldType: Int)]  // art replaced; backup holds the old image
     let summary: String
     var session: String? = nil   // groups the runs of one Perfect session for "Undo session"
+    var skips: [String] = []     // conflicts left in place (different track at target) — needs attention
 }
 
 /// The resumable working plan for one library: the (network-expensive) identify
@@ -3220,8 +3221,39 @@ final class PerfectStore: ObservableObject {
                 log += "ART: \(rel)  promoted picture type \(oldType) → front cover\n"
             }
         }
+        // Case-only FOLDER renames first: a per-file move can never change its parent
+        // directory's case on a case-insensitive volume (the file just lands in the
+        // existing dir, and the plan re-proposes the same moves forever). Rename the
+        // directory itself once, via a temp name; the per-file moves then match.
+        var seenDirCase = Set<String>()
+        for m in moves where !m.to.isEmpty {
+            let fromParent = (m.from as NSString).deletingLastPathComponent
+            let toParent = (m.to as NSString).deletingLastPathComponent
+            guard fromParent != toParent,
+                  fromParent.lowercased() == toParent.lowercased(),
+                  !seenDirCase.contains(fromParent.lowercased()) else { continue }
+            seenDirCase.insert(fromParent.lowercased())
+            let from = root.appendingPathComponent(fromParent), to = root.appendingPathComponent(toParent)
+            guard fm.fileExists(atPath: from.path) else { continue }
+            do {
+                let tmp = to.deletingLastPathComponent().appendingPathComponent(".mdtmp-\(to.lastPathComponent)")
+                try? fm.removeItem(at: tmp)
+                try fm.moveItem(at: from, to: tmp)
+                try fm.moveItem(at: tmp, to: to)
+                ops.append((fromParent, toParent))
+                log += "RENAMED folder: \(fromParent) → \(toParent)\n"
+            } catch { log += "FAILED \(fromParent): \(error.localizedDescription)\n" }
+        }
+        var skips: [String] = []   // conflicts left in place — surfaced, not silent
         // longest source path first so a folder's files move before the folder
         for m in moves.sorted(by: { $0.from.count > $1.from.count }) {
+            // a parent-dir case rename above already did this move's whole job
+            if (m.from as NSString).lastPathComponent == (m.to as NSString).lastPathComponent,
+               (m.from as NSString).deletingLastPathComponent != (m.to as NSString).deletingLastPathComponent,
+               (m.from as NSString).deletingLastPathComponent.lowercased()
+                   == (m.to as NSString).deletingLastPathComponent.lowercased() {
+                continue
+            }
             let toRel = m.to.isEmpty ? qRel + "/" + m.from : m.to
             let from = root.appendingPathComponent(m.from), to = root.appendingPathComponent(toRel)
             guard fm.fileExists(atPath: from.path) else { continue }
@@ -3252,6 +3284,7 @@ final class PerfectStore: ObservableObject {
                     } catch { log += "FAILED \(m.from): \(error.localizedDescription)\n" }
                 } else {
                     log += "SKIP (target exists, different track): \(toRel)\n"
+                    skips.append("\(m.from) — a DIFFERENT track already sits at \(toRel); left in place, decide by ear")
                 }
                 continue
             }
@@ -3298,7 +3331,8 @@ final class PerfectStore: ObservableObject {
             "perfEdits": perfEdits.map { ["rel": $0.rel, "name": $0.name, "role": $0.role] },
             "artEdits": artEdits,
             "artPromotions": artPromotions.map { ["rel": $0.rel, "oldType": String($0.oldType)] },
-            "artReplacements": artReplacements.map { ["rel": $0.rel, "backup": $0.backup, "oldType": String($0.oldType)] }
+            "artReplacements": artReplacements.map { ["rel": $0.rel, "backup": $0.backup, "oldType": String($0.oldType)] },
+            "skips": skips
         ]
         if let sessionID { record["session"] = sessionID }
         if let data = try? JSONSerialization.data(withJSONObject: record) {
@@ -3356,7 +3390,8 @@ final class PerfectStore: ObservableObject {
                          ops: ops, tagEdits: tagEdits, perfEdits: perfEdits, artEdits: artEdits,
                          artPromotions: artPromotions, artReplacements: artReplacements,
                          summary: obj["summary"] as? String ?? "\(n) changes",
-                         session: obj["session"] as? String)
+                         session: obj["session"] as? String,
+                         skips: obj["skips"] as? [String] ?? [])
     }
 
     /// Reverse a run: move each recorded change back (to → from), newest moves

@@ -221,7 +221,14 @@ enum NormalizeDryRun {
         Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             let scanned = PerfectStore.scanForNormalize(root: root)
-            let plan = Normalizer.plan(scanned)
+            // same choices the Normalize window would use, so the two agree
+            let choices = Normalizer.ChoicesStore.load(root.path)
+            let confirmedComps = Normalizer.compilationCandidates(scanned.tracks)
+                .filter { !choices.declinedCompilations.contains($0.key) }
+                .reduce(into: Set<String>()) { $0.formUnion($1.foldKeys) }
+            let plan = Normalizer.plan(scanned, canonicalArtistOverrides: choices.artistOverrides,
+                                       declinedMerges: Set(choices.declinedMerges),
+                                       confirmedCompilations: confirmedComps)
 
             var report = "Music Librarian — Normalize DRY RUN \(Date())\nLibrary: \(root.path)\n"
             report += "NOTHING has been changed. On apply, unchanged tag values are skipped.\n\n"

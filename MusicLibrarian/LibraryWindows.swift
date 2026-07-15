@@ -1098,6 +1098,14 @@ struct NormalizeView: View {
                     }
                 }
             }
+            let attention = latestSkips
+            if !attention.isEmpty {
+                Section("Needs attention — conflicts the last run would not decide for you") {
+                    ForEach(Array(attention.enumerated()), id: \.offset) { _, s in
+                        Label(s, systemImage: "hand.raised").font(.caption).foregroundStyle(.orange)
+                    }
+                }
+            }
             Section("This run") {
                 let quarantined = plan.moves.filter { $0.to.isEmpty }.count
                 let moved = plan.moves.count - quarantined
@@ -1123,6 +1131,14 @@ struct NormalizeView: View {
     private var allMergeGroups: [Organiser.MergeGroup] {
         guard let input else { return [] }
         return Organiser.albumMergeCandidates(input.tracks)
+    }
+
+    /// Unresolved conflicts from this library's most recent run (a different track
+    /// already at a move's target) — the planner will re-propose them until the
+    /// user untangles the files by hand.
+    private var latestSkips: [String] {
+        guard let root else { return [] }
+        return perfect.runs.first { $0.root.path == root.path }?.skips ?? []
     }
 
     private func mergeBinding(_ key: String) -> Binding<Bool> {

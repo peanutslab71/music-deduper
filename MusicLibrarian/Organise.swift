@@ -138,7 +138,8 @@ enum Organiser {
                 plans.append(planOne(t, groupAlbumArtist: groupAlbumArtist, groupAlbum: groupAlbum,
                                      multiDisc: multiDisc,
                                      composerFirst: composerFirstForClassical,
-                                     forcedTrackNo: forced[t.rel]))
+                                     forcedTrackNo: forced[t.rel],
+                                     isCompilationGroup: isCompGroup))
             }
         }
         return plans.sorted { $0.rel < $1.rel }
@@ -206,8 +207,14 @@ enum Organiser {
 
     private static func planOne(_ t: OrganiseInput, groupAlbumArtist: String, groupAlbum: String,
                                 multiDisc: Bool, composerFirst: Bool,
-                                forcedTrackNo: Int? = nil) -> OrganisePlan {
+                                forcedTrackNo: Int? = nil,
+                                isCompilationGroup: Bool = false) -> OrganisePlan {
         var writes: [(String, String)] = []
+        // A grouped compilation is stamped compilation=1 so the files stay
+        // self-describing: later plans (with no confirmation set in hand) see the
+        // flag and keep the album under Various Artists instead of re-deriving an
+        // album artist from the majority and pulling the box apart again.
+        if isCompilationGroup && !t.isCompilation { writes.append(("compilation", "1")) }
 
         // Use the GROUP's album artist + album name for every track, so all discs/tracks
         // of one album agree (a stray "Various Artists" on one disc no longer splits it).
