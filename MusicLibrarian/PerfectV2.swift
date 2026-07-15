@@ -12,6 +12,7 @@
 //
 
 import SwiftUI
+import MDTagShim
 
 extension PerfectStore {
     /// The v2 rollout flag (plan step 5/7). Hidden: set via `defaults write`.
@@ -111,6 +112,18 @@ final class PerfectV2Driver: ObservableObject {
                                                      sessionID: session)
                 lines.append("Final pass: \(p2.tagWrites.count) tag write(s), \(p2.moves.count) move(s)")
             }
+            // Library-wide dedup on the FINAL tags: cross-folder copies that only
+            // became duplicates after their album/artist was corrected (the batch's
+            // step-0e capability, on the edition-folded cluster gate). Same
+            // merge-of-best shape as the per-album engine.
+            progress = "Final pass — removing cross-folder duplicates"
+            let dd = await Task.detached { await PerfectV2Driver.libraryDedup(root: root) }.value
+            if !dd.moves.isEmpty {
+                await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — duplicate removal",
+                                                     tagWrites: dd.writes, moves: dd.moves,
+                                                     artEmbeds: dd.embeds, sessionID: session)
+                lines.append("Duplicates: \(dd.moves.count) removed across folders (best copies kept)")
+            }
         } else {
             lines.append("Cancelled — applied runs stay undoable from Runs")
         }
@@ -134,6 +147,7 @@ final class PerfectV2Driver: ObservableObject {
             root: root, summary: "Perfect v2 — \(name)",
             tagWrites: chosen.flatMap { $0.tagWrites },
             moves: chosen.flatMap { $0.moves },
+            artEmbeds: chosen.flatMap { $0.artEmbeds },
             performerAdds: chosen.flatMap { $0.performerAdds },
             sessionID: session)
         return true
@@ -169,6 +183,48 @@ final class PerfectV2Driver: ObservableObject {
     func keep(_ d: DeferredAlbum) {
         deferred.removeAll { $0.id == d.id }
         lines.append("Kept as-is — \(d.dir.lastPathComponent)")
+    }
+
+    /// Cross-folder duplicate sweep over the whole library's FINAL tags. Returns
+    /// the merge-of-best backfill (keeper's blank fields + missing cover filled
+    /// from the losers) and the losers' quarantine moves — all applied as one
+    /// reversible run by the caller.
+    nonisolated static func libraryDedup(root: URL) async
+        -> (writes: [(rel: String, field: String, value: String)],
+            embeds: [(rel: String, image: Data, mime: String)],
+            moves: [(from: String, to: String)]) {
+        var tracks = await PerfectStore.buildTracksFromDisk(root: root, fm: .default)
+        let clusters = buildClusters(&tracks, mode: .balanced, tol: 2.0, crossAlbum: false)
+        var writes: [(rel: String, field: String, value: String)] = []
+        var embeds: [(rel: String, image: Data, mime: String)] = []
+        var moves: [(from: String, to: String)] = []
+        let backfill = ["title", "artist", "album", "albumartist", "composer",
+                        "lyricist", "label", "conductor", "date", "track", "disc"]
+        for c in clusters where c.memberIDs.count > 1 {
+            let keeper = tracks[c.keeperID]
+            let keeperRel = PerfectStore.rel(keeper.url, root)
+            for field in backfill where (PerfectStore.readField(keeper.url, field) ?? "").isEmpty {
+                for id in c.memberIDs where id != c.keeperID {
+                    let v = PerfectStore.readField(tracks[id].url, field) ?? ""
+                    if !v.isEmpty { writes.append((keeperRel, field, v)); break }
+                }
+            }
+            if md_has_artwork(keeper.url.path) == 0 {
+                for id in c.memberIDs where id != c.keeperID {
+                    var len: Int32 = 0, ty: Int32 = 0
+                    if let b = md_copy_artwork(tracks[id].url.path, &len, &ty) {
+                        let d = Data(bytes: b, count: Int(len)); free(b)
+                        embeds.append((keeperRel, d,
+                                       d.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"))
+                        break
+                    }
+                }
+            }
+            for id in c.memberIDs where id != c.keeperID {
+                moves.append((PerfectStore.rel(tracks[id].url, root), ""))
+            }
+        }
+        return (writes, embeds, moves)
     }
 
     /// One album folder = one directory that directly contains audio files.

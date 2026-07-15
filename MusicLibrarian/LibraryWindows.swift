@@ -1691,8 +1691,37 @@ enum AlbumPerfect {
         var removed = Set<String>()
         var dupMoves: [(from: String, to: String)] = []
         var dupLines: [String] = []
+        var dupWrites: [(rel: String, field: String, value: String)] = []
+        var dupEmbeds: [(rel: String, image: Data, mime: String)] = []
         for c in clusters where c.memberIDs.count > 1 {
             let keeper = tracks[c.keeperID]
+            // merge-of-best: before the losers go, fill the keeper's BLANK fields
+            // (and missing cover) from them — a low-bitrate loser may be the only
+            // copy carrying the album/date tags or the art. Parity with the batch.
+            let backfill = ["title", "artist", "album", "albumartist", "composer",
+                            "lyricist", "label", "conductor", "date", "track", "disc"]
+            for field in backfill where (PerfectStore.readField(keeper.url, field) ?? "").isEmpty {
+                for id in c.memberIDs where id != c.keeperID {
+                    let v = PerfectStore.readField(tracks[id].url, field) ?? ""
+                    if !v.isEmpty {
+                        dupWrites.append((rel(keeper.url), field, v))
+                        dupLines.append("“\(keeper.url.lastPathComponent)”: fill \(field) from a duplicate before it goes")
+                        break
+                    }
+                }
+            }
+            if md_has_artwork(keeper.url.path) == 0 {
+                for id in c.memberIDs where id != c.keeperID {
+                    var len: Int32 = 0, ty: Int32 = 0
+                    if let b = md_copy_artwork(tracks[id].url.path, &len, &ty) {
+                        let d = Data(bytes: b, count: Int(len)); free(b)
+                        dupEmbeds.append((rel(keeper.url), d,
+                                          d.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"))
+                        dupLines.append("“\(keeper.url.lastPathComponent)”: take the cover from a duplicate before it goes")
+                        break
+                    }
+                }
+            }
             for id in c.memberIDs where id != c.keeperID {
                 let t = tracks[id]
                 dupMoves.append((rel(t.url), ""))
@@ -1712,8 +1741,9 @@ enum AlbumPerfect {
         }
         if !dupMoves.isEmpty {
             fixes.append(AlbumFix(kind: .duplicate,
-                                  summary: "Remove \(dupMoves.count) duplicate track\(dupMoves.count == 1 ? "" : "s") (best copy kept)",
-                                  lines: dupLines, enabled: true, applyable: true, moves: dupMoves))
+                                  summary: "Remove \(dupMoves.count) duplicate track\(dupMoves.count == 1 ? "" : "s") (best copy kept, its gaps filled from the removed)",
+                                  lines: dupLines, enabled: true, applyable: true,
+                                  tagWrites: dupWrites, moves: dupMoves, artEmbeds: dupEmbeds))
         }
 
         let fallbackAlbum = files.first?.deletingLastPathComponent().lastPathComponent ?? ""
