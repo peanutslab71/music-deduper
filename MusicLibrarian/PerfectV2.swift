@@ -206,6 +206,13 @@ final class PerfectV2Driver: ObservableObject {
         let backfill = ["title", "artist", "album", "albumartist", "composer",
                         "lyricist", "label", "conductor", "date", "track", "disc"]
         for c in clusters where c.memberIDs.count > 1 {
+            // Legitimate repeat appearances — the same recording on its studio album
+            // AND on a greatest-hits/compilation — are NEVER auto-removed (plan §E:
+            // "move aside for review, never auto-delete"; the by-ear review surface
+            // will offer them). Only clusters whose members agree on the edition-
+            // folded ALBUM are true stray copies.
+            let albums = Set(c.memberIDs.map { Organiser.canonicalAlbumKey(tracks[$0].album) })
+            guard albums.count == 1 else { continue }
             let keeper = tracks[c.keeperID]
             let keeperRel = PerfectStore.rel(keeper.url, root)
             for field in backfill where (PerfectStore.readField(keeper.url, field) ?? "").isEmpty {
