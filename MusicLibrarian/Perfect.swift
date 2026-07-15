@@ -1864,6 +1864,13 @@ final class PerfectStore: ObservableObject {
                 let rel = String(u.path.dropFirst(rootPrefix.count))
                 guard !rel.isEmpty, !rel.hasPrefix("Music Librarian Quarantine") else { continue }
                 if (try? u.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                    // A HIDDEN directory (.com-apple-bird iCloud scratch, .Trashes, …)
+                    // is not library content: quarantine it whole — recoverable, never
+                    // deleted — and don't let audio buried inside it keep an otherwise
+                    // empty parent (like a stale "Downloads") alive.
+                    if u.lastPathComponent.hasPrefix(".") {
+                        junk.append(rel); en.skipDescendants(); continue
+                    }
                     allDirs.append(rel)
                 } else if Normalizer.isJunkFileName(u.lastPathComponent) {
                     junk.append(rel)
@@ -1884,6 +1891,10 @@ final class PerfectStore: ObservableObject {
             guard isAudio(url) else { continue }
             let rel = self.rel(url, root)
             if rel.hasPrefix("Music Librarian Quarantine") { continue }
+            // Hidden files/dirs (.com-apple-bird iCloud scratch, AppleDouble ._*) are
+            // not library content — never plan tags/placement from them; the normalize
+            // scan quarantines the hidden container whole instead.
+            if rel.split(separator: "/").contains(where: { $0.hasPrefix(".") }) { continue }
             let track = Int((readField(url, "track") ?? "").prefix(while: { $0.isNumber })) ?? 0
             let disc  = Int((readField(url, "disc")  ?? "").prefix(while: { $0.isNumber })) ?? 0
             var artist = readField(url, "artist") ?? "", album = readField(url, "album") ?? ""
