@@ -3296,6 +3296,17 @@ final class PerfectStore: ObservableObject {
                     try? fm.removeItem(at: tmp)
                     try fm.moveItem(at: from, to: tmp)
                     try fm.moveItem(at: tmp, to: to)
+                } else if m.to.isEmpty,
+                          (try? from.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true,
+                          fm.fileExists(atPath: to.path) {
+                    // quarantining a directory whose quarantine slot already exists
+                    // (a child of it was quarantined first, creating the path) —
+                    // merge the remaining children in rather than failing
+                    for child in (try? fm.contentsOfDirectory(atPath: from.path)) ?? [] {
+                        try? fm.moveItem(at: from.appendingPathComponent(child),
+                                         to: to.appendingPathComponent(child))
+                    }
+                    try fm.removeItem(at: from)
                 } else {
                     try fm.moveItem(at: from, to: to)
                 }
