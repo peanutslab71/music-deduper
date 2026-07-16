@@ -108,17 +108,25 @@ final class PerfectV2Driver: ObservableObject {
             self.cards = built
             self.drmTracks = built.flatMap { $0.files.filter { $0.pathExtension.lowercased() == "m4p" } }
                 .map { PerfectStore.rel($0, root) }
-            // thumbnails lazily, off-main, published as they arrive
-            Task.detached { [weak self] in
-                for card in built {
-                    guard let first = card.files.first else { continue }
-                    var len: Int32 = 0, ty: Int32 = 0
-                    guard let b = md_copy_artwork(first.path, &len, &ty) else { continue }
-                    let d = Data(bytes: b, count: Int(len)); free(b)
-                    await MainActor.run { [weak self] in
-                        guard let self, let i = self.cards.firstIndex(where: { $0.id == card.id }) else { return }
-                        self.cards[i].thumb = d
-                    }
+            loadThumbs()
+        }
+    }
+
+    /// Load cover thumbnails for every card that lacks one — lazily, off-main,
+    /// published as they arrive. Called after every card-list (re)build; already
+    /// loaded thumbs are kept, so covers never blink out mid-session.
+    private func loadThumbs() {
+        let missing = cards.filter { $0.thumb == nil }
+        guard !missing.isEmpty else { return }
+        Task.detached { [weak self] in
+            for card in missing {
+                guard let first = card.files.first else { continue }
+                var len: Int32 = 0, ty: Int32 = 0
+                guard let b = md_copy_artwork(first.path, &len, &ty) else { continue }
+                let d = Data(bytes: b, count: Int(len)); free(b)
+                await MainActor.run { [weak self] in
+                    guard let self, let i = self.cards.firstIndex(where: { $0.id == card.id }) else { return }
+                    if self.cards[i].thumb == nil { self.cards[i].thumb = d }
                 }
             }
         }
@@ -136,7 +144,9 @@ final class PerfectV2Driver: ObservableObject {
             let exts = Set(ts.map { $0.ext }).sorted().joined(separator: "/")
             var bits = ["\(ts.count) track\(ts.count == 1 ? "" : "s")", exts]
             if let first = card.files.first {
-                if let g = PerfectStore.readField(first, "genre"), !g.isEmpty { bits.append(g.lowercased()) }
+                if let g = PerfectStore.readField(first, "genre"), !g.isEmpty {
+                    bits.append(Organiser.displayGenre(g).lowercased())
+                }
                 if let d = PerfectStore.readField(first, "date"), d.count >= 4 { bits.append(String(d.prefix(4))) }
             }
             card.facts = bits.joined(separator: " · ")
@@ -179,11 +189,16 @@ final class PerfectV2Driver: ObservableObject {
                                                  tagWrites: p1.tagWrites, moves: p1.moves,
                                                  sessionID: session)
             lines.append("Phase 1: \(p1.tagWrites.count) tag write(s), \(p1.moves.count) move(s)")
-            // the tree changed — rebuild the strip from the normalized library
-            let rebuilt = await Task.detached { PerfectV2Driver.buildCards(root: root) }.value
+            // the tree changed — rebuild the strip from the normalized library,
+            // KEEPING the thumbnails already loaded (same folder = same cover)
+            let oldThumbs = Dictionary(cards.compactMap { c in c.thumb.map { (c.id, $0) } },
+                                       uniquingKeysWith: { a, _ in a })
+            var rebuilt = await Task.detached { PerfectV2Driver.buildCards(root: root) }.value
+            for i in rebuilt.indices { rebuilt[i].thumb = oldThumbs[rebuilt[i].id] }
             cards = rebuilt
             drmTracks = rebuilt.flatMap { $0.files.filter { $0.pathExtension.lowercased() == "m4p" } }
                 .map { PerfectStore.rel($0, root) }
+            loadThumbs()
         } else {
             lines.append("Phase 1: nothing to normalize")
             for i in cards.indices { cards[i].state = .pending }

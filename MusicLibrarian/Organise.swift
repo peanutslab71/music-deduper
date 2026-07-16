@@ -367,6 +367,29 @@ enum Organiser {
         return s.isEmpty ? base : s
     }
 
+    /// A displayable genre: raw ID3v1 numeric codes ("17" or "(17)") map to their
+    /// standard names — the fixed table from the ID3v1 specification, not a
+    /// vocabulary of ours. Anything non-numeric passes through untouched.
+    static func displayGenre(_ raw: String) -> String {
+        let t = raw.trimmingCharacters(in: CharacterSet(charactersIn: "() ")).trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, t.allSatisfy(\.isNumber), let n = Int(t) else { return raw }
+        let id3v1 = ["Blues", "Classic Rock", "Country", "Dance", "Disco", "Funk", "Grunge",
+                     "Hip-Hop", "Jazz", "Metal", "New Age", "Oldies", "Other", "Pop", "R&B",
+                     "Rap", "Reggae", "Rock", "Techno", "Industrial", "Alternative", "Ska",
+                     "Death Metal", "Pranks", "Soundtrack", "Euro-Techno", "Ambient",
+                     "Trip-Hop", "Vocal", "Jazz+Funk", "Fusion", "Trance", "Classical",
+                     "Instrumental", "Acid", "House", "Game", "Sound Clip", "Gospel",
+                     "Noise", "Alternative Rock", "Bass", "Soul", "Punk", "Space",
+                     "Meditative", "Instrumental Pop", "Instrumental Rock", "Ethnic",
+                     "Gothic", "Darkwave", "Techno-Industrial", "Electronic", "Pop-Folk",
+                     "Eurodance", "Dream", "Southern Rock", "Comedy", "Cult", "Gangsta",
+                     "Top 40", "Christian Rap", "Pop/Funk", "Jungle", "Native American",
+                     "Cabaret", "New Wave", "Psychedelic", "Rave", "Showtunes", "Trailer",
+                     "Lo-Fi", "Tribal", "Acid Punk", "Acid Jazz", "Polka", "Retro",
+                     "Musical", "Rock & Roll", "Hard Rock"]
+        return n < id3v1.count ? id3v1[n] : raw
+    }
+
     /// Fold an artist name to its grouping key: lowercased, "&"→"and", leading or
     /// trailing "The" dropped, non-alphanumerics stripped — so "The Buzzcocks",
     /// "Buzzcocks" and "Buzzcocks, The" group together. (Moved from PerfectStore so

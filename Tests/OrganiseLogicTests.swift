@@ -179,6 +179,12 @@ enum OrganiseLogicTests {
         check("blank-AA flagged album still groups VA",
               b(Organiser.plan(vaFlagged).allSatisfy { ($0.targetRel ?? "").hasPrefix("Various Artists/") }), "true")
 
+        // ---- displayGenre: ID3v1 numeric codes map to their standard names ----
+        check("code 17 is Rock",           Organiser.displayGenre("17"), "Rock")
+        check("parenthesised code",        Organiser.displayGenre("(8)"), "Jazz")
+        check("real name passes through",  Organiser.displayGenre("Britpop"), "Britpop")
+        check("out-of-table code kept",    Organiser.displayGenre("250"), "250")
+
         // ---- planOne blank-title fallback: filename minus extension + number ----
         let blank = OrganiseInput(rel: "Black Sabbath/Greatest Hits/01 Paranoid.m4p", ext: "m4p",
                                   artist: "Black Sabbath", albumArtist: "Black Sabbath",
