@@ -689,11 +689,6 @@ struct PerfectV2View: View {
                     withAnimation { proxy.scrollTo(driver.cards[ids[pos]].id, anchor: .center) }
                 }
             }
-            .onChange(of: driver.progress) { _ in
-                if driver.running, let analyzing = driver.cards.first(where: { $0.state == .analyzing }) {
-                    withAnimation { proxy.scrollTo(analyzing.id) }
-                }
-            }
         }
     }
 
@@ -866,6 +861,15 @@ struct AlbumCardView: View {
                     Text("← → keys").font(.caption2).foregroundStyle(.tertiary)
                 }
             }
+            if card.state == .needs || card.state == .clean {
+                block(coverTitle) { coverBlock }
+            }
+            if !card.decisions.isEmpty || card.albumSuggestion != nil {
+                block("Names") { namesBlock }
+            }
+            if !card.earChoices.isEmpty {
+                block("Duplicates — the same recording elsewhere") { earBlock }
+            }
             DisclosureGroup {
                 Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 3) {
                     ForEach(Array(card.trackList.enumerated()), id: \.offset) { _, t in
@@ -878,15 +882,6 @@ struct AlbumCardView: View {
                 .padding(.top, 4)
             } label: {
                 Text("TRACKS & TAGS").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-            }
-            if !card.decisions.isEmpty || card.albumSuggestion != nil {
-                block("Names") { namesBlock }
-            }
-            if !card.earChoices.isEmpty {
-                block("Duplicates — the same recording elsewhere") { earBlock }
-            }
-            if card.state == .needs || card.state == .clean {
-                block(coverTitle) { coverBlock }
             }
         }
         .padding(.horizontal, 10)
