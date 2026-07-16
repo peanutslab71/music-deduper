@@ -209,6 +209,22 @@ here too** *(was lost with the step-1 findings panel)* as an info-only section.
   dependent fixes, one undoable run each, "Album N of M" progress). Never
   block the user on a network re-analyze between judgments; partial passes
   are fine — undecided albums stay queued.
+- **Cover search: precision over volume, with a manual escape hatch** (user
+  observation, 2026-07-16): v2's tag-driven cover search finds FEWER but
+  better-matched covers than the old batch/per-album flows — keep the
+  tag-driven query as primary, and add a fuzzy/manual search option (editable
+  artist/album query) for when it misses, both in the roll-up's cover section
+  and in per-album "Perfect this album" — which today offers no way to edit
+  the album/track names used for lookup, unlike the old wizard's manual
+  search.
+- **Per-track verdicts are confirmed as the top rebuild priority** (reported
+  again 2026-07-16): the interim whole-album Accept/Keep forces batch
+  authorisation of name changes; users need to approve each track's change
+  individually.
+- **Design mockup BEFORE building the v2 wizard/roll-up UI**: the old wizard
+  was unintuitive; produce a reviewable mockup (wireframe of the window —
+  sections, verdict flow, batch-apply bar, covers, duplicates-by-ear) and get
+  it agreed before implementation starts.
 - **A "Duplicates to decide by ear" section joins the roll-up**: same-slot
   twins whose durations differ (auto-dedup rightly refuses) and
   different-track move collisions (the Elvis 2-22 case) become first-class
