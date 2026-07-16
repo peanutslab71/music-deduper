@@ -46,7 +46,15 @@ enum Organiser {
         // various-artist tracks scattered under different artist folders come back
         // together under "Various Artists / <Album>").
         func isCompilation(_ t: OrganiseInput) -> Bool {
-            t.isCompilation || compilations.contains(fold(stripDiscSuffix(t.album).clean))
+            // An explicit non-VA album-artist OVERRIDES a loose compilation flag:
+            // iTunes stamps cpil=1 on anything filed under its Compilations view, so
+            // "albumartist=The Specials, compilation=1" is a single-artist album —
+            // trusting the flag would file it under Various Artists and DESTROY the
+            // correct album-artist. Such an album groups VA only on explicit confirm.
+            if !t.albumArtist.isEmpty && artistKey(t.albumArtist) != "variousartists" {
+                return compilations.contains(fold(stripDiscSuffix(t.album).clean))
+            }
+            return t.isCompilation || compilations.contains(fold(stripDiscSuffix(t.album).clean))
         }
         // Group by the ARTIST FOLDER + the disc-stripped album, so the two discs of a
         // set (which live in separate "[Disc 1]"/"[Disc 2]" folders) land in ONE group

@@ -151,6 +151,34 @@ enum OrganiseLogicTests {
         check("disc-track prefix stripped", Organiser.titleFromFilename("1-05 Song.mp3"), "Song")
         check("all-number name survives",  Organiser.titleFromFilename("01.mp3"), "01")
 
+        // ---- compilation flag vs explicit album-artist: the AA wins ----
+        // iTunes stamps cpil=1 loosely; "albumartist=The Specials, compilation=1"
+        // must stay a Specials album, never Various Artists.
+        let specials = [
+            OrganiseInput(rel: "Compilations/The Singles Collection/01 Gangsters.mp3", ext: "mp3",
+                          artist: "The Specials", albumArtist: "The Specials",
+                          album: "The Singles Collection", title: "Gangsters", trackNo: 1, discNo: 0,
+                          isCompilation: true),
+            OrganiseInput(rel: "Compilations/The Singles Collection/15 Nelson Mandela.mp3", ext: "mp3",
+                          artist: "The Special A.K.A.", albumArtist: "The Specials",
+                          album: "The Singles Collection", title: "Nelson Mandela", trackNo: 15, discNo: 0,
+                          isCompilation: true),
+        ]
+        let sp = Organiser.plan(specials)
+        check("flagged album with real AA stays under it",
+              b(sp.allSatisfy { ($0.targetRel ?? "").hasPrefix("The Specials/") }), "true")
+        check("AA not overwritten to VA",
+              b(!sp.flatMap { $0.tagWrites }.contains { $0.field == "albumartist" && $0.value == "Various Artists" }), "true")
+        // a genuinely VA-tagged flagged album still groups under Various Artists
+        let vaFlagged = [
+            OrganiseInput(rel: "X/Hits/01 A.mp3", ext: "mp3", artist: "Artist One", albumArtist: "",
+                          album: "Hits", title: "A", trackNo: 1, discNo: 0, isCompilation: true),
+            OrganiseInput(rel: "X/Hits/02 B.mp3", ext: "mp3", artist: "Artist Two", albumArtist: "",
+                          album: "Hits", title: "B", trackNo: 2, discNo: 0, isCompilation: true),
+        ]
+        check("blank-AA flagged album still groups VA",
+              b(Organiser.plan(vaFlagged).allSatisfy { ($0.targetRel ?? "").hasPrefix("Various Artists/") }), "true")
+
         // ---- planOne blank-title fallback: filename minus extension + number ----
         let blank = OrganiseInput(rel: "Black Sabbath/Greatest Hits/01 Paranoid.m4p", ext: "m4p",
                                   artist: "Black Sabbath", albumArtist: "Black Sabbath",
