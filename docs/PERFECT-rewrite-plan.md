@@ -343,7 +343,24 @@ v2 has:
   missing-tracks toggle gates the release reconcile (offline-fast runs), and
   thoroughness scopes the run — Light/Standard skip edition merges
   (Thorough-only, matching the wizard), Light also keeps file names as-is.
-- Roll-up rebuild — ✅ DONE to the approved mockup (2026-07-16): per-track
+- **REDESIGN (2026-07-16, after first real use): the roll-up becomes an ALBUM
+  CAROUSEL.** User verdict on the sectioned layout: grouping by issue type
+  makes the same album appear in Names, Duplicates and Covers — duplicated
+  effort and context switches; the per-album Perfect dialog's album-as-unit
+  model is preferred. New direction (mockup v2 'carousel-redesign' at the
+  same artifact URL, awaiting approval): one album per card with EVERYTHING
+  it needs (names, its own duplicate calls rolled up to album-level verdicts,
+  cover chooser with instant in-place preview on the big artwork, info),
+  prev/next + arrow keys + a badged filmstrip for jumping, "Needs decisions"
+  filter (All-albums filter exposes cover replacement on clean albums —
+  the Hunky Dory ask). Batch semantics unchanged underneath.
+  Also from this session's use: manage GENRE (currently unwritten anywhere);
+  by-ear info lines must fall back to the folder name when the album tag is
+  blank (DRM m4p showed '?'); and the stale-rel remap for queued covers/
+  credits is now REQUIRED (Some Old Bullshit's cover and credits silently
+  missed moved files).
+- Sectioned roll-up build (superseded by the carousel, engine reused) — was
+  DONE to the first mockup (2026-07-16): per-track
   Accept/Keep verdicts with confidence-flipped defaults and ▶A/▶B audition,
   artist-first cards with Accept-all/Keep-all, decide-in-batch → one "Apply
   all decisions" (per album: write accepted names → re-analyze with identify
