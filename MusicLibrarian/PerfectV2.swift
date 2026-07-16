@@ -82,6 +82,8 @@ final class PerfectV2Driver: ObservableObject {
         var acceptAlbum = false                            // a guess defaults to NOT accepted
         var earChoices: [EarChoice] = []
         var chosenCover: Data? = nil                       // queued cover pick — applies with the batch
+        var onlineCovers: [Data] = []                      // candidates fetched during analyze (capped)
+        var coverSearched = false                          // a search has run (pipeline or manual)
         // artwork: rels + which have art (set after analyze; the chooser is
         // available on every analyzed card — replace is backed up + undoable)
         var art: AlbumArtContext? = nil
@@ -256,6 +258,7 @@ final class PerfectV2Driver: ObservableObject {
                     c.decisions = decisions; c.albumSuggestion = suggestion
                     c.art = art; c.state = .needs
                 }
+                await fetchCovers(for: card.id, art: art)
                 continue   // deferred whole — dependent fixes wait for the verdicts
             }
             let didApply = await applyTierOne(tierFixes, root: root, session: session,
@@ -265,6 +268,7 @@ final class PerfectV2Driver: ObservableObject {
                 c.art = art
                 c.state = c.missingArtRels.isEmpty ? .clean : .needs   // cover gaps are decisions too
             }
+            await fetchCovers(for: card.id, art: art)
         }
 
         // ---- final pass on the corrected tags + the cross-album dedup sweep
@@ -307,6 +311,21 @@ final class PerfectV2Driver: ObservableObject {
         let needs = cards.filter { $0.state == .needs }.count
         lines.append("Albums: \(applied) fixed · \(clean) clean · \(needs) with decisions")
         ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
+    }
+
+    /// Cover candidates for every album, fetched as part of its analyze (user
+    /// decision: replacement options should already be there on every card).
+    /// Capped at three to bound memory across a large library; the VA-artist
+    /// dead end is blanked, and covered albums get candidates too.
+    private func fetchCovers(for id: String, art: AlbumArtContext) async {
+        let artist = Organiser.artistKey(art.artist) == "variousartists" ? "" : art.artist
+        let album = art.album.isEmpty ? (cards.first(where: { $0.id == id })?.album ?? "") : art.album
+        guard !album.isEmpty else { return }
+        let found = await CoverArtClient().candidates(releaseMBIDs: [], artist: artist, album: album)
+        update(id) { c in
+            c.onlineCovers = Array(found.prefix(3))
+            c.coverSearched = true
+        }
     }
 
     private func setState(_ id: String, _ s: AlbumState) { update(id) { $0.state = s } }
@@ -837,9 +856,7 @@ struct AlbumCardView: View {
     let root: URL?
     let store: PerfectStore
     @State private var previewCover: Data?
-    @State private var online: [Data] = []
     @State private var searching = false
-    @State private var searched = false
     @State private var selectedCover: Data?
     @State private var queryArtist = ""
     @State private var queryAlbum = ""
@@ -992,11 +1009,11 @@ struct AlbumCardView: View {
                         CoverThumb(data: own, selected: selectedCover == own, badge: "current")
                             .onTapGesture { selectedCover = own; previewCover = own }
                     }
-                    ForEach(Array(online.enumerated()), id: \.offset) { _, data in
+                    ForEach(Array(card.onlineCovers.enumerated()), id: \.offset) { _, data in
                         CoverThumb(data: data, selected: selectedCover == data, badge: "online")
                             .onTapGesture { selectedCover = data; previewCover = data }
                     }
-                    if !searched {
+                    if !card.coverSearched {
                         Button {
                             search()
                         } label: {
@@ -1004,7 +1021,7 @@ struct AlbumCardView: View {
                             else { Label("Find covers online", systemImage: "magnifyingglass") }
                         }
                         .controlSize(.small).disabled(searching)
-                    } else if online.isEmpty {
+                    } else if card.onlineCovers.isEmpty {
                         Text("nothing found — edit the search below").font(.caption).foregroundStyle(.tertiary)
                     }
                 }
@@ -1020,7 +1037,7 @@ struct AlbumCardView: View {
                 }
             }
         }
-        if searched {
+        if card.coverSearched {
             HStack(spacing: 6) {
                 TextField("Artist", text: $queryArtist).textFieldStyle(.roundedBorder)
                     .font(.caption).frame(width: 160)
@@ -1049,7 +1066,11 @@ struct AlbumCardView: View {
         let a = queryArtist, al = queryAlbum
         Task {
             let found = await CoverArtClient().candidates(releaseMBIDs: [], artist: a, album: al)
-            await MainActor.run { online = found; searching = false; searched = true }
+            await MainActor.run {
+                card.onlineCovers = Array(found.prefix(6))   // manual search may go wider
+                card.coverSearched = true
+                searching = false
+            }
         }
     }
 }
