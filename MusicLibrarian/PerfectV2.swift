@@ -91,13 +91,17 @@ final class PerfectV2Driver: ObservableObject {
             // can return either form on different runs, so auto-applying them
             // oscillates A→B→A forever; a verdict settles them once.
             // Compilation flagging is Phase 1's confirm checklist, never silent.
-            if let idFix = fixes.first(where: { $0.kind == .identify && $0.applyable }),
-               idFix.proposals.contains(where: {
-                   $0.dominantNameKind == .substantive
-                   || TrackProposal.nameVariant($0.curTitle, $0.newTitle)
-                   || TrackProposal.nameVariant($0.curArtist, $0.newArtist)
-               }) {
-                deferred.append(DeferredAlbum(dir: album.dir, files: album.files, fix: idFix))
+            let verdictFix = fixes.first { f in
+                if f.kind == .identify, f.applyable,
+                   f.proposals.contains(where: {
+                       $0.dominantNameKind == .substantive
+                       || TrackProposal.nameVariant($0.curTitle, $0.newTitle)
+                       || TrackProposal.nameVariant($0.curArtist, $0.newArtist)
+                   }) { return true }
+                return f.speculative && f.applyable   // e.g. a text-searched album name
+            }
+            if let vf = verdictFix {
+                deferred.append(DeferredAlbum(dir: album.dir, files: album.files, fix: vf))
                 continue
             }
             if await applyTierOne(fixes, root: root, session: session,

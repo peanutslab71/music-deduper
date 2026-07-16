@@ -302,10 +302,12 @@ here too** *(was lost with the step-1 findings panel)* as an info-only section.
 are GATED on capability parity, not just the checklist. The old wizard still
 uniquely provides capabilities v2 lacks; it stays as the shipping path until
 v2 has:
-- **6a. Album-name resolution** — consume the album side of identify
-  (`chosenAlbum`/candidates + folder consensus + `Identifier.searchAlbum`, as
-  batch `reconcileAlbums` did), substantive album changes routed to review.
-  Blank-album files currently sit flagged and unrescued in v2.
+- **6a. Album-name resolution** — ✅ DONE (2026-07-16): a folder with no real
+  album tag rescues its name from the identify pass's release placements
+  (fingerprint-backed, ≥60% agreement → fills like a consensus) or, failing
+  that, a MusicBrainz text search over up to three tracks (≥2 agree →
+  SPECULATIVE: an AlbumFix marked `speculative`, never auto-applied — the v2
+  driver defers the album for an Accept/Keep verdict).
 - **6b. Cover art surface** — the roll-up's cover chooser (fill missing,
   choose/replace, unify; front-cover promotion is already plumbed).
 - **6c. DRM manifest surface** — the findings list died with the wizard

@@ -1578,6 +1578,7 @@ struct AlbumFix: Identifiable {
     var enabled: Bool                    // checklist toggle
     let applyable: Bool                  // false = information only (e.g. damaged)
     var needsDiscOrder = false           // built from release-corrected numbers → invalid without the disc fix
+    var speculative = false              // a lookup GUESS (e.g. text-searched album) — verdict required, never auto-applied
     var tagWrites: [(rel: String, field: String, value: String)] = []
     var moves: [(from: String, to: String)] = []
     var artEmbeds: [(rel: String, image: Data, mime: String)] = []
@@ -1680,6 +1681,7 @@ enum AlbumPerfect {
         var idWrites: [(rel: String, field: String, value: String)] = []
         var idLines: [String] = []
         var idProposals: [TrackProposal] = []
+        var albumVotes: [String] = []   // release names the identify pass placed tracks on
         var recIDByRel: [String: String] = [:]   // rel → MusicBrainz recording id (for credit enrichment)
         var seedRecID: String?
         let acoustIDKey = Identifier.configuredKey
@@ -1710,6 +1712,9 @@ enum AlbumPerfect {
                     proposed = true
                 }
                 if proposed { idProposals.append(p) }   // retained for the v2 review roll-up
+                if !p.chosenAlbum.isEmpty, !Organiser.isPlaceholderAlbum(p.chosenAlbum) {
+                    albumVotes.append(p.chosenAlbum)    // for the blank-album rescue below
+                }
             }
         }
 
@@ -1780,10 +1785,40 @@ enum AlbumPerfect {
             return (fixes, AlbumArtContext(artist: "", album: fallbackAlbum, rels: [], relArt: [:], ownCovers: []), nil)
         }
 
-        // ---- 2. Album name consensus.
+        // ---- 2. Album name consensus — and, when the folder has NO real album tag
+        // anywhere, album-name RESCUE (plan 6a, ported from batch reconcileAlbums):
+        // first from the identify pass's release placements (fingerprint-backed →
+        // fills like a consensus), else a MusicBrainz text search on a few tracks
+        // (speculative — a song can be on several releases → review verdict, never
+        // written silently).
         let albumRaw = kept.map { $0.album }
         let realAlbums = albumRaw.filter { !$0.isEmpty && !Organiser.isPlaceholderAlbum($0) }
-        let dominantAlbum = Organiser.canonicalAlbumDisplay(realAlbums.isEmpty ? albumRaw : realAlbums)
+        var dominantAlbum = Organiser.canonicalAlbumDisplay(realAlbums.isEmpty ? albumRaw : realAlbums)
+        var albumSource = ""
+        var speculativeAlbum: String? = nil
+        if realAlbums.isEmpty {
+            if Organiser.isPlaceholderAlbum(dominantAlbum) { dominantAlbum = "" }
+            let voteCounts = Dictionary(grouping: albumVotes, by: { Organiser.fold($0) }).mapValues { $0.count }
+            if let top = voteCounts.max(by: { $0.value < $1.value }),
+               Double(top.value) >= 0.6 * Double(kept.count),
+               let name = albumVotes.first(where: { Organiser.fold($0) == top.key }) {
+                dominantAlbum = name
+                albumSource = " (from the identified release)"
+            } else if runIdentify {
+                let ident = Identifier(apiKey: acoustIDKey)
+                var found: [String] = []
+                for t in kept.prefix(3) where !t.artist.isEmpty && !t.title.isEmpty {
+                    if let alb = await ident.searchAlbum(artist: t.artist, title: t.title),
+                       !Organiser.isPlaceholderAlbum(alb) { found.append(alb) }
+                    try? await Task.sleep(nanoseconds: 1_050_000_000)
+                }
+                let fCounts = Dictionary(grouping: found, by: { Organiser.fold($0) }).mapValues { $0.count }
+                if let top = fCounts.max(by: { $0.value < $1.value }), top.value >= 2,
+                   let name = found.first(where: { Organiser.fold($0) == top.key }) {
+                    speculativeAlbum = name   // ≥2 of 3 tracks agree — still confirm-first
+                }
+            }
+        }
         if !dominantAlbum.isEmpty {
             var writes: [(rel: String, field: String, value: String)] = []
             var lines: [String] = []
@@ -1792,9 +1827,15 @@ enum AlbumPerfect {
                 lines.append("“\(t.title)”: \(t.album.isEmpty ? "—" : t.album) → \(dominantAlbum)")
             }
             if !writes.isEmpty {
-                fixes.append(AlbumFix(kind: .album, summary: "Set album to “\(dominantAlbum)” on \(writes.count) track\(writes.count == 1 ? "" : "s")",
+                fixes.append(AlbumFix(kind: .album, summary: "Set album to “\(dominantAlbum)”\(albumSource) on \(writes.count) track\(writes.count == 1 ? "" : "s")",
                                       lines: lines, enabled: true, applyable: true, tagWrites: writes))
             }
+        } else if let suggestion = speculativeAlbum {
+            fixes.append(AlbumFix(kind: .album,
+                                  summary: "Album looks like “\(suggestion)” (MusicBrainz suggestion) — confirm before it's written",
+                                  lines: kept.map { "“\($0.title)”: — → \(suggestion)" },
+                                  enabled: false, applyable: true, speculative: true,
+                                  tagWrites: kept.map { (rel($0.url), "album", suggestion) }))
         }
 
         // ---- 3. Compilation vs album-artist consensus (mutually exclusive).
