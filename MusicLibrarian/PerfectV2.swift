@@ -1241,11 +1241,11 @@ struct TrackDecisionRow: View {
             Text(String(format: "%.2f", p.score))
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(decision.risky ? Color.orange : Color.secondary)
-            Button { audio.toggle(p.url) } label: {
+            Button { audio.toggleSample(p.url) } label: {
                 Image(systemName: audio.playingURL == p.url ? "stop.circle.fill" : "play.circle")
                     .foregroundStyle(audio.playingURL == p.url ? Color.red : Color.teal)
             }
-            .buttonStyle(.plain).help("Play your file")
+            .buttonStyle(.plain).help("Play a 30-second sample of your file")
             Button { playProposed() } label: {
                 if previewLoading { ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 16, height: 16) }
                 else {
@@ -1331,11 +1331,11 @@ struct EarChoiceRow: View {
         HStack(spacing: 8) {
             if let rootURL {
                 let url = rootURL.appendingPathComponent(rel)
-                Button { audio.toggle(url) } label: {
+                Button { audio.toggleSample(url) } label: {
                     Image(systemName: audio.playingURL == url ? "stop.circle.fill" : "play.circle")
                         .foregroundStyle(audio.playingURL == url ? Color.red : Color.teal)
                 }
-                .buttonStyle(.plain).help("Play copy \(label)")
+                .buttonStyle(.plain).help("Play a 30-second sample of copy \(label)")
             }
             Text(label).font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary)
             Text(info).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
