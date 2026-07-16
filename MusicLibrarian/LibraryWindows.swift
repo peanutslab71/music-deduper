@@ -2377,6 +2377,11 @@ struct CoverThumb: View {   // shared with the Perfect v2 cover surface
             } else {
                 Text(" ").font(.system(size: 8))
             }
+            // resolution under EVERY cover (current included) — the deciding
+            // fact when choosing between visually identical candidates
+            Text(pixels.map { "\($0.w)×\($0.h)" } ?? "—")
+                .font(.system(size: 8, weight: .regular).monospacedDigit())
+                .foregroundStyle(.tertiary)
         }
         .contentShape(Rectangle())
     }
