@@ -718,7 +718,8 @@ struct PerfectV2View: View {
     }
 
     @ViewBuilder private func frameImage(_ c: PerfectV2Driver.AlbumCardModel) -> some View {
-        if let data = c.thumb, let img = NSImage(data: data) {
+        // a queued cover pick shows immediately, here and on the card
+        if let data = c.chosenCover ?? c.thumb, let img = NSImage(data: data) {
             Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
         } else {
             ZStack {
