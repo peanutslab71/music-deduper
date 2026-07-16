@@ -3445,6 +3445,7 @@ final class PerfectStore: ObservableObject {
         let artPromotions = run.artPromotions, artReplacements = run.artReplacements
         let fm = FileManager.default
         var restored = 0, failed = 0
+        var failLog: [String] = []   // exactly which restores failed, for the revert archive
 
         // merge-aware restore: never clobber an existing directory (the emptied
         // source folder of a merge is restored into one the file-restores have
@@ -3485,7 +3486,7 @@ final class PerfectStore: ObservableObject {
             let from = root.appendingPathComponent(op.to)     // where it is now
             let to = root.appendingPathComponent(op.from)      // where it belongs
             guard fm.fileExists(atPath: from.path) else { continue }
-            if restore(from, to) { restored += 1 } else { failed += 1 }
+            if restore(from, to) { restored += 1 } else { failed += 1; failLog.append("move-back failed: \(op.to) → \(op.from)") }
         }
 
         // restore tag rewrites — the files are back at their original paths now, so
@@ -3496,8 +3497,11 @@ final class PerfectStore: ObservableObject {
         // intermediate value on disk.
         for edit in tagEdits.reversed() {
             let url = root.appendingPathComponent(edit.rel)
-            guard fm.fileExists(atPath: url.path) else { failed += 1; continue }
-            do { try Self.writeField(url, edit.field, to: edit.old); restored += 1 } catch { failed += 1 }
+            guard fm.fileExists(atPath: url.path) else {
+                failed += 1; failLog.append("tag restore MISSING FILE: \(edit.rel) [\(edit.field)]"); continue
+            }
+            do { try Self.writeField(url, edit.field, to: edit.old); restored += 1 }
+            catch { failed += 1; failLog.append("tag restore FAILED: \(edit.rel) [\(edit.field)] ← '\(edit.old)': \(error.localizedDescription)") }
         }
         // remove any performer credits this run added
         for edit in perfEdits {
@@ -3545,6 +3549,24 @@ final class PerfectStore: ObservableObject {
                 for junk in contents { try? fm.removeItem(at: dir.appendingPathComponent(junk)) }
                 try? fm.removeItem(at: dir)
             }
+        }
+        // Archive the run's audit trail BEFORE removing its quarantine folder —
+        // deleting the changelog with the run destroyed the only forensic record
+        // of what a revert actually did (and what it failed to restore).
+        if let base = try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                  appropriateFor: nil, create: true) {
+            let arch = base.appendingPathComponent("Music Librarian/reverted-runs/\(folder.lastPathComponent)",
+                                                   isDirectory: true)
+            try? fm.createDirectory(at: arch, withIntermediateDirectories: true)
+            for name in ["run.json", "changelog.txt"] {
+                try? fm.copyItem(at: folder.appendingPathComponent(name),
+                                 to: arch.appendingPathComponent(name))
+            }
+            let result = "reverted \(Date())\nlibrary: \(root.path)\nsummary: \(run.summary)\n"
+                + "restored: \(restored)  failed: \(failed)\n"
+                + (failLog.isEmpty ? "" : "\nFAILURES:\n" + failLog.joined(separator: "\n") + "\n")
+            try? result.write(to: arch.appendingPathComponent("revert-result.txt"),
+                              atomically: true, encoding: .utf8)
         }
         try? fm.removeItem(at: folder)
         let qroot = root.appendingPathComponent("Music Librarian Quarantine")
