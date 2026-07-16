@@ -524,13 +524,19 @@ final class AudioPreview: NSObject, ObservableObject, AVAudioPlayerDelegate {
     /// than fail silently (playback jumps to the next playable track).
     static func isPlayable(_ url: URL) -> Bool { url.pathExtension.lowercased() != "m4p" }
 
-    /// Play only the first N seconds — the A/B audition sample, so your file and
-    /// the ~30s online preview compare like-for-like. Toggling again stops early.
-    func toggleSample(_ url: URL, seconds: TimeInterval = 30) {
+    /// Play an N-second audition sample, optionally starting mid-track. The A/B
+    /// point: press one, press the other, and it's immediately obvious whether
+    /// they're the same recording — so both sides should cover the SAME zone.
+    /// Local-vs-local pairs align exactly; against a provider preview (whose
+    /// window is the provider's choice, usually a mid-track highlight) starting
+    /// ~30s in lands in the same neighbourhood. Toggling again stops early.
+    func toggleSample(_ url: URL, seconds: TimeInterval = 30, startAt: TimeInterval = 0) {
         let wasPlaying = playingURL == url
         sampleTimer?.invalidate(); sampleTimer = nil
         toggle(url)
         if !wasPlaying, playingURL == url {
+            // only skip in when there's enough track to make it meaningful
+            if startAt > 0, let pl = player, pl.duration > startAt + 15 { pl.currentTime = startAt }
             sampleTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self, self.playingURL == url else { return }

@@ -1241,7 +1241,7 @@ struct TrackDecisionRow: View {
             Text(String(format: "%.2f", p.score))
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(decision.risky ? Color.orange : Color.secondary)
-            Button { audio.toggleSample(p.url) } label: {
+            Button { audio.toggleSample(p.url, startAt: 30) } label: {
                 Image(systemName: audio.playingURL == p.url ? "stop.circle.fill" : "play.circle")
                     .foregroundStyle(audio.playingURL == p.url ? Color.red : Color.teal)
             }
@@ -1331,7 +1331,7 @@ struct EarChoiceRow: View {
         HStack(spacing: 8) {
             if let rootURL {
                 let url = rootURL.appendingPathComponent(rel)
-                Button { audio.toggleSample(url) } label: {
+                Button { audio.toggleSample(url, startAt: 30) } label: {
                     Image(systemName: audio.playingURL == url ? "stop.circle.fill" : "play.circle")
                         .foregroundStyle(audio.playingURL == url ? Color.red : Color.teal)
                 }
