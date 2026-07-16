@@ -39,6 +39,13 @@ final class PerfectV2Driver: ObservableObject {
 
     enum AlbumState { case pending, analyzing, clean, needs }
 
+    /// One tag the session changed (or will change) on this album — the card's
+    /// visible diff: field, what it said, what it says now.
+    struct TagChange: Identifiable {
+        let rel: String, field: String, old: String, new: String
+        var id: String { rel + "|" + field }
+    }
+
     /// One track's pending name decision. The default flips with confidence:
     /// a high-score, non-variant proposal pre-selects Accept; a risky one Keep.
     struct TrackDecision: Identifiable {
@@ -75,7 +82,8 @@ final class PerfectV2Driver: ObservableObject {
         var state: AlbumState = .pending
         var facts = ""                                     // tracks · format · genre · year
         var thumb: Data? = nil                             // first embedded cover
-        var trackList: [(no: String, title: String)] = []  // read-only tag view
+        var trackList: [(no: String, title: String, artist: String)] = []  // read-only tag view
+        var tagChanges: [TagChange] = []                   // the session's old→new diff for this album
         // decision payloads (present when state == .needs)
         var decisions: [TrackDecision] = []
         var albumSuggestion: AlbumFix? = nil               // speculative album-name guess (6a)
@@ -157,7 +165,7 @@ final class PerfectV2Driver: ObservableObject {
             card.trackList = ts.map { t in
                 let no = t.discNo > 1 ? "\(t.discNo)-\(Organiser.pad2(t.trackNo))"
                         : (t.trackNo > 0 ? Organiser.pad2(t.trackNo) : "–")
-                return (no, t.title.isEmpty ? Organiser.titleFromFilename(t.rel) : t.title)
+                return (no, t.title.isEmpty ? Organiser.titleFromFilename(t.rel) : t.title, t.artist)
             }
             return card
         }
@@ -262,7 +270,8 @@ final class PerfectV2Driver: ObservableObject {
                 continue   // deferred whole — dependent fixes wait for the verdicts
             }
             let didApply = await applyTierOne(tierFixes, root: root, session: session,
-                                              name: card.album, doesRenames: thoroughness.doesRenames)
+                                              name: card.album, doesRenames: thoroughness.doesRenames,
+                                              cardID: card.id)
             if didApply { applied += 1 } else { clean += 1 }
             update(card.id) { c in
                 c.art = art
@@ -337,8 +346,10 @@ final class PerfectV2Driver: ObservableObject {
     /// Apply an album's Tier-1 fix set (one reversible run): enabled defaults
     /// honored, compilation flagging excluded (Phase-1 checklist), dependent
     /// renames dropped when the disc fix isn't applied.
+    /// Returns whether anything applied, plus the old→new tag diff for the card.
+    @discardableResult
     private func applyTierOne(_ fixes: [AlbumFix], root: URL, session: String, name: String,
-                              doesRenames: Bool = true) async -> Bool {
+                              doesRenames: Bool = true, cardID: String? = nil) async -> Bool {
         let discOn = fixes.contains { $0.kind == .discOrder && $0.applyable && $0.enabled }
         let chosen = fixes.filter { f in
             f.applyable && f.enabled
@@ -347,13 +358,22 @@ final class PerfectV2Driver: ObservableObject {
             && !(f.needsDiscOrder && !discOn)
         }
         guard !chosen.isEmpty else { return false }
+        let writes = chosen.flatMap { $0.tagWrites }
+        // capture the OLDs before writing, so the card can show the diff
+        let changes: [TagChange] = await Task.detached {
+            writes.compactMap { w in
+                let old = PerfectStore.readField(root.appendingPathComponent(w.rel), w.field) ?? ""
+                return old == w.value ? nil : TagChange(rel: w.rel, field: w.field, old: old, new: w.value)
+            }
+        }.value
         await PerfectStore.performLibraryOps(
             root: root, summary: "Perfect v2 — \(name)",
-            tagWrites: chosen.flatMap { $0.tagWrites },
+            tagWrites: writes,
             moves: chosen.flatMap { $0.moves },
             artEmbeds: chosen.flatMap { $0.artEmbeds },
             performerAdds: chosen.flatMap { $0.performerAdds },
             sessionID: session)
+        if let cardID, !changes.isEmpty { update(cardID) { $0.tagChanges += changes } }
         return true
     }
 
@@ -386,8 +406,19 @@ final class PerfectV2Driver: ObservableObject {
             }
             if !keptKeys.isEmpty { KeptNamesStore.add(card.dir.path, keptKeys) }
             if !writes.isEmpty {
+                var nameChanges: [TagChange] = []
+                for t in card.decisions where t.accept {
+                    let p = t.proposal
+                    if !p.newTitle.isEmpty, p.newTitle != p.curTitle {
+                        nameChanges.append(TagChange(rel: p.relPath, field: "title", old: p.curTitle, new: p.newTitle))
+                    }
+                    if !p.newArtist.isEmpty, p.newArtist != p.curArtist {
+                        nameChanges.append(TagChange(rel: p.relPath, field: "artist", old: p.curArtist, new: p.newArtist))
+                    }
+                }
                 await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — names for \(card.album)",
                                                      tagWrites: writes, moves: [], sessionID: session)
+                if !nameChanges.isEmpty { update(card.id) { $0.tagChanges += nameChanges } }
             }
             if !card.decisions.isEmpty || card.albumSuggestion != nil {
                 // dependent fixes from the settled tags — identify pinned off: the
@@ -397,8 +428,8 @@ final class PerfectV2Driver: ObservableObject {
                                                                          reconciledMatch: cached,
                                                                          runIdentify: false)
                 if let r = reconcile { AlbumReconcileStore.save(card.dir.path, r) }
-                _ = await applyTierOne(fixes, root: root, session: session, name: card.album,
-                                       doesRenames: doesRenames)
+                await applyTierOne(fixes, root: root, session: session, name: card.album,
+                                   doesRenames: doesRenames, cardID: card.id)
                 update(card.id) { $0.art = art }
             }
             // by-ear verdicts: keep-A/keep-B quarantine the loser; keep-both persists
@@ -889,11 +920,28 @@ struct AlbumCardView: View {
                 block("Duplicates — the same recording elsewhere") { earBlock }
             }
             DisclosureGroup {
-                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 3) {
-                    ForEach(Array(card.trackList.enumerated()), id: \.offset) { _, t in
-                        GridRow {
-                            Text(t.no).font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
-                            Text(t.title).font(.caption)
+                VStack(alignment: .leading, spacing: 6) {
+                    if !card.tagChanges.isEmpty {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("CHANGED THIS SESSION").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+                            ForEach(groupedChanges, id: \.self) { line in
+                                (Text(line.prefix).foregroundColor(.secondary)
+                                 + Text(line.old.isEmpty ? "—" : line.old).strikethrough().foregroundColor(.red.opacity(0.8))
+                                 + Text("  →  ").foregroundColor(.secondary)
+                                 + Text(line.new).foregroundColor(.teal).bold())
+                                    .font(.caption)
+                            }
+                        }
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.06)))
+                    }
+                    Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 3) {
+                        ForEach(Array(card.trackList.enumerated()), id: \.offset) { _, t in
+                            GridRow {
+                                Text(t.no).font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
+                                Text(t.title).font(.caption)
+                                Text(t.artist).font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
@@ -903,6 +951,25 @@ struct AlbumCardView: View {
             }
         }
         .padding(.horizontal, 10)
+    }
+
+    struct ChangeLine: Hashable { let prefix: String; let old: String; let new: String }
+    private var groupedChanges: [ChangeLine] {
+        var byKey: [String: [PerfectV2Driver.TagChange]] = [:]
+        for c in card.tagChanges { byKey["\(c.field)|\(c.old)|\(c.new)", default: []].append(c) }
+        var out: [ChangeLine] = []
+        for (_, group) in byKey.sorted(by: { $0.key < $1.key }) {
+            let c = group[0]
+            if group.count >= max(card.trackList.count, 1) || group.count > 3 {
+                out.append(ChangeLine(prefix: "\(c.field) (\(group.count) tracks): ", old: c.old, new: c.new))
+            } else {
+                for g in group {
+                    let name = (g.rel as NSString).lastPathComponent
+                    out.append(ChangeLine(prefix: "\(g.field) · \(name): ", old: g.old, new: g.new))
+                }
+            }
+        }
+        return out
     }
 
     private var bigCover: some View {
