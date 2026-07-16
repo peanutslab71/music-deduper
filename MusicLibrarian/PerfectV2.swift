@@ -27,7 +27,8 @@ extension PerfectStore {
 /// work runs off-main, one album at a time, cancellable between albums.
 @MainActor
 final class PerfectV2Driver: ObservableObject {
-    @Published var running = false
+    @Published var running = false       // the analysis pipeline
+    @Published var applying = false      // the decisions batch
     @Published var progress = ""
     @Published var lines: [String] = []          // session log
     @Published var cards: [AlbumCardModel] = []  // EVERY album — the library itself
@@ -80,6 +81,7 @@ final class PerfectV2Driver: ObservableObject {
         var albumSuggestion: AlbumFix? = nil               // speculative album-name guess (6a)
         var acceptAlbum = false                            // a guess defaults to NOT accepted
         var earChoices: [EarChoice] = []
+        var chosenCover: Data? = nil                       // queued cover pick — applies with the batch
         // artwork: rels + which have art (set after analyze; the chooser is
         // available on every analyzed card — replace is backed up + undoable)
         var art: AlbumArtContext? = nil
@@ -91,7 +93,7 @@ final class PerfectV2Driver: ObservableObject {
             return art.rels.filter { art.relArt[$0] == nil }
         }
         var hasPendingDecisions: Bool {
-            !decisions.isEmpty || albumSuggestion != nil || !earChoices.isEmpty
+            !decisions.isEmpty || albumSuggestion != nil || !earChoices.isEmpty || chosenCover != nil
         }
     }
 
@@ -340,9 +342,9 @@ final class PerfectV2Driver: ObservableObject {
 
     func applyDecisions(root: URL, store: PerfectStore) async {
         let queue = cards.filter { $0.hasPendingDecisions }
-        guard !running, !queue.isEmpty else { return }
-        running = true
-        defer { running = false; progress = ""; store.loadRuns() }
+        guard !running, !applying, !queue.isEmpty else { return }
+        applying = true
+        defer { applying = false; progress = ""; store.loadRuns() }
         let session = sessionID ?? UUID().uuidString
         sessionID = session
         let doesRenames = store.thoroughness.doesRenames
@@ -395,8 +397,37 @@ final class PerfectV2Driver: ObservableObject {
                 await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — duplicate decisions (\(card.album))",
                                                      tagWrites: [], moves: quarantines, sessionID: session)
             }
+            // queued cover pick — fills gaps, or replaces (backed up) on covered albums
+            if let img = card.chosenCover, let art = cards.first(where: { $0.id == card.id })?.art ?? card.art {
+                let mime = img.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
+                let fm = FileManager.default
+                let captured = card.missingArtRels.isEmpty ? art.rels : card.missingArtRels
+                var targets: [String] = []
+                var lost = 0
+                for rel in captured {
+                    if fm.fileExists(atPath: root.appendingPathComponent(rel).path) { targets.append(rel); continue }
+                    let candidate = card.dir.appendingPathComponent((rel as NSString).lastPathComponent)
+                    if fm.fileExists(atPath: candidate.path) { targets.append(PerfectStore.rel(candidate, root)) }
+                    else { lost += 1 }
+                }
+                if lost > 0 { lines.append("Cover: \(lost) track(s) moved since the scan — run again to pick them up") }
+                if !targets.isEmpty {
+                    await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — cover for \(card.album)",
+                                                         tagWrites: [], moves: [],
+                                                         artEmbeds: targets.map { ($0, img, mime) },
+                                                         sessionID: session)
+                    update(card.id) { c in
+                        c.thumb = img
+                        if var a = c.art {
+                            for rel in targets { a.relArt[rel] = (0, img.count) }
+                            c.art = a
+                        }
+                    }
+                    lines.append("Cover set on \(targets.count) track\(targets.count == 1 ? "" : "s") — \(card.album)")
+                }
+            }
             update(card.id) { c in
-                c.decisions = []; c.albumSuggestion = nil; c.earChoices = []
+                c.decisions = []; c.albumSuggestion = nil; c.earChoices = []; c.chosenCover = nil
                 c.state = c.missingArtRels.isEmpty ? .clean : .needs
             }
             lines.append("Decisions applied — \(card.artist) — \(card.album)")
@@ -404,44 +435,6 @@ final class PerfectV2Driver: ObservableObject {
         ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
     }
 
-    /// Set a cover — fills blank tracks when the album has gaps, REPLACES (backed
-    /// up, undoable) when the user picked one for a fully-covered album. Targets
-    /// are remapped by filename if the session's later passes moved files.
-    func applyCover(_ cardID: String, image: Data, root: URL, store: PerfectStore) async {
-        guard !running, let card = cards.first(where: { $0.id == cardID }), let art = card.art else { return }
-        running = true
-        defer { running = false; progress = ""; store.loadRuns() }
-        let session = sessionID ?? UUID().uuidString
-        sessionID = session
-        progress = "Setting cover — \(card.album)"
-        let mime = image.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
-        let fm = FileManager.default
-        let captured = card.missingArtRels.isEmpty ? art.rels : card.missingArtRels
-        var targets: [String] = []
-        var lost = 0
-        for rel in captured {
-            if fm.fileExists(atPath: root.appendingPathComponent(rel).path) { targets.append(rel); continue }
-            let candidate = card.dir.appendingPathComponent((rel as NSString).lastPathComponent)
-            if fm.fileExists(atPath: candidate.path) { targets.append(PerfectStore.rel(candidate, root)) }
-            else { lost += 1 }
-        }
-        if lost > 0 { lines.append("Cover: \(lost) track(s) moved since the scan — run again to pick them up") }
-        guard !targets.isEmpty else { return }
-        await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — cover for \(card.album)",
-                                             tagWrites: [], moves: [],
-                                             artEmbeds: targets.map { ($0, image, mime) },
-                                             sessionID: session)
-        update(cardID) { c in
-            c.thumb = image
-            if var a = c.art {
-                for rel in targets { a.relArt[rel] = (0, image.count) }
-                c.art = a
-            }
-            if !c.hasPendingDecisions { c.state = .clean }
-        }
-        lines.append("Cover set on \(targets.count) track\(targets.count == 1 ? "" : "s") — \(card.album)")
-        ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
-    }
 
     // MARK: cross-album dedup sweep
 
@@ -587,20 +580,20 @@ struct PerfectV2View: View {
             }
             .pickerStyle(.segmented).labelsHidden().frame(width: 280)
             .onChange(of: needsOnly) { _ in cardIndex = 0 }
-            Button("Choose Library…") { choose() }.disabled(driver.running)
+            Button("Choose Library…") { choose() }.disabled(driver.running || driver.applying)
             if driver.running {
                 Button("Cancel") { driver.cancel() }
             } else {
                 Button("Run") { if let root { Task { await driver.run(root: root, store: perfect) } } }
                     .buttonStyle(.borderedProminent).tint(.purple)
-                    .disabled(root == nil || driver.cards.isEmpty)
+                    .disabled(root == nil || driver.cards.isEmpty || driver.applying)
             }
         }
         .padding(10)
     }
 
     @ViewBuilder private var statusline: some View {
-        if driver.running {
+        if driver.running || driver.applying {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
                 Text(driver.progress).font(.caption).foregroundStyle(.purple)
@@ -743,15 +736,17 @@ struct PerfectV2View: View {
                 if !pending.isEmpty {
                     let accepts = pending.reduce(0) { $0 + $1.decisions.filter(\.accept).count
                         + $1.earChoices.filter { $0.verdict != .keepBoth }.count
-                        + ($1.albumSuggestion != nil && $1.acceptAlbum ? 1 : 0) }
+                        + ($1.albumSuggestion != nil && $1.acceptAlbum ? 1 : 0)
+                        + ($1.chosenCover != nil ? 1 : 0) }
                     Text("\(pending.count) album\(pending.count == 1 ? "" : "s") · \(accepts) change\(accepts == 1 ? "" : "s") accepted")
                         .fontWeight(.medium)
                 }
-                Text("nothing is written until you apply · every run undoable from Runs")
+                Text(driver.running ? "decide freely — Apply unlocks when the run finishes"
+                                    : "nothing is written until you apply · every run undoable from Runs")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Revert library…", role: .destructive) { confirmRevert = true }
-                    .disabled(driver.running || perfect.busy || root == nil)
+                    .disabled(driver.running || driver.applying || perfect.busy || root == nil)
                     .confirmationDialog("Revert this library to before Perfect ran?",
                                         isPresented: $confirmRevert, titleVisibility: .visible) {
                         Button("Revert everything", role: .destructive) {
@@ -765,7 +760,7 @@ struct PerfectV2View: View {
                         if let root { Task { await driver.applyDecisions(root: root, store: perfect) } }
                     }
                     .buttonStyle(.borderedProminent).tint(.teal)
-                    .disabled(driver.running || root == nil)
+                    .disabled(driver.running || driver.applying || root == nil)
                 }
             }
             .padding(10)
@@ -874,7 +869,7 @@ struct AlbumCardView: View {
 
     private var bigCover: some View {
         ZStack {
-            if let data = previewCover ?? card.thumb, let img = NSImage(data: data) {
+            if let data = previewCover ?? card.chosenCover ?? card.thumb, let img = NSImage(data: data) {
                 Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
             } else {
                 Rectangle().fill(Color.secondary.opacity(0.1))
@@ -925,12 +920,12 @@ struct AlbumCardView: View {
         if card.decisions.count > 1 {
             HStack {
                 Spacer()
-                Button("Accept all") { setAll(true) }.controlSize(.small).disabled(driver.running)
-                Button("Keep all") { setAll(false) }.controlSize(.small).disabled(driver.running)
+                Button("Accept all") { setAll(true) }.controlSize(.small).disabled(driver.applying)
+                Button("Keep all") { setAll(false) }.controlSize(.small).disabled(driver.applying)
             }
         }
         ForEach($card.decisions) { $d in
-            TrackDecisionRow(decision: $d, busy: driver.running)
+            TrackDecisionRow(decision: $d, busy: driver.applying)
         }
         if let s = card.albumSuggestion {
             HStack(spacing: 8) {
@@ -943,7 +938,7 @@ struct AlbumCardView: View {
                     Text("Keep blank").tag(false)
                 }
                 .pickerStyle(.segmented).labelsHidden().frame(width: 150)
-                .disabled(driver.running)
+                .disabled(driver.applying)
             }
         }
     }
@@ -956,7 +951,7 @@ struct AlbumCardView: View {
 
     private var earBlock: some View {
         ForEach($card.earChoices) { $c in
-            EarChoiceRow(choice: $c, rootURL: root, busy: driver.running)
+            EarChoiceRow(choice: $c, rootURL: root, busy: driver.applying)
         }
     }
 
@@ -995,11 +990,14 @@ struct AlbumCardView: View {
                 }
             }
             if let sel = selectedCover, sel != card.thumb {
-                Button("Use this cover") {
-                    if let root { Task { await driver.applyCover(card.id, image: sel, root: root, store: store) } }
+                if card.chosenCover == sel {
+                    Label("Queued — applies with decisions", systemImage: "checkmark.circle.fill")
+                        .font(.caption).foregroundStyle(.teal)
+                } else {
+                    Button("Use this cover") { card.chosenCover = sel }
+                        .buttonStyle(.borderedProminent).tint(.teal)
+                        .controlSize(.small).disabled(driver.applying)
                 }
-                .buttonStyle(.borderedProminent).tint(.teal)
-                .controlSize(.small).disabled(driver.running || root == nil)
             }
         }
         if searched {
