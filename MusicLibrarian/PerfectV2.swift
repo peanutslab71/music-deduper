@@ -17,8 +17,12 @@ import SwiftUI
 import MDTagShim
 
 extension PerfectStore {
-    /// The v2 rollout flag (plan step 5/7). Hidden: set via `defaults write`.
-    static var perfectV2Enabled: Bool { UserDefaults.standard.bool(forKey: "perfectV2") }
+    /// Perfect v2 is the shipping path (plan step 7, flipped 2026-07-16). The
+    /// legacy wizard remains reachable while step 8 (deletion) stays gated:
+    ///   defaults write com.local.musiclibrarian perfectV2 -bool NO
+    static var perfectV2Enabled: Bool {
+        (UserDefaults.standard.object(forKey: "perfectV2") as? Bool) ?? true
+    }
 }
 
 // MARK: - Driver
@@ -621,12 +625,27 @@ enum KeptNamesStore {
 
 /// The library-first carousel: every album is a card the moment a library is
 /// chosen; Run analyzes them live in place; decisions accumulate and batch-apply.
+/// Hands the hosting NSWindow back to SwiftUI — the key monitor needs to know
+/// which window "ours" is regardless of where the view is embedded.
+private struct WindowGrabber: NSViewRepresentable {
+    let onWindow: (NSWindow?) -> Void
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { [weak v] in onWindow(v?.window) }
+        return v
+    }
+    func updateNSView(_ v: NSView, context: Context) {
+        DispatchQueue.main.async { [weak v] in onWindow(v?.window) }
+    }
+}
+
 struct PerfectV2View: View {
     @EnvironmentObject private var perfect: PerfectStore
     @StateObject private var driver = PerfectV2Driver()
     @State private var confirmRevert = false
     @State private var cardIndex = 0
     @State private var keyMonitor: Any?
+    @State private var hostWindow: NSWindow?
     @State private var needsOnly = false
     @State private var root: URL? = UserDefaults.standard.string(forKey: "libraryBrowserRoot")
         .map { URL(fileURLWithPath: $0) }
@@ -653,15 +672,20 @@ struct PerfectV2View: View {
         }
         .safeAreaInset(edge: .bottom) { applyBar }
         .frame(minWidth: 760, minHeight: 560)
+        .background(WindowGrabber { hostWindow = $0 })
         .onAppear {
+            // in the main window, follow the library chosen in Source
+            if let chosen = perfect.root { root = chosen }
             if let root { driver.loadLibrary(root) }
             // window-level arrow keys: keyboardShortcut on the chevrons dies the
             // moment a card control takes focus, so navigation stopped after one
             // album — a local monitor survives focus changes. Text fields keep
             // their arrows (cover-search typing must not navigate).
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
-                guard e.window?.title == "Perfect v2",
-                      !(NSApp.keyWindow?.firstResponder is NSTextView) else { return e }
+                // pin to OUR window (this view now lives in the main window too,
+                // so a title match would break there)
+                guard let host = hostWindow, e.window === host,
+                      !(host.firstResponder is NSTextView) else { return e }
                 let last = max(visibleIndices.count - 1, 0)
                 if e.keyCode == 123 { cardIndex = max(min(cardIndex, last) - 1, 0); return nil }
                 if e.keyCode == 124 { cardIndex = min(min(cardIndex, last) + 1, last); return nil }

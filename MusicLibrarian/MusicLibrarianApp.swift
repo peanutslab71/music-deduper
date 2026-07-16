@@ -52,11 +52,6 @@ struct MusicLibrarianApp: App {
                 LibraryMenuButton("Normalize", "normalize", "n")
                 // Headless preview: writes a dry-run report; applies nothing.
                 Button("Normalize Preview (Dry Run)…") { NormalizeDryRun.run() }
-                // The v2 driver, hidden behind the rollout flag (plan step 5):
-                //   defaults write com.local.musiclibrarian perfectV2 -bool YES
-                if PerfectStore.perfectV2Enabled {
-                    LibraryMenuButton("Perfect v2", "perfectv2", "2")
-                }
             }
             CommandGroup(replacing: .help) {
                 Button("Music Librarian Help") {
@@ -84,9 +79,6 @@ struct MusicLibrarianApp: App {
         }
         Window("Normalize", id: "normalize") {
             NormalizeView().environmentObject(perfect)
-        }
-        Window("Perfect v2", id: "perfectv2") {
-            PerfectV2View().environmentObject(perfect)
         }
     }
 }

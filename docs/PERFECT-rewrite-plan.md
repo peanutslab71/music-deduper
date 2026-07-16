@@ -315,7 +315,13 @@ here too** *(was lost with the step-1 findings panel)* as an info-only section.
 6. **Review roll-up UI** (A/B card + cover chooser + splits + reports); wire the
    two-tier split with whole-album deferral + re-analyze, and Tier-2 rel
    remapping.
-7. **Flip `perfectV2` on**; full verification checklist on a copy.
+7. **Flip `perfectV2` on** — ✅ DONE (2026-07-16): the library-first carousel
+   is now the main window's Perfect step and the flag defaults to ON; the old
+   wizard is the legacy escape hatch
+   (`defaults write com.local.musiclibrarian perfectV2 -bool NO`). The
+   standalone "Perfect v2" window/menu item was retired (one live driver).
+   Visual polish pass to follow — styling reference is the per-album Perfect
+   dialog's look.
 8. **Delete** `commit()` + stage methods/flags + chrome + `PerfectPlan`;
    confirm Transfer untouched; final green build.
 

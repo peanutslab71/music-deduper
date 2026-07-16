@@ -47,7 +47,14 @@ struct ContentView: View {
         case .browse:
             ServerFilesView(store: store)
         case .perfect:
-            PerfectView(store: perfect)
+            // Perfect v2 (the library-first carousel) is the shipping path; the
+            // old 8-step wizard remains as a legacy escape hatch:
+            //   defaults write com.local.musiclibrarian perfectV2 -bool NO
+            if PerfectStore.perfectV2Enabled {
+                PerfectV2View()
+            } else {
+                PerfectView(store: perfect)
+            }
         case .library:
             LibraryBrowserView()
         }
