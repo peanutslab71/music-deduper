@@ -221,10 +221,15 @@ here too** *(was lost with the step-1 findings panel)* as an info-only section.
   again 2026-07-16): the interim whole-album Accept/Keep forces batch
   authorisation of name changes; users need to approve each track's change
   individually.
-- **Design mockup BEFORE building the v2 wizard/roll-up UI**: the old wizard
-  was unintuitive; produce a reviewable mockup (wireframe of the window —
-  sections, verdict flow, batch-apply bar, covers, duplicates-by-ear) and get
-  it agreed before implementation starts.
+- **Design mockup BEFORE building the v2 wizard/roll-up UI**: ✅ produced and
+  APPROVED (2026-07-16) — interactive mockup at
+  https://claude.ai/code/artifact/f6044fc3-64d6-4803-9f4c-2247b176c4c8 .
+  Key agreed elements: per-track Accept/Keep segmented verdicts with
+  confidence-flipped defaults (low-confidence pre-selects Keep, amber score
+  chip), Accept-all/Keep-all per album, artist-first accent-colored
+  attribution, sticky batch-apply bar with live decision count, duplicates
+  as pick-cards with play buttons and first-class "Keep both", covers with
+  the editable search query, DRM/reports collapsed info sections.
 - **A "Duplicates to decide by ear" section joins the roll-up**: same-slot
   twins whose durations differ (auto-dedup rightly refuses) and
   different-track move collisions (the Elvis 2-22 case) become first-class
