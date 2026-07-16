@@ -100,6 +100,7 @@ final class PerfectV2Driver: ObservableObject {
         // artwork: rels + which have art (set after analyze; the chooser is
         // available on every analyzed card — replace is backed up + undoable)
         var art: AlbumArtContext? = nil
+        var notes: [String] = []                           // info-only card notes (e.g. DRM-locked gaps)
         var id: String { dir.path }
         var artist: String { dir.deletingLastPathComponent().lastPathComponent }
         var album: String { dir.lastPathComponent }
@@ -261,6 +262,24 @@ final class PerfectV2Driver: ObservableObject {
                                                                      reconciledMatch: cached,
                                                                      reconcileOnline: reconcileOnline)
             if let r = reconcile { AlbumReconcileStore.save(card.dir.path, r) }
+            // a release track absent from this rip whose only copy in the
+            // library is FairPlay-protected can never be folded in — say so on
+            // the card instead of leaving a silent gap (the Burning Love case)
+            if let m = reconcile ?? cached {
+                let haveTitles = Set(card.trackList.map { Organiser.fold($0.title) })
+                let haveNames = card.files.map { Organiser.fold($0.deletingPathExtension().lastPathComponent) }
+                var notes: [String] = []
+                for t in m.tracks {
+                    let f = Organiser.fold(t.title)
+                    guard !f.isEmpty, !haveTitles.contains(f),
+                          !haveNames.contains(where: { $0.contains(f) }) else { continue }
+                    if let drm = drmTracks.first(where: { Organiser.fold(($0 as NSString).lastPathComponent).contains(f) }) {
+                        let slot = m.discCount > 1 ? "disc \(t.disc) track \(t.track)" : "track \(t.track)"
+                        notes.append("Missing from this rip: \u{201C}\(t.title)\u{201D} (\(slot)) — your only copy is FairPlay-protected at \(drm), which is never moved or modified. Re-acquire to fill the gap.")
+                    }
+                }
+                if !notes.isEmpty { update(card.id) { $0.notes = notes } }
+            }
 
             var tierFixes = fixes
             let kept = KeptNamesStore.load(card.dir.path)
@@ -353,15 +372,20 @@ final class PerfectV2Driver: ObservableObject {
 
     /// Cover candidates for every album, fetched as part of its analyze (user
     /// decision: replacement options should already be there on every card).
-    /// Capped at three to bound memory across a large library; the VA-artist
-    /// dead end is blanked, and covered albums get candidates too.
+    /// The reconciled release leads: its MBID pulls the EXACT cover from the
+    /// Cover Art Archive and its title is the canonical (post-fix) search term,
+    /// so the batch surface matches "Perfect this album" instead of trailing it.
     private func fetchCovers(for id: String, art: AlbumArtContext) async {
+        let card = cards.first(where: { $0.id == id })
+        let match = card.flatMap { AlbumReconcileStore.load($0.dir.path) }
         let artist = Organiser.artistKey(art.artist) == "variousartists" ? "" : art.artist
-        let album = art.album.isEmpty ? (cards.first(where: { $0.id == id })?.album ?? "") : art.album
+        var album = art.album.isEmpty ? (card?.album ?? "") : art.album
+        if let m = match, !m.title.isEmpty { album = m.title }
         guard !album.isEmpty else { return }
-        let found = await CoverArtClient().candidates(releaseMBIDs: [], artist: artist, album: album)
+        let found = await CoverArtClient().candidates(releaseMBIDs: match.map { [$0.id] } ?? [],
+                                                      artist: artist, album: album)
         update(id) { c in
-            c.onlineCovers = Array(found.prefix(3))
+            c.onlineCovers = Array(found.prefix(6))
             c.coverSearched = true
         }
     }
@@ -488,11 +512,15 @@ final class PerfectV2Driver: ObservableObject {
                 await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — duplicate decisions (\(card.album))",
                                                      tagWrites: [], moves: quarantines, sessionID: session)
             }
-            // queued cover pick — fills gaps, or replaces (backed up) on covered albums
-            if let img = card.chosenCover, let art = cards.first(where: { $0.id == card.id })?.art ?? card.art {
+            // queued cover pick — a pick means THIS is the album's cover, so it
+            // goes on every track (unify; old art backed up, undoable). Cards
+            // that were never analyzed fall back to their file list instead of
+            // silently skipping.
+            if let img = card.chosenCover {
                 let mime = img.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
                 let fm = FileManager.default
-                let captured = card.missingArtRels.isEmpty ? art.rels : card.missingArtRels
+                let art = cards.first(where: { $0.id == card.id })?.art ?? card.art
+                let captured = art?.rels ?? card.files.map { PerfectStore.rel($0, root) }
                 var targets: [String] = []
                 var lost = 0
                 for rel in captured {
@@ -971,6 +999,11 @@ struct AlbumCardView: View {
                     Text("← → keys").font(.caption2).foregroundStyle(.tertiary)
                 }
             }
+            ForEach(Array(card.notes.enumerated()), id: \.offset) { _, note in
+                Label(note, systemImage: "lock.circle")
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if card.state == .analyzing {
                 // the pipeline fetches candidates as part of the analyze — say so
                 // instead of showing a confusing empty search UI
@@ -1221,10 +1254,11 @@ struct AlbumCardView: View {
         prefillQuery()
         searching = true
         let a = queryArtist, al = queryAlbum
+        let mbids = AlbumReconcileStore.load(card.dir.path).map { [$0.id] } ?? []
         Task {
-            let found = await CoverArtClient().candidates(releaseMBIDs: [], artist: a, album: al)
+            let found = await CoverArtClient().candidates(releaseMBIDs: mbids, artist: a, album: al)
             await MainActor.run {
-                card.onlineCovers = Array(found.prefix(6))   // manual search may go wider
+                card.onlineCovers = Array(found.prefix(6))
                 card.coverSearched = true
                 searching = false
             }
