@@ -680,6 +680,15 @@ struct PerfectV2View: View {
                 .padding(.horizontal, 12).padding(.vertical, 6)
             }
             .frame(height: 76)
+            // the strip FOLLOWS the selection: navigating past the visible frames
+            // scrolls the next set into view instead of losing the highlight
+            .onChange(of: cardIndex) { _ in
+                let ids = visibleIndices
+                let pos = min(cardIndex, max(ids.count - 1, 0))
+                if pos < ids.count {
+                    withAnimation { proxy.scrollTo(driver.cards[ids[pos]].id, anchor: .center) }
+                }
+            }
             .onChange(of: driver.progress) { _ in
                 if driver.running, let analyzing = driver.cards.first(where: { $0.state == .analyzing }) {
                     withAnimation { proxy.scrollTo(analyzing.id) }
