@@ -27,6 +27,18 @@ final class PerfectV2Driver: ObservableObject {
     @Published var progress = ""
     @Published var lines: [String] = []              // session log shown in the window
     @Published var deferred: [DeferredAlbum] = []    // Tier 2 — untouched, awaiting a verdict
+    @Published var coverGaps: [CoverGap] = []        // albums missing artwork — fill by choice, never silently
+
+    /// An album with artwork gaps: no cover anywhere, or some tracks blank. The
+    /// window offers the album's own best covers plus an on-demand online search;
+    /// the chosen image fills ONLY the blank tracks (existing art is never
+    /// replaced here — that's the review roll-up's job later).
+    struct CoverGap: Identifiable {
+        let dir: URL
+        let art: AlbumArtContext
+        var id: String { dir.path }
+        var missingRels: [String] { art.rels.filter { art.relArt[$0] == nil } }
+    }
     private var cancelled = false
     private var sessionID: String?
 
@@ -45,7 +57,7 @@ final class PerfectV2Driver: ObservableObject {
 
     func run(root: URL, store: PerfectStore) async {
         guard !running else { return }
-        running = true; cancelled = false; lines = []; deferred = []
+        running = true; cancelled = false; lines = []; deferred = []; coverGaps = []
         PerfectStore.rememberRoot(root)   // so Runs/Logs list this library's runs
         let session = UUID().uuidString
         sessionID = session
@@ -80,9 +92,14 @@ final class PerfectV2Driver: ObservableObject {
             if cancelled { break }
             progress = "Album \(idx + 1) of \(albums.count) — \(album.dir.lastPathComponent)"
             let cached = AlbumReconcileStore.load(album.dir.path)
-            let (fixes, _, reconcile) = await AlbumPerfect.analyze(root: root, files: album.files,
-                                                                   reconciledMatch: cached)
+            let (fixes, art, reconcile) = await AlbumPerfect.analyze(root: root, files: album.files,
+                                                                     reconciledMatch: cached)
             if let r = reconcile { AlbumReconcileStore.save(album.dir.path, r) }
+            // Artwork gaps queue for a cover choice (6b): no cover anywhere, or some
+            // tracks blank. Filling is a user pick, never silent.
+            if !art.rels.isEmpty, art.ownCovers.isEmpty || art.rels.contains(where: { art.relArt[$0] == nil }) {
+                coverGaps.append(CoverGap(dir: album.dir, art: art))
+            }
 
             // Tier gating (v2 plan): a SUBSTANTIVE identify change means every
             // downstream fix was computed from the unaccepted names — defer the
@@ -202,6 +219,32 @@ final class PerfectV2Driver: ObservableObject {
     func keep(_ d: DeferredAlbum) {
         deferred.removeAll { $0.id == d.id }
         lines.append("Kept as-is — \(d.dir.lastPathComponent)")
+    }
+
+    /// Fill an album's artwork gaps with the chosen image — blank tracks only;
+    /// existing art is never replaced here. One undoable run in the session.
+    func applyCover(_ gap: CoverGap, image: Data, root: URL, store: PerfectStore) async {
+        guard !running else { return }
+        running = true
+        defer { running = false; progress = ""; store.loadRuns() }
+        let session = sessionID ?? UUID().uuidString
+        sessionID = session
+        progress = "Setting cover — \(gap.dir.lastPathComponent)"
+        let mime = image.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
+        let targets = gap.missingRels.isEmpty ? gap.art.rels : gap.missingRels
+        await PerfectStore.performLibraryOps(root: root,
+                                             summary: "Perfect v2 — cover for \(gap.dir.lastPathComponent)",
+                                             tagWrites: [], moves: [],
+                                             artEmbeds: targets.map { ($0, image, mime) },
+                                             sessionID: session)
+        coverGaps.removeAll { $0.id == gap.id }
+        lines.append("Cover set on \(targets.count) track\(targets.count == 1 ? "" : "s") — \(gap.dir.lastPathComponent)")
+        ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
+    }
+
+    func skipCover(_ gap: CoverGap) {
+        coverGaps.removeAll { $0.id == gap.id }
+        lines.append("Left without cover — \(gap.dir.lastPathComponent)")
     }
 
     /// Cross-folder duplicate sweep over the whole library's FINAL tags. Returns
@@ -326,6 +369,13 @@ struct PerfectV2View: View {
                         }
                     }
                 }
+                if !driver.coverGaps.isEmpty {
+                    Section("Covers to fill — albums missing artwork (blank tracks only; nothing is replaced)") {
+                        ForEach(driver.coverGaps) { gap in
+                            CoverGapRow(gap: gap, driver: driver, root: root, store: perfect)
+                        }
+                    }
+                }
                 if driver.lines.isEmpty && !driver.running {
                     Text("Runs Phase-1 normalize (using your saved Normalize choices), then the per-album engine over every folder, then a final organise on the corrected tags. Each album is one undoable run; the whole session reverts from Runs.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -340,5 +390,72 @@ struct PerfectV2View: View {
         panel.canChooseFiles = false; panel.canChooseDirectories = true
         panel.prompt = "Use Library"
         if panel.runModal() == .OK { root = panel.url }
+    }
+}
+
+/// One artwork-gap row: artist — album, how many tracks are blank, the album's
+/// own covers plus on-demand online candidates, and a pick-to-fill flow.
+struct CoverGapRow: View {
+    let gap: PerfectV2Driver.CoverGap
+    @ObservedObject var driver: PerfectV2Driver
+    let root: URL?
+    let store: PerfectStore
+    @State private var online: [Data] = []
+    @State private var searching = false
+    @State private var searched = false
+    @State private var selected: Data?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(gap.art.artist.isEmpty ? gap.dir.deletingLastPathComponent().lastPathComponent : gap.art.artist) — \(gap.art.album.isEmpty ? gap.dir.lastPathComponent : gap.art.album)")
+                        .fontWeight(.medium)
+                    Text(gap.missingRels.isEmpty
+                         ? "no cover on any track"
+                         : "\(gap.missingRels.count) of \(gap.art.rels.count) track(s) without art")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let selected {
+                    Button("Use this cover") {
+                        if let root { Task { await driver.applyCover(gap, image: selected, root: root, store: store) } }
+                    }
+                    .buttonStyle(.borderedProminent).tint(.teal)
+                    .controlSize(.small).disabled(driver.running || root == nil)
+                }
+                Button("Skip") { driver.skipCover(gap) }.controlSize(.small).disabled(driver.running)
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(Array(gap.art.ownCovers.enumerated()), id: \.offset) { _, data in
+                        CoverThumb(data: data, selected: selected == data, badge: "in files")
+                            .onTapGesture { selected = data }
+                    }
+                    ForEach(Array(online.enumerated()), id: \.offset) { _, data in
+                        CoverThumb(data: data, selected: selected == data, badge: "online")
+                            .onTapGesture { selected = data }
+                    }
+                    if !searched {
+                        Button {
+                            searching = true
+                            Task {
+                                let found = await CoverArtClient().candidates(releaseMBIDs: [],
+                                                                              artist: gap.art.artist,
+                                                                              album: gap.art.album)
+                                await MainActor.run { online = found; searching = false; searched = true }
+                            }
+                        } label: {
+                            if searching { ProgressView().controlSize(.small) }
+                            else { Label("Find covers online", systemImage: "magnifyingglass") }
+                        }
+                        .controlSize(.small).disabled(searching)
+                    } else if online.isEmpty {
+                        Text("nothing found online").font(.caption).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
     }
 }

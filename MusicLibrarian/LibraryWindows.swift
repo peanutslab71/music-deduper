@@ -2332,7 +2332,7 @@ struct PerfectAlbumSheet: View {
 
 /// A selectable cover thumbnail in the chooser: the image, a teal ring when picked,
 /// and a small source badge ("in files" / "online").
-private struct CoverThumb: View {
+struct CoverThumb: View {   // shared with the Perfect v2 cover surface
     let data: Data
     let selected: Bool
     var badge: String? = nil

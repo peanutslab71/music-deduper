@@ -308,8 +308,13 @@ v2 has:
   that, a MusicBrainz text search over up to three tracks (≥2 agree →
   SPECULATIVE: an AlbumFix marked `speculative`, never auto-applied — the v2
   driver defers the album for an Accept/Keep verdict).
-- **6b. Cover art surface** — the roll-up's cover chooser (fill missing,
-  choose/replace, unify; front-cover promotion is already plumbed).
+- **6b. Cover art surface** — ✅ first slice DONE (2026-07-16): the v2 window's
+  "Covers to fill" section queues albums with artwork gaps (no cover anywhere,
+  or blank tracks); each row offers the album's own covers plus an on-demand
+  Cover Art Archive search, and the pick fills BLANK tracks only, as one
+  undoable session run. Still to come with the roll-up rebuild:
+  choose/replace/unify on albums that already have art, low-res upgrades, and
+  wiring front-cover promotion in.
 - **6c. DRM manifest surface** — the findings list died with the wizard
   chrome; give protected tracks a v2 home (info-only).
 - **6d. Driver settings** — thoroughness + the missing-track network gate
