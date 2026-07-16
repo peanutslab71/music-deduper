@@ -28,6 +28,7 @@ final class PerfectV2Driver: ObservableObject {
     @Published var lines: [String] = []              // session log shown in the window
     @Published var deferred: [DeferredAlbum] = []    // Tier 2 — untouched, awaiting a verdict
     @Published var coverGaps: [CoverGap] = []        // albums missing artwork — fill by choice, never silently
+    @Published var drmTracks: [String] = []          // protected (FairPlay) rels — info only, never touched
 
     /// An album with artwork gaps: no cover anywhere, or some tracks blank. The
     /// window offers the album's own best covers plus an on-demand online search;
@@ -57,8 +58,13 @@ final class PerfectV2Driver: ObservableObject {
 
     func run(root: URL, store: PerfectStore) async {
         guard !running else { return }
-        running = true; cancelled = false; lines = []; deferred = []; coverGaps = []
+        running = true; cancelled = false; lines = []; deferred = []; coverGaps = []; drmTracks = []
         PerfectStore.rememberRoot(root)   // so Runs/Logs list this library's runs
+        // the user's persisted settings gate how much this run does (plan 6d):
+        // Light/Standard/Thorough scopes merges + renames; the missing-tracks
+        // toggle keeps a run offline-fast by skipping the release reconcile.
+        let thoroughness = store.thoroughness
+        let reconcileOnline = store.checkMissingTracks
         let session = UUID().uuidString
         sessionID = session
         defer { running = false; progress = ""; store.loadRuns() }
@@ -71,8 +77,14 @@ final class PerfectV2Driver: ObservableObject {
         let confirmedComps = Normalizer.compilationCandidates(scanned.tracks)
             .filter { !choices.declinedCompilations.contains($0.key) }
             .reduce(into: Set<String>()) { $0.formUnion($1.foldKeys) }
+        // Light/Standard skip edition merges (Thorough-only, matching the wizard's
+        // scoping) by declining every candidate for this run.
+        var p1Declined = Set(choices.declinedMerges)
+        if !thoroughness.doesMerges {
+            p1Declined.formUnion(Organiser.albumMergeCandidates(scanned.tracks).map { $0.key })
+        }
         let p1 = Normalizer.plan(scanned, canonicalArtistOverrides: choices.artistOverrides,
-                                 declinedMerges: Set(choices.declinedMerges),
+                                 declinedMerges: p1Declined,
                                  confirmedCompilations: confirmedComps)
         if !p1.isEmpty {
             await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — Phase 1 normalize",
@@ -91,9 +103,14 @@ final class PerfectV2Driver: ObservableObject {
         for (idx, album) in albums.enumerated() {
             if cancelled { break }
             progress = "Album \(idx + 1) of \(albums.count) — \(album.dir.lastPathComponent)"
+            // Protected (FairPlay) tracks: listed for the manifest, never touched.
+            drmTracks.append(contentsOf: album.files
+                .filter { $0.pathExtension.lowercased() == "m4p" }
+                .map { PerfectStore.rel($0, root) })
             let cached = AlbumReconcileStore.load(album.dir.path)
             let (fixes, art, reconcile) = await AlbumPerfect.analyze(root: root, files: album.files,
-                                                                     reconciledMatch: cached)
+                                                                     reconciledMatch: cached,
+                                                                     reconcileOnline: reconcileOnline)
             if let r = reconcile { AlbumReconcileStore.save(album.dir.path, r) }
             // Artwork gaps queue for a cover choice (6b): no cover anywhere, or some
             // tracks blank. Filling is a user pick, never silent.
@@ -122,7 +139,8 @@ final class PerfectV2Driver: ObservableObject {
                 continue
             }
             if await applyTierOne(fixes, root: root, session: session,
-                                  name: album.dir.lastPathComponent) { applied += 1 } else { clean += 1 }
+                                  name: album.dir.lastPathComponent,
+                                  doesRenames: thoroughness.doesRenames) { applied += 1 } else { clean += 1 }
         }
 
         // ---- Final pass: re-file/merge on the CORRECTED tags, so a folder whose
@@ -131,8 +149,12 @@ final class PerfectV2Driver: ObservableObject {
         if !cancelled {
             progress = "Final pass — organising on corrected tags"
             let rescan = await Task.detached { PerfectStore.scanForNormalize(root: root) }.value
+            var p2Declined = Set(choices.declinedMerges)
+            if !thoroughness.doesMerges {
+                p2Declined.formUnion(Organiser.albumMergeCandidates(rescan.tracks).map { $0.key })
+            }
             let p2 = Normalizer.plan(rescan, canonicalArtistOverrides: choices.artistOverrides,
-                                     declinedMerges: Set(choices.declinedMerges),
+                                     declinedMerges: p2Declined,
                                      confirmedCompilations: confirmedComps)
             if !p2.isEmpty {
                 await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — final organise",
@@ -163,11 +185,13 @@ final class PerfectV2Driver: ObservableObject {
     /// honored, compilation flagging excluded (Phase-1 checklist), dependent
     /// renames dropped when the disc fix isn't applied. Returns false if the
     /// album needed nothing.
-    private func applyTierOne(_ fixes: [AlbumFix], root: URL, session: String, name: String) async -> Bool {
+    private func applyTierOne(_ fixes: [AlbumFix], root: URL, session: String, name: String,
+                              doesRenames: Bool = true) async -> Bool {
         let discOn = fixes.contains { $0.kind == .discOrder && $0.applyable && $0.enabled }
         let chosen = fixes.filter { f in
             f.applyable && f.enabled
             && f.kind != .compilation
+            && (doesRenames || f.kind != .filename)   // Light keeps file names as they are
             && !(f.needsDiscOrder && !discOn)
         }
         guard !chosen.isEmpty else { return false }
@@ -376,6 +400,24 @@ struct PerfectV2View: View {
                         }
                     }
                 }
+                if !driver.drmTracks.isEmpty {
+                    Section("Protected (DRM) — listed only, never touched") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(driver.drmTracks.count) FairPlay-protected track(s). Most players (including Roon) can't play these; they can't be fingerprinted or re-tagged. Legitimate routes: re-download from your Apple purchase history, match via an Apple Music subscription, or re-rip from CD.")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            HStack {
+                                Button("Export list (CSV)…") { exportDRMList() }.controlSize(.small)
+                                Spacer()
+                            }
+                            ForEach(driver.drmTracks.prefix(12), id: \.self) { Text($0).font(.caption2).foregroundStyle(.tertiary) }
+                            if driver.drmTracks.count > 12 {
+                                Text("… and \(driver.drmTracks.count - 12) more (export for the full list)")
+                                    .font(.caption2).foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
+                }
                 if driver.lines.isEmpty && !driver.running {
                     Text("Runs Phase-1 normalize (using your saved Normalize choices), then the per-album engine over every folder, then a final organise on the corrected tags. Each album is one undoable run; the whole session reverts from Runs.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -390,6 +432,23 @@ struct PerfectV2View: View {
         panel.canChooseFiles = false; panel.canChooseDirectories = true
         panel.prompt = "Use Library"
         if panel.runModal() == .OK { root = panel.url }
+    }
+
+    /// The DRM manifest: one row per protected track (artist/album/title come from
+    /// the Artist/Album/NN Title path shape), openable in Numbers/Excel.
+    private func exportDRMList() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "protected-tracks.csv"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        var csv = "artist,album,file\n"
+        for rel in driver.drmTracks {
+            let parts = rel.split(separator: "/").map(String.init)
+            let artist = parts.count >= 3 ? parts[parts.count - 3] : ""
+            let album = parts.count >= 2 ? parts[parts.count - 2] : ""
+            let esc = { (s: String) in "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
+            csv += "\(esc(artist)),\(esc(album)),\(esc(parts.last ?? rel))\n"
+        }
+        try? csv.write(to: url, atomically: true, encoding: .utf8)
     }
 }
 

@@ -331,10 +331,13 @@ v2 has:
   undoable session run. Still to come with the roll-up rebuild:
   choose/replace/unify on albums that already have art, low-res upgrades, and
   wiring front-cover promotion in.
-- **6c. DRM manifest surface** — the findings list died with the wizard
-  chrome; give protected tracks a v2 home (info-only).
-- **6d. Driver settings** — thoroughness + the missing-track network gate
-  (the driver currently always reconciles).
+- **6c. DRM manifest surface** — ✅ DONE (2026-07-16): the v2 window lists
+  FairPlay-protected tracks (info-only, never touched) with the legitimate
+  re-acquisition guidance and a CSV export.
+- **6d. Driver settings** — ✅ DONE (2026-07-16): the persisted
+  missing-tracks toggle gates the release reconcile (offline-fast runs), and
+  thoroughness scopes the run — Light/Standard skip edition merges
+  (Thorough-only, matching the wizard), Light also keeps file names as-is.
 - Plus the recorded roll-up work: per-track verdicts, batch apply,
   duplicates-by-ear, kept-album persistence, global Revert-library.
 
