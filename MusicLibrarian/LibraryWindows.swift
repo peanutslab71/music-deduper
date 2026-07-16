@@ -1736,7 +1736,7 @@ enum AlbumPerfect {
             // (and missing cover) from them — a low-bitrate loser may be the only
             // copy carrying the album/date tags or the art. Parity with the batch.
             let backfill = ["title", "artist", "album", "albumartist", "composer",
-                            "lyricist", "label", "conductor", "date", "track", "disc"]
+                            "lyricist", "label", "conductor", "date", "genre", "track", "disc"]
             for field in backfill where (PerfectStore.readField(keeper.url, field) ?? "").isEmpty {
                 for id in c.memberIDs where id != c.keeperID {
                     let v = PerfectStore.readField(tracks[id].url, field) ?? ""

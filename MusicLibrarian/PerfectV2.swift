@@ -400,7 +400,7 @@ final class PerfectV2Driver: ObservableObject {
         var moves: [(from: String, to: String)] = []
         var earPairs: [EarPair] = []
         let backfill = ["title", "artist", "album", "albumartist", "composer",
-                        "lyricist", "label", "conductor", "date", "track", "disc"]
+                        "lyricist", "label", "conductor", "date", "genre", "track", "disc"]
         for c in clusters where c.memberIDs.count > 1 {
             // Legitimate repeat appearances — the same recording on its studio album
             // AND on a greatest-hits/compilation — are NEVER auto-removed (plan §E:
@@ -411,7 +411,10 @@ final class PerfectV2Driver: ObservableObject {
             guard albums.count == 1 else {
                 let k = tracks[c.keeperID]
                 func info(_ t: Track) -> String {
-                    "\(fmtDur(t.duration)) · \(t.bitrate > 0 ? "\(t.bitrate) kbps" : t.ext) · \(t.album.isEmpty ? "?" : t.album)"
+                    // a blank album TAG (common on DRM m4p) falls back to the folder
+                    // name — never a bare "?"
+                    let alb = t.album.isEmpty ? t.url.deletingLastPathComponent().lastPathComponent : t.album
+                    return "\(fmtDur(t.duration)) · \(t.bitrate > 0 ? "\(t.bitrate) kbps" : t.ext) · \(alb)"
                 }
                 for id in c.memberIDs where id != c.keeperID {
                     let o = tracks[id]
