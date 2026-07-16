@@ -175,8 +175,11 @@ final class PerfectV2Driver: ObservableObject {
                                              sessionID: session)
         progress = "Re-checking — \(d.dir.lastPathComponent)"
         let cached = AlbumReconcileStore.load(d.dir.path)
+        // runIdentify: false — the verdict PINNED the names; a fresh identify pass
+        // could propose different ones and leak into the dependent fixes.
         let (fixes, _, reconcile) = await AlbumPerfect.analyze(root: root, files: d.files,
-                                                               reconciledMatch: cached)
+                                                               reconciledMatch: cached,
+                                                               runIdentify: false)
         if let r = reconcile { AlbumReconcileStore.save(d.dir.path, r) }
         // The user's verdict PINS the names: the re-analyze exists to compute the
         // dependent fixes from them, never to relitigate them — a fresh identify

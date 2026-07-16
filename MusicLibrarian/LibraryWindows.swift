@@ -1639,7 +1639,13 @@ enum AlbumPerfect {
         return (d, pixels, mime)
     }
 
-    static func analyze(root: URL, files: [URL], reconciledMatch: MBReleaseMatch? = nil) async -> (fixes: [AlbumFix], art: AlbumArtContext, reconcile: MBReleaseMatch?) {
+    /// `runIdentify: false` skips the AcoustID pass entirely — used after a review
+    /// verdict, where the user's names are ground truth: a fresh identify could
+    /// propose different names and, even unapplied, its in-memory mutations would
+    /// leak into the dependent fixes (the filename tidy would rename files to
+    /// titles that were never written).
+    static func analyze(root: URL, files: [URL], reconciledMatch: MBReleaseMatch? = nil,
+                        runIdentify: Bool = true) async -> (fixes: [AlbumFix], art: AlbumArtContext, reconcile: MBReleaseMatch?) {
         // Read every track's tags (bounded concurrency, same as the inspector).
         var tracks = [Track](repeating: Track(id: 0, url: root, name: "", relDir: "", size: 0, ext: "",
                                               title: "", artist: "", album: "", albumArtist: "",
@@ -1676,7 +1682,7 @@ enum AlbumPerfect {
         var recIDByRel: [String: String] = [:]   // rel → MusicBrainz recording id (for credit enrichment)
         var seedRecID: String?
         let acoustIDKey = Identifier.configuredKey
-        if !acoustIDKey.isEmpty {
+        if runIdentify, !acoustIDKey.isEmpty {
             let ident = Identifier(apiKey: acoustIDKey)
             for i in tracks.indices {
                 let t = tracks[i]
