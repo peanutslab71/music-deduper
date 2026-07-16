@@ -539,6 +539,7 @@ struct PerfectV2View: View {
     @StateObject private var driver = PerfectV2Driver()
     @State private var confirmRevert = false
     @State private var cardIndex = 0
+    @State private var keyMonitor: Any?
     @State private var needsOnly = false
     @State private var root: URL? = UserDefaults.standard.string(forKey: "libraryBrowserRoot")
         .map { URL(fileURLWithPath: $0) }
@@ -565,7 +566,24 @@ struct PerfectV2View: View {
         }
         .safeAreaInset(edge: .bottom) { applyBar }
         .frame(minWidth: 760, minHeight: 560)
-        .onAppear { if let root { driver.loadLibrary(root) } }
+        .onAppear {
+            if let root { driver.loadLibrary(root) }
+            // window-level arrow keys: keyboardShortcut on the chevrons dies the
+            // moment a card control takes focus, so navigation stopped after one
+            // album — a local monitor survives focus changes. Text fields keep
+            // their arrows (cover-search typing must not navigate).
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+                guard e.window?.title == "Perfect v2",
+                      !(NSApp.keyWindow?.firstResponder is NSTextView) else { return e }
+                let last = max(visibleIndices.count - 1, 0)
+                if e.keyCode == 123 { cardIndex = max(min(cardIndex, last) - 1, 0); return nil }
+                if e.keyCode == 124 { cardIndex = min(min(cardIndex, last) + 1, last); return nil }
+                return e
+            }
+        }
+        .onDisappear {
+            if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
+        }
     }
 
     private var header: some View {
@@ -611,7 +629,6 @@ struct PerfectV2View: View {
         return HStack(spacing: 0) {
             Button { cardIndex = max(pos - 1, 0) } label: { Image(systemName: "chevron.left").font(.title2) }
                 .buttonStyle(.plain).padding(.horizontal, 8)
-                .keyboardShortcut(.leftArrow, modifiers: [])
                 .disabled(pos == 0)
             if !ids.isEmpty, pos < ids.count {
                 ScrollView {
@@ -628,7 +645,6 @@ struct PerfectV2View: View {
             }
             Button { cardIndex = min(pos + 1, ids.count - 1) } label: { Image(systemName: "chevron.right").font(.title2) }
                 .buttonStyle(.plain).padding(.horizontal, 8)
-                .keyboardShortcut(.rightArrow, modifiers: [])
                 .disabled(pos >= ids.count - 1)
         }
         .padding(.vertical, 6)
