@@ -2415,11 +2415,12 @@ final class PerfectStore: ObservableObject {
             //      artist. Same detector per-album Perfect uses; only the CONFIDENT cases
             //      (machine-joined "A,B" or "A feat. B") auto-apply — ambiguous spaced lists
             //      that could be a band name are logged for review, not changed. Reversible
-            //      (artist tagEdit + performer perfEdit). m4p can't be written, so skipped.
+            //      (artist tagEdit + performer perfEdit). FairPlay only locks the AUDIO
+            //      stream — MP4 metadata writes work fine, so m4p is included.
             if !box.cancelled, let en = fm.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
                 while let u = en.nextObject() as? URL {
                     if box.cancelled { break }
-                    guard Self.isAudio(u), u.pathExtension.lowercased() != "m4p",
+                    guard Self.isAudio(u),
                           !u.path.contains("Music Librarian Quarantine"),
                           let cur = Self.readField(u, "artist"),
                           let split = TrackProposal.splitArtistCredit(cur), split.primary != cur else { continue }

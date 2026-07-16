@@ -275,7 +275,7 @@ final class PerfectV2Driver: ObservableObject {
                           !haveNames.contains(where: { $0.contains(f) }) else { continue }
                     if let drm = drmTracks.first(where: { Organiser.fold(($0 as NSString).lastPathComponent).contains(f) }) {
                         let slot = m.discCount > 1 ? "disc \(t.disc) track \(t.track)" : "track \(t.track)"
-                        notes.append("Missing from this rip: \u{201C}\(t.title)\u{201D} (\(slot)) — your only copy is FairPlay-protected at \(drm), which is never moved or modified. Re-acquire to fill the gap.")
+                        notes.append("Missing from this rip: \u{201C}\(t.title)\u{201D} (\(slot)) — your only copy is FairPlay-protected at \(drm); it files under its own album and the audio can't be converted. Re-acquire to fill the gap.")
                     }
                 }
                 if !notes.isEmpty { update(card.id) { $0.notes = notes } }
@@ -876,9 +876,9 @@ struct PerfectV2View: View {
                 Section("Session") { ForEach(driver.lines, id: \.self) { Text($0).font(.caption) } }
             }
             if !driver.drmTracks.isEmpty {
-                Section("Protected (DRM) — listed only, never touched") {
+                Section("Protected (DRM) — organised like the rest; audio locked") {
                     HStack {
-                        Text("\(driver.drmTracks.count) FairPlay track(s) — can't be played by most servers, fingerprinted or re-tagged. Re-acquire via Apple purchase history / Apple Music / CD.")
+                        Text("\(driver.drmTracks.count) FairPlay track(s) — tags and file placement are cleaned like any other track, but the audio is locked: no fingerprinting, no playback on most servers. Re-acquire via Apple purchase history / Apple Music / CD.")
                             .font(.caption).foregroundStyle(.secondary)
                         Spacer()
                         Button("Export CSV…") { exportDRMList() }.controlSize(.small)
