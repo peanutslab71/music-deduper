@@ -1179,17 +1179,22 @@ struct AlbumCardView: View {
                 .controlSize(.small).disabled(searching)
                 Text("edit the search if the match misses").font(.caption2).foregroundStyle(.tertiary)
             }
+            .onAppear { prefillQuery() }   // the fields arrive READY, never blank
         }
     }
 
+    /// Pre-fill the manual query from the album's tags (folder names as fallback);
+    /// "Various Artists" is blanked — the dead end that hid The Specials' cover.
+    private func prefillQuery() {
+        guard queryArtist.isEmpty, queryAlbum.isEmpty else { return }
+        let a = card.art?.artist ?? card.artist
+        queryArtist = Organiser.artistKey(a) == "variousartists" ? "" : a
+        let al = card.art?.album ?? ""
+        queryAlbum = al.isEmpty ? card.album : al
+    }
+
     private func search() {
-        if queryArtist.isEmpty && queryAlbum.isEmpty {
-            // never search on "Various Artists" — the dead end that hid The Specials
-            let a = card.art?.artist ?? card.artist
-            queryArtist = Organiser.artistKey(a) == "variousartists" ? "" : a
-            let al = card.art?.album ?? ""
-            queryAlbum = al.isEmpty ? card.album : al
-        }
+        prefillQuery()
         searching = true
         let a = queryArtist, al = queryAlbum
         Task {
