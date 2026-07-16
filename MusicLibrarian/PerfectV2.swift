@@ -334,6 +334,10 @@ final class PerfectV2Driver: ObservableObject {
 
     /// Fill an album's artwork gaps with the chosen image — blank tracks only;
     /// existing art is never replaced here. One undoable run in the session.
+    /// Targets are REMAPPED before writing: the session's later passes may have
+    /// renamed/moved files after the gap was captured, and a stale rel would
+    /// silently no-op (the Some Old Bullshit miss) — a missing rel is re-resolved
+    /// by filename inside the album folder, or dropped with a message.
     func applyCover(_ gap: CoverGap, image: Data, root: URL, store: PerfectStore) async {
         guard !running else { return }
         running = true
@@ -342,7 +346,20 @@ final class PerfectV2Driver: ObservableObject {
         sessionID = session
         progress = "Setting cover — \(gap.dir.lastPathComponent)"
         let mime = image.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
-        let targets = gap.missingRels.isEmpty ? gap.art.rels : gap.missingRels
+        let fm = FileManager.default
+        let captured = gap.missingRels.isEmpty ? gap.art.rels : gap.missingRels
+        var targets: [String] = []
+        var lost = 0
+        for rel in captured {
+            if fm.fileExists(atPath: root.appendingPathComponent(rel).path) { targets.append(rel); continue }
+            // moved since capture — same filename inside the (possibly renamed) album dir?
+            let name = (rel as NSString).lastPathComponent
+            let candidate = gap.dir.appendingPathComponent(name)
+            if fm.fileExists(atPath: candidate.path) { targets.append(PerfectStore.rel(candidate, root)) }
+            else { lost += 1 }
+        }
+        if lost > 0 { lines.append("Cover: \(lost) track(s) moved since the scan — run again to pick them up") }
+        guard !targets.isEmpty else { coverGaps.removeAll { $0.id == gap.id }; return }
         await PerfectStore.performLibraryOps(root: root,
                                              summary: "Perfect v2 — cover for \(gap.dir.lastPathComponent)",
                                              tagWrites: [], moves: [],
@@ -454,6 +471,7 @@ struct PerfectV2View: View {
     @EnvironmentObject private var perfect: PerfectStore
     @StateObject private var driver = PerfectV2Driver()
     @State private var confirmRevert = false
+    @State private var cardIndex = 0
     @State private var root: URL? = UserDefaults.standard.string(forKey: "libraryBrowserRoot")
         .map { URL(fileURLWithPath: $0) }
 
@@ -478,30 +496,16 @@ struct PerfectV2View: View {
             if driver.running {
                 ProgressView(driver.progress).padding(10)
             }
+            // ---- the album carousel (approved mockup v2): one album per card,
+            // everything it needs in one place; ‹ › / arrow keys / filmstrip to move.
+            if !cardIDs.isEmpty {
+                carousel
+                filmstrip
+                Divider()
+            }
             List {
                 if !driver.lines.isEmpty {
                     Section("Session") { ForEach(driver.lines, id: \.self) { Text($0).font(.caption) } }
-                }
-                if !driver.deferred.isEmpty {
-                    Section("Names to confirm — untouched until you apply; tick each track") {
-                        ForEach($driver.deferred) { $d in
-                            DeferredAlbumCard(album: $d, busy: driver.running)
-                        }
-                    }
-                }
-                if !driver.earChoices.isEmpty {
-                    Section("Duplicates to decide by ear — the same recording on two albums") {
-                        ForEach($driver.earChoices) { $c in
-                            EarChoiceRow(choice: $c, rootURL: root, busy: driver.running)
-                        }
-                    }
-                }
-                if !driver.coverGaps.isEmpty {
-                    Section("Covers to fill — albums missing artwork (blank tracks only; nothing is replaced)") {
-                        ForEach(driver.coverGaps) { gap in
-                            CoverGapRow(gap: gap, driver: driver, root: root, store: perfect)
-                        }
-                    }
                 }
                 if !driver.drmTracks.isEmpty {
                     Section("Protected (DRM) — listed only, never touched") {
@@ -564,6 +568,129 @@ struct PerfectV2View: View {
         .frame(minWidth: 700, minHeight: 460)
     }
 
+    // ---- carousel plumbing ----
+
+    /// Every album with something to decide, in one stable order: deferred name
+    /// verdicts, by-ear duplicate pairs (keyed by their A-side's album folder),
+    /// and cover gaps — merged so each album appears exactly ONCE.
+    private var cardIDs: [String] {
+        var order: [String] = []
+        var seen = Set<String>()
+        for d in driver.deferred where seen.insert(d.id).inserted { order.append(d.id) }
+        if let root {
+            for c in driver.earChoices {
+                let dir = root.appendingPathComponent((c.pair.aRel as NSString).deletingLastPathComponent).path
+                if seen.insert(dir).inserted { order.append(dir) }
+            }
+        }
+        for g in driver.coverGaps where seen.insert(g.id).inserted { order.append(g.id) }
+        return order
+    }
+
+    private func earChoiceIDs(for dirPath: String) -> [String] {
+        guard let root else { return [] }
+        return driver.earChoices.filter {
+            root.appendingPathComponent(($0.pair.aRel as NSString).deletingLastPathComponent).path == dirPath
+        }.map(\.id)
+    }
+
+    private var carousel: some View {
+        let ids = cardIDs
+        let index = min(cardIndex, max(ids.count - 1, 0))
+        return HStack(spacing: 0) {
+            Button { cardIndex = max(index - 1, 0) } label: {
+                Image(systemName: "chevron.left").font(.title2)
+            }
+            .buttonStyle(.plain).padding(.horizontal, 8)
+            .keyboardShortcut(.leftArrow, modifiers: [])
+            .disabled(index == 0)
+            if index < ids.count {
+                CarouselAlbumCard(
+                    dirPath: ids[index],
+                    position: (index + 1, ids.count),
+                    deferred: deferredBinding(ids[index]),
+                    earIDs: earChoiceIDs(for: ids[index]),
+                    driver: driver, root: root, store: perfect
+                )
+                .id(ids[index])
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            Button { cardIndex = min(index + 1, ids.count - 1) } label: {
+                Image(systemName: "chevron.right").font(.title2)
+            }
+            .buttonStyle(.plain).padding(.horizontal, 8)
+            .keyboardShortcut(.rightArrow, modifiers: [])
+            .disabled(index >= ids.count - 1)
+        }
+        .padding(.vertical, 8)
+    }
+
+    private var filmstrip: some View {
+        let ids = cardIDs
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Array(ids.enumerated()), id: \.element) { i, id in
+                    let dir = URL(fileURLWithPath: id)
+                    VStack(spacing: 2) {
+                        ZStack(alignment: .topTrailing) {
+                            filmFrameImage(id)
+                                .frame(width: 46, height: 46)
+                                .clipShape(RoundedRectangle(cornerRadius: 5))
+                                .overlay(RoundedRectangle(cornerRadius: 5)
+                                    .strokeBorder(i == min(cardIndex, ids.count - 1) ? Color.purple : Color.secondary.opacity(0.3),
+                                                  lineWidth: i == min(cardIndex, ids.count - 1) ? 2 : 1))
+                            filmBadges(id)
+                        }
+                        Text(dir.lastPathComponent).font(.system(size: 9)).lineLimit(1)
+                            .frame(width: 52)
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture { cardIndex = i }
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+        }
+    }
+
+    @ViewBuilder private func filmFrameImage(_ id: String) -> some View {
+        if let gap = driver.coverGaps.first(where: { $0.id == id }),
+           let data = gap.art.ownCovers.first, let img = NSImage(data: data) {
+            Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+        } else {
+            ZStack {
+                Rectangle().fill(Color.secondary.opacity(0.12))
+                Image(systemName: "music.note").foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    @ViewBuilder private func filmBadges(_ id: String) -> some View {
+        HStack(spacing: 2) {
+            if let d = driver.deferred.first(where: { $0.id == id }), !d.decisions.isEmpty || d.albumSuggestion != nil {
+                badge("N", .orange)
+            }
+            if !earChoiceIDs(for: id).isEmpty { badge("2×", .orange) }
+            if driver.coverGaps.contains(where: { $0.id == id }) { badge("C", .purple) }
+        }
+        .offset(x: 4, y: -4)
+    }
+
+    private func badge(_ s: String, _ c: Color) -> some View {
+        Text(s).font(.system(size: 7, weight: .bold)).foregroundStyle(.white)
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .background(Capsule().fill(c))
+    }
+
+    private func deferredBinding(_ id: String) -> Binding<PerfectV2Driver.DeferredAlbum>? {
+        guard driver.deferred.contains(where: { $0.id == id }) else { return nil }
+        return Binding(
+            get: { driver.deferred.first(where: { $0.id == id })
+                   ?? PerfectV2Driver.DeferredAlbum(dir: URL(fileURLWithPath: id), files: []) },
+            set: { v in if let i = driver.deferred.firstIndex(where: { $0.id == id }) { driver.deferred[i] = v } }
+        )
+    }
+
     private func choose() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false; panel.canChooseDirectories = true
@@ -600,6 +727,7 @@ struct CoverGapRow: View {
     @State private var searching = false
     @State private var searched = false
     @State private var selected: Data?
+    var onSelect: ((Data) -> Void)? = nil   // carousel: preview the pick on the big cover
     // editable query — the escape hatch when the tag-driven search misses
     // (e.g. an album filed under Various Artists, or a renamed edition)
     @State private var queryArtist = ""
@@ -630,11 +758,11 @@ struct CoverGapRow: View {
                 HStack(spacing: 8) {
                     ForEach(Array(gap.art.ownCovers.enumerated()), id: \.offset) { _, data in
                         CoverThumb(data: data, selected: selected == data, badge: "in files")
-                            .onTapGesture { selected = data }
+                            .onTapGesture { selected = data; onSelect?(data) }
                     }
                     ForEach(Array(online.enumerated()), id: \.offset) { _, data in
                         CoverThumb(data: data, selected: selected == data, badge: "online")
-                            .onTapGesture { selected = data }
+                            .onTapGesture { selected = data; onSelect?(data) }
                     }
                     if !searched {
                         Button {
@@ -726,14 +854,17 @@ enum KeptNamesStore {
 struct DeferredAlbumCard: View {
     @Binding var album: PerfectV2Driver.DeferredAlbum
     let busy: Bool
+    var showHeader = true   // false when embedded in a carousel card (which has its own)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                (Text(album.artist).foregroundColor(.purple).fontWeight(.semibold)
-                 + Text(" — \(album.album)").fontWeight(.semibold))
-                Text("\(album.decisions.count) track\(album.decisions.count == 1 ? "" : "s")")
-                    .font(.caption).foregroundStyle(.secondary)
+                if showHeader {
+                    (Text(album.artist).foregroundColor(.purple).fontWeight(.semibold)
+                     + Text(" — \(album.album)").fontWeight(.semibold))
+                    Text("\(album.decisions.count) track\(album.decisions.count == 1 ? "" : "s")")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
                 if album.decisions.count > 1 {
                     Button("Accept all") { setAll(true) }.controlSize(.small).disabled(busy)
@@ -901,5 +1032,113 @@ struct EarChoiceRow: View {
             Text(rel).font(.caption2).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
         }
         .padding(.leading, 8)
+    }
+}
+
+// MARK: - Carousel album card (approved mockup v2)
+
+/// One album, everything it needs in one place: big cover (instant preview of a
+/// pick), artist-first title, needs chips, then blocks for names, this album's
+/// duplicate calls, and the cover chooser.
+struct CarouselAlbumCard: View {
+    let dirPath: String
+    let position: (Int, Int)
+    let deferred: Binding<PerfectV2Driver.DeferredAlbum>?
+    let earIDs: [String]
+    @ObservedObject var driver: PerfectV2Driver
+    let root: URL?
+    let store: PerfectStore
+    @State private var previewCover: Data?
+
+    private var dir: URL { URL(fileURLWithPath: dirPath) }
+    private var gap: PerfectV2Driver.CoverGap? { driver.coverGaps.first { $0.id == dirPath } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 14) {
+                bigCover
+                VStack(alignment: .leading, spacing: 4) {
+                    (Text(dir.deletingLastPathComponent().lastPathComponent)
+                        .foregroundColor(.purple).fontWeight(.semibold)
+                     + Text(" — \(dir.lastPathComponent)").fontWeight(.semibold))
+                        .font(.title3)
+                    needsChips
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("Album \(position.0) of \(position.1)").font(.caption).foregroundStyle(.secondary)
+                    Text("← → keys").font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+            if let deferred {
+                block("Names") { DeferredAlbumCard(album: deferred, busy: driver.running, showHeader: false) }
+            }
+            if !earIDs.isEmpty {
+                block("Duplicates — the same recording elsewhere") {
+                    ForEach(earIDs, id: \.self) { id in
+                        if let b = earBinding(id) { EarChoiceRow(choice: b, rootURL: root, busy: driver.running) }
+                    }
+                }
+            }
+            if let gap {
+                block(gap.missingRels.isEmpty ? "Cover — none on any track (tap to preview)"
+                                              : "Cover — \(gap.missingRels.count) of \(gap.art.rels.count) track(s) without art") {
+                    CoverGapRow(gap: gap, driver: driver, root: root, store: store,
+                                onSelect: { previewCover = $0 })
+                }
+            }
+        }
+        .padding(.horizontal, 6)
+    }
+
+    private var bigCover: some View {
+        ZStack {
+            if let data = previewCover ?? gap?.art.ownCovers.first, let img = NSImage(data: data) {
+                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                Rectangle().fill(Color.secondary.opacity(0.1))
+                Image(systemName: "music.note").font(.system(size: 34)).foregroundStyle(.tertiary)
+            }
+        }
+        .frame(width: 110, height: 110)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.25)))
+    }
+
+    private var needsChips: some View {
+        HStack(spacing: 6) {
+            if let d = deferred?.wrappedValue {
+                if !d.decisions.isEmpty { chip("\(d.decisions.count) name\(d.decisions.count == 1 ? "" : "s")", .orange) }
+                if d.albumSuggestion != nil { chip("album name?", .orange) }
+            }
+            if !earIDs.isEmpty { chip("\(earIDs.count) repeat\(earIDs.count == 1 ? "" : "s")", .orange) }
+            if let gap { chip(gap.missingRels.isEmpty ? "no cover" : "cover gaps", .purple) }
+        }
+    }
+
+    private func chip(_ s: String, _ c: Color) -> some View {
+        Text(s).font(.system(size: 10, weight: .semibold)).textCase(.uppercase)
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .background(Capsule().fill(c.opacity(0.15)))
+            .foregroundStyle(c)
+    }
+
+    @ViewBuilder private func block<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.system(size: 10, weight: .semibold)).textCase(.uppercase)
+                .foregroundStyle(.secondary)
+            content()
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.05)))
+    }
+
+    private func earBinding(_ id: String) -> Binding<PerfectV2Driver.EarChoice>? {
+        guard let first = driver.earChoices.first(where: { $0.id == id }) else { return nil }
+        return Binding(
+            get: { driver.earChoices.first(where: { $0.id == id }) ?? first },
+            set: { v in if let i = driver.earChoices.firstIndex(where: { $0.id == id }) { driver.earChoices[i] = v } }
+        )
     }
 }
