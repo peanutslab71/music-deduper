@@ -29,6 +29,17 @@ final class PerfectV2Driver: ObservableObject {
     @Published var deferred: [DeferredAlbum] = []    // Tier 2 — untouched, awaiting a verdict
     @Published var coverGaps: [CoverGap] = []        // albums missing artwork — fill by choice, never silently
     @Published var drmTracks: [String] = []          // protected (FairPlay) rels — info only, never touched
+    @Published var earChoices: [EarChoice] = []      // same recording, two albums — you pick by ear
+
+    /// A by-ear verdict: keep A, keep B, or (the recommended legitimate-repeat
+    /// default) keep both. Applied with the decisions batch; "keep both" persists
+    /// so the pair never re-offers.
+    struct EarChoice: Identifiable {
+        let pair: EarPair
+        var verdict: Verdict
+        enum Verdict { case keepA, keepB, keepBoth }
+        var id: String { pair.id }
+    }
 
     /// An album with artwork gaps: no cover anywhere, or some tracks blank. The
     /// window offers the album's own best covers plus an on-demand online search;
@@ -77,7 +88,7 @@ final class PerfectV2Driver: ObservableObject {
 
     func run(root: URL, store: PerfectStore) async {
         guard !running else { return }
-        running = true; cancelled = false; lines = []; deferred = []; coverGaps = []; drmTracks = []
+        running = true; cancelled = false; lines = []; deferred = []; coverGaps = []; drmTracks = []; earChoices = []
         PerfectStore.rememberRoot(root)   // so Runs/Logs list this library's runs
         // the user's persisted settings gate how much this run does (plan 6d):
         // Light/Standard/Thorough scopes merges + renames; the missing-tracks
@@ -213,6 +224,12 @@ final class PerfectV2Driver: ObservableObject {
                                                      artEmbeds: dd.embeds, sessionID: session)
                 lines.append("Duplicates: \(dd.moves.count) removed across folders (best copies kept)")
             }
+            // Cross-album same-recording pairs → by-ear verdicts (Keep both is the
+            // recommended default: a track on its album AND a hits set is legitimate).
+            let earKept = KeptNamesStore.load(root.path + "#ear")
+            earChoices = dd.earPairs
+                .filter { !earKept.contains("ear>" + $0.id) }
+                .map { EarChoice(pair: $0, verdict: .keepBoth) }
         } else {
             lines.append("Cancelled — applied runs stay undoable from Runs")
         }
@@ -251,7 +268,7 @@ final class PerfectV2Driver: ObservableObject {
     /// set; remember every KEPT proposal so it never re-queues. One undoable run
     /// per album, all in the session.
     func applyDecisions(root: URL, store: PerfectStore) async {
-        guard !running, !deferred.isEmpty else { return }
+        guard !running, !deferred.isEmpty || !earChoices.isEmpty else { return }
         running = true
         defer { running = false; progress = ""; store.loadRuns() }
         let session = sessionID ?? UUID().uuidString
@@ -290,6 +307,27 @@ final class PerfectV2Driver: ObservableObject {
             deferred.removeAll { $0.id == d.id }
             lines.append("Decisions applied — \(d.artist) — \(d.album)")
         }
+        // by-ear duplicate verdicts: keep-A/keep-B quarantine the loser in one
+        // undoable run; keep-both persists so the pair never re-offers
+        if !earChoices.isEmpty {
+            var quarantines: [(from: String, to: String)] = []
+            var keptEar: [String] = []
+            for c in earChoices {
+                switch c.verdict {
+                case .keepA: quarantines.append((c.pair.bRel, ""))
+                case .keepB: quarantines.append((c.pair.aRel, ""))
+                case .keepBoth: keptEar.append("ear>" + c.pair.id)
+                }
+            }
+            if !keptEar.isEmpty { KeptNamesStore.add(root.path + "#ear", keptEar) }
+            if !quarantines.isEmpty {
+                progress = "Applying duplicate decisions"
+                await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — duplicate decisions",
+                                                     tagWrites: [], moves: quarantines, sessionID: session)
+                lines.append("Duplicates: \(quarantines.count) resolved by ear")
+            }
+            earChoices = []
+        }
         ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
     }
 
@@ -324,25 +362,49 @@ final class PerfectV2Driver: ObservableObject {
     /// the merge-of-best backfill (keeper's blank fields + missing cover filled
     /// from the losers) and the losers' quarantine moves — all applied as one
     /// reversible run by the caller.
+    /// A same-recording pair auto-dedup refused to decide (different albums —
+    /// a legitimate-repeat candidate): offered on the by-ear review surface.
+    struct EarPair: Identifiable, Sendable {
+        let aRel: String, bRel: String
+        let aInfo: String, bInfo: String
+        let artist: String, title: String
+        var id: String { aRel + "|" + bRel }
+    }
+
     nonisolated static func libraryDedup(root: URL) async
         -> (writes: [(rel: String, field: String, value: String)],
             embeds: [(rel: String, image: Data, mime: String)],
-            moves: [(from: String, to: String)]) {
+            moves: [(from: String, to: String)],
+            earPairs: [EarPair]) {
         var tracks = await PerfectStore.buildTracksFromDisk(root: root, fm: .default)
         let clusters = buildClusters(&tracks, mode: .balanced, tol: 2.0, crossAlbum: false)
         var writes: [(rel: String, field: String, value: String)] = []
         var embeds: [(rel: String, image: Data, mime: String)] = []
         var moves: [(from: String, to: String)] = []
+        var earPairs: [EarPair] = []
         let backfill = ["title", "artist", "album", "albumartist", "composer",
                         "lyricist", "label", "conductor", "date", "track", "disc"]
         for c in clusters where c.memberIDs.count > 1 {
             // Legitimate repeat appearances — the same recording on its studio album
             // AND on a greatest-hits/compilation — are NEVER auto-removed (plan §E:
-            // "move aside for review, never auto-delete"; the by-ear review surface
-            // will offer them). Only clusters whose members agree on the edition-
-            // folded ALBUM are true stray copies.
+            // "move aside for review, never auto-delete"). They go to the by-ear
+            // review surface instead. Only clusters whose members agree on the
+            // edition-folded ALBUM are true stray copies.
             let albums = Set(c.memberIDs.map { Organiser.canonicalAlbumKey(tracks[$0].album) })
-            guard albums.count == 1 else { continue }
+            guard albums.count == 1 else {
+                let k = tracks[c.keeperID]
+                func info(_ t: Track) -> String {
+                    "\(fmtDur(t.duration)) · \(t.bitrate > 0 ? "\(t.bitrate) kbps" : t.ext) · \(t.album.isEmpty ? "?" : t.album)"
+                }
+                for id in c.memberIDs where id != c.keeperID {
+                    let o = tracks[id]
+                    earPairs.append(EarPair(aRel: PerfectStore.rel(k.url, root),
+                                            bRel: PerfectStore.rel(o.url, root),
+                                            aInfo: info(k), bInfo: info(o),
+                                            artist: k.displayArtist, title: k.title))
+                }
+                continue
+            }
             let keeper = tracks[c.keeperID]
             let keeperRel = PerfectStore.rel(keeper.url, root)
             for field in backfill where (PerfectStore.readField(keeper.url, field) ?? "").isEmpty {
@@ -366,7 +428,7 @@ final class PerfectV2Driver: ObservableObject {
                 moves.append((PerfectStore.rel(tracks[id].url, root), ""))
             }
         }
-        return (writes, embeds, moves)
+        return (writes, embeds, moves, earPairs)
     }
 
     /// One album folder = one directory that directly contains audio files.
@@ -427,6 +489,13 @@ struct PerfectV2View: View {
                         }
                     }
                 }
+                if !driver.earChoices.isEmpty {
+                    Section("Duplicates to decide by ear — the same recording on two albums") {
+                        ForEach($driver.earChoices) { $c in
+                            EarChoiceRow(choice: $c, rootURL: root, busy: driver.running)
+                        }
+                    }
+                }
                 if !driver.coverGaps.isEmpty {
                     Section("Covers to fill — albums missing artwork (blank tracks only; nothing is replaced)") {
                         ForEach(driver.coverGaps) { gap in
@@ -459,12 +528,12 @@ struct PerfectV2View: View {
             }
         }
         .safeAreaInset(edge: .bottom) {
-            if !driver.deferred.isEmpty || !driver.lines.isEmpty {
+            if !driver.deferred.isEmpty || !driver.earChoices.isEmpty || !driver.lines.isEmpty {
                 HStack(spacing: 10) {
-                    if !driver.deferred.isEmpty {
+                    if !driver.deferred.isEmpty || !driver.earChoices.isEmpty {
                         let accepts = driver.deferred.reduce(0) { $0 + $1.decisions.filter(\.accept).count }
                             + driver.deferred.filter { $0.albumSuggestion != nil && $0.acceptAlbum }.count
-                        Text("\(driver.deferred.count) album\(driver.deferred.count == 1 ? "" : "s") · \(accepts) change\(accepts == 1 ? "" : "s") accepted")
+                        Text("\(driver.deferred.count + driver.earChoices.count) item\(driver.deferred.count + driver.earChoices.count == 1 ? "" : "s") · \(accepts) change\(accepts == 1 ? "" : "s") accepted")
                             .fontWeight(.medium)
                     }
                     Text("nothing is written until you apply · every run undoable from Runs")
@@ -480,7 +549,7 @@ struct PerfectV2View: View {
                         } message: {
                             Text("Every recorded run for this library is undone, newest first. Files and tags return to their pre-run state.")
                         }
-                    if !driver.deferred.isEmpty {
+                    if !driver.deferred.isEmpty || !driver.earChoices.isEmpty {
                         Button("Apply all decisions") {
                             if let root { Task { await driver.applyDecisions(root: root, store: perfect) } }
                         }
@@ -784,5 +853,53 @@ struct TrackDecisionRow: View {
                 if let url { previewURL = url; audio.toggle(url) } else { previewMissing = true }
             }
         }
+    }
+}
+
+/// One by-ear duplicate: artist — title header, then the two copies with play
+/// buttons and their vitals, and a Keep A / Keep B / Keep both verdict. "Keep
+/// both" is the recommended default — a track on its album AND a hits set is
+/// legitimate ownership, not a duplicate.
+struct EarChoiceRow: View {
+    @Binding var choice: PerfectV2Driver.EarChoice
+    let rootURL: URL?
+    let busy: Bool
+    @ObservedObject private var audio = AudioPreview.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                (Text(choice.pair.artist).foregroundColor(.purple).fontWeight(.semibold)
+                 + Text(" — \(choice.pair.title)").fontWeight(.semibold))
+                Spacer()
+                Picker("", selection: $choice.verdict) {
+                    Text("Keep A").tag(PerfectV2Driver.EarChoice.Verdict.keepA)
+                    Text("Keep B").tag(PerfectV2Driver.EarChoice.Verdict.keepB)
+                    Text("Keep both").tag(PerfectV2Driver.EarChoice.Verdict.keepBoth)
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 240)
+                .disabled(busy)
+            }
+            copyLine(label: "A", rel: choice.pair.aRel, info: choice.pair.aInfo)
+            copyLine(label: "B", rel: choice.pair.bRel, info: choice.pair.bInfo)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func copyLine(label: String, rel: String, info: String) -> some View {
+        HStack(spacing: 8) {
+            if let rootURL {
+                let url = rootURL.appendingPathComponent(rel)
+                Button { audio.toggle(url) } label: {
+                    Image(systemName: audio.playingURL == url ? "stop.circle.fill" : "play.circle")
+                        .foregroundStyle(audio.playingURL == url ? Color.red : Color.teal)
+                }
+                .buttonStyle(.plain).help("Play copy \(label)")
+            }
+            Text(label).font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary)
+            Text(info).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+            Text(rel).font(.caption2).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+        }
+        .padding(.leading, 8)
     }
 }

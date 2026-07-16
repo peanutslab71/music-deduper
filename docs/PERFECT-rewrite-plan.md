@@ -343,8 +343,17 @@ v2 has:
   missing-tracks toggle gates the release reconcile (offline-fast runs), and
   thoroughness scopes the run — Light/Standard skip edition merges
   (Thorough-only, matching the wizard), Light also keeps file names as-is.
-- Plus the recorded roll-up work: per-track verdicts, batch apply,
-  duplicates-by-ear, kept-album persistence, global Revert-library.
+- Roll-up rebuild — ✅ DONE to the approved mockup (2026-07-16): per-track
+  Accept/Keep verdicts with confidence-flipped defaults and ▶A/▶B audition,
+  artist-first cards with Accept-all/Keep-all, decide-in-batch → one "Apply
+  all decisions" (per album: write accepted names → re-analyze with identify
+  pinned → dependent fixes), kept-proposal persistence (never re-queues,
+  never auto-applies), duplicates-to-decide-by-ear (cross-album pairs as
+  Keep A/B/both cards, keep-both persisted), covers manual search with the
+  VA-artist blank-out, and the global sequential Revert-library. Remaining
+  polish for later: same-slot differing-duration twins and move collisions
+  joining the by-ear section; choose/replace/unify covers on albums that
+  already have art.
 
 ## Verification (always on a COPY of `~/Documents/iTunes Testing Small`)
 - **Pure-logic tests** — all new pure logic **must live in Foundation-only,
