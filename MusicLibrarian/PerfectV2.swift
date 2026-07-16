@@ -83,6 +83,7 @@ final class PerfectV2Driver: ObservableObject {
         var facts = ""                                     // tracks · format · genre · year
         var thumb: Data? = nil                             // first embedded cover
         var trackList: [(no: String, title: String, artist: String)] = []  // read-only tag view
+        var tagSummary: [(label: String, value: String)] = []              // album-level tags
         var tagChanges: [TagChange] = []                   // the session's old→new diff for this album
         // decision payloads (present when state == .needs)
         var decisions: [TrackDecision] = []
@@ -162,6 +163,30 @@ final class PerfectV2Driver: ObservableObject {
                 if let d = PerfectStore.readField(first, "date"), d.count >= 4 { bits.append(String(d.prefix(4))) }
             }
             card.facts = bits.joined(separator: " · ")
+            // album-level tags, with "mixed" when tracks disagree
+            func consensus(_ values: [String]) -> String {
+                let real = values.filter { !$0.isEmpty }
+                guard !real.isEmpty else { return "—" }
+                let counts = Dictionary(grouping: real, by: { $0 }).mapValues { $0.count }
+                let top = counts.max { $0.value < $1.value }!
+                return top.value == real.count && real.count == values.count ? top.key
+                     : top.value == real.count ? "\(top.key) (some blank)"
+                     : "\(top.key) (mixed)"
+            }
+            var summary: [(label: String, value: String)] = [
+                ("album", consensus(ts.map { $0.album })),
+                ("album artist", consensus(ts.map { $0.albumArtist })),
+            ]
+            if let first = card.files.first {
+                let g = PerfectStore.readField(first, "genre") ?? ""
+                summary.append(("genre", g.isEmpty ? "—" : Organiser.displayGenre(g)))
+                let d = PerfectStore.readField(first, "date") ?? ""
+                summary.append(("year", d.count >= 4 ? String(d.prefix(4)) : "—"))
+            }
+            summary.append(("compilation", ts.contains { $0.isCompilation } ? "yes" : "no"))
+            let composers = ts.map { $0.composer }.filter { !$0.isEmpty }
+            if !composers.isEmpty { summary.append(("composer", consensus(ts.map { $0.composer }))) }
+            card.tagSummary = summary
             card.trackList = ts.map { t in
                 let no = t.discNo > 1 ? "\(t.discNo)-\(Organiser.pad2(t.trackNo))"
                         : (t.trackNo > 0 ? Organiser.pad2(t.trackNo) : "–")
@@ -373,7 +398,19 @@ final class PerfectV2Driver: ObservableObject {
             artEmbeds: chosen.flatMap { $0.artEmbeds },
             performerAdds: chosen.flatMap { $0.performerAdds },
             sessionID: session)
-        if let cardID, !changes.isEmpty { update(cardID) { $0.tagChanges += changes } }
+        if let cardID, !changes.isEmpty {
+            update(cardID) { c in
+                c.tagChanges += changes
+                // keep the album-tags panel truthful after the writes
+                for ch in changes {
+                    let label = ch.field == "albumartist" ? "album artist"
+                              : ch.field == "date" ? "year" : ch.field
+                    if let i = c.tagSummary.firstIndex(where: { $0.label == label }) {
+                        c.tagSummary[i].value = ch.field == "genre" ? Organiser.displayGenre(ch.new) : ch.new
+                    }
+                }
+            }
+        }
         return true
     }
 
@@ -921,6 +958,19 @@ struct AlbumCardView: View {
             }
             DisclosureGroup {
                 VStack(alignment: .leading, spacing: 6) {
+                    Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 2) {
+                        ForEach(Array(card.tagSummary.enumerated()), id: \.offset) { _, row in
+                            GridRow {
+                                Text(row.label.uppercased())
+                                    .font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
+                                    .gridColumnAlignment(.trailing)
+                                Text(row.value).font(.caption)
+                                    .foregroundStyle(row.value == "—" ? Color.secondary : Color.primary)
+                            }
+                        }
+                    }
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.06)))
                     if !card.tagChanges.isEmpty {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("CHANGED THIS SESSION").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
