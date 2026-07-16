@@ -43,15 +43,34 @@ final class PerfectV2Driver: ObservableObject {
     private var cancelled = false
     private var sessionID: String?
 
-    /// An album whose identify pass proposed a SUBSTANTIVE name change: nothing was
-    /// applied (every downstream fix was computed from the unaccepted names). The
-    /// review roll-up shows the A/B lines; Accept writes the names then re-analyzes
-    /// and applies the now-clean fix set, Keep leaves the album exactly as found.
+    /// One track's pending name decision (approved mockup: verdicts are PER TRACK).
+    /// The default flips with confidence: a high-score, non-variant proposal
+    /// pre-selects Accept; a risky one pre-selects Keep.
+    struct TrackDecision: Identifiable {
+        var proposal: TrackProposal
+        var accept: Bool
+        var id: String { proposal.relPath }
+        var risky: Bool {
+            proposal.score < 0.75
+            || TrackProposal.nameVariant(proposal.curTitle, proposal.newTitle)
+            || TrackProposal.nameVariant(proposal.curArtist, proposal.newArtist)
+        }
+    }
+
+    /// An album deferred for verdicts: nothing was applied (every downstream fix
+    /// was computed from the unaccepted names). Deciding is instant and offline;
+    /// "Apply all decisions" writes the accepted names per album, re-analyzes with
+    /// identify pinned off, and applies the now-clean fix set. Kept proposals are
+    /// remembered per album so they never re-queue.
     struct DeferredAlbum: Identifiable {
         let dir: URL
         let files: [URL]
-        let fix: AlbumFix          // the identify fix, with its retained proposals
+        var decisions: [TrackDecision] = []
+        var albumSuggestion: AlbumFix? = nil   // speculative album-name guess (6a)
+        var acceptAlbum = false                // a guess defaults to NOT accepted
         var id: String { dir.path }
+        var artist: String { dir.deletingLastPathComponent().lastPathComponent }
+        var album: String { dir.lastPathComponent }
     }
 
     func cancel() { cancelled = true }
@@ -125,20 +144,40 @@ final class PerfectV2Driver: ObservableObject {
             // can return either form on different runs, so auto-applying them
             // oscillates A→B→A forever; a verdict settles them once.
             // Compilation flagging is Phase 1's confirm checklist, never silent.
-            let verdictFix = fixes.first { f in
-                if f.kind == .identify, f.applyable,
-                   f.proposals.contains(where: {
-                       $0.dominantNameKind == .substantive
-                       || TrackProposal.nameVariant($0.curTitle, $0.newTitle)
-                       || TrackProposal.nameVariant($0.curArtist, $0.newArtist)
-                   }) { return true }
-                return f.speculative && f.applyable   // e.g. a text-searched album name
+            var tierFixes = fixes
+            let kept = KeptNamesStore.load(album.dir.path)
+            var decisions: [TrackDecision] = []
+            if let i = tierFixes.firstIndex(where: { $0.kind == .identify && $0.applyable }) {
+                var f = tierFixes[i]
+                // proposals the user KEPT on a previous run never re-queue and never
+                // auto-apply — drop them and their writes
+                let dropRels = Set(f.proposals.filter { kept.contains(KeptNamesStore.pairKey($0)) }.map { $0.relPath })
+                if !dropRels.isEmpty {
+                    f.proposals.removeAll { dropRels.contains($0.relPath) }
+                    f.tagWrites.removeAll { dropRels.contains($0.rel) && ($0.field == "title" || $0.field == "artist") }
+                    tierFixes[i] = f
+                }
+                let needing = f.proposals.filter {
+                    $0.dominantNameKind == .substantive
+                    || TrackProposal.nameVariant($0.curTitle, $0.newTitle)
+                    || TrackProposal.nameVariant($0.curArtist, $0.newArtist)
+                }
+                decisions = needing.map { p in
+                    var d = TrackDecision(proposal: p, accept: false)
+                    d.accept = !d.risky
+                    return d
+                }
             }
-            if let vf = verdictFix {
-                deferred.append(DeferredAlbum(dir: album.dir, files: album.files, fix: vf))
+            let suggestion = tierFixes.first { f in
+                guard f.speculative, f.applyable, let v = f.tagWrites.first?.value else { return false }
+                return !kept.contains("album>" + Organiser.fold(v))   // kept guesses stay gone
+            }
+            if !decisions.isEmpty || suggestion != nil {
+                deferred.append(DeferredAlbum(dir: album.dir, files: album.files,
+                                              decisions: decisions, albumSuggestion: suggestion))
                 continue
             }
-            if await applyTierOne(fixes, root: root, session: session,
+            if await applyTierOne(tierFixes, root: root, session: session,
                                   name: album.dir.lastPathComponent,
                                   doesRenames: thoroughness.doesRenames) { applied += 1 } else { clean += 1 }
         }
@@ -205,45 +244,55 @@ final class PerfectV2Driver: ObservableObject {
         return true
     }
 
-    /// Review verdict: ACCEPT the proposed names — write them (their own run in
-    /// the same session), re-analyze the album so every dependent fix is computed
-    /// from the now-real tags, and apply that clean fix set.
-    func accept(_ d: DeferredAlbum, root: URL, store: PerfectStore) async {
-        guard !running else { return }
+    /// Decide in batch, apply in batch (approved mockup): ticks are instant and
+    /// offline; this runs the whole queue — per album: write the ACCEPTED names,
+    /// re-analyze with identify pinned off (the verdict is ground truth; a fresh
+    /// pass could flip and leak into dependent fixes), apply the now-clean fix
+    /// set; remember every KEPT proposal so it never re-queues. One undoable run
+    /// per album, all in the session.
+    func applyDecisions(root: URL, store: PerfectStore) async {
+        guard !running, !deferred.isEmpty else { return }
         running = true
         defer { running = false; progress = ""; store.loadRuns() }
         let session = sessionID ?? UUID().uuidString
         sessionID = session
-        progress = "Applying names — \(d.dir.lastPathComponent)"
-        await PerfectStore.performLibraryOps(root: root,
-                                             summary: "Perfect v2 — names for \(d.dir.lastPathComponent)",
-                                             tagWrites: d.fix.tagWrites, moves: [],
-                                             sessionID: session)
-        progress = "Re-checking — \(d.dir.lastPathComponent)"
-        let cached = AlbumReconcileStore.load(d.dir.path)
-        // runIdentify: false — the verdict PINNED the names; a fresh identify pass
-        // could propose different ones and leak into the dependent fixes.
-        let (fixes, _, reconcile) = await AlbumPerfect.analyze(root: root, files: d.files,
-                                                               reconciledMatch: cached,
-                                                               runIdentify: false)
-        if let r = reconcile { AlbumReconcileStore.save(d.dir.path, r) }
-        // The user's verdict PINS the names: the re-analyze exists to compute the
-        // dependent fixes from them, never to relitigate them — a fresh identify
-        // pass can flip-flop (scoring shifts once the tag changes) and would
-        // silently overwrite the decision made seconds earlier.
-        _ = await applyTierOne(fixes.filter { $0.kind != .identify },
-                               root: root, session: session, name: d.dir.lastPathComponent)
-        deferred.removeAll { $0.id == d.id }
-        lines.append("Accepted names — \(d.dir.lastPathComponent)")
+        let queue = deferred
+        let doesRenames = store.thoroughness.doesRenames
+        for (n, d) in queue.enumerated() {
+            progress = "Applying decisions — album \(n + 1) of \(queue.count): \(d.album)"
+            var writes: [(rel: String, field: String, value: String)] = []
+            var keptKeys: [String] = []
+            for t in d.decisions {
+                let p = t.proposal
+                if t.accept {
+                    if !p.newTitle.isEmpty, p.newTitle != p.curTitle { writes.append((p.relPath, "title", p.newTitle)) }
+                    if !p.newArtist.isEmpty, p.newArtist != p.curArtist { writes.append((p.relPath, "artist", p.newArtist)) }
+                } else {
+                    keptKeys.append(KeptNamesStore.pairKey(p))
+                }
+            }
+            if let s = d.albumSuggestion {
+                if d.acceptAlbum { writes.append(contentsOf: s.tagWrites) }
+                else if let v = s.tagWrites.first?.value { keptKeys.append("album>" + Organiser.fold(v)) }
+            }
+            if !keptKeys.isEmpty { KeptNamesStore.add(d.dir.path, keptKeys) }
+            if !writes.isEmpty {
+                await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — names for \(d.album)",
+                                                     tagWrites: writes, moves: [], sessionID: session)
+            }
+            let cached = AlbumReconcileStore.load(d.dir.path)
+            let (fixes, _, reconcile) = await AlbumPerfect.analyze(root: root, files: d.files,
+                                                                   reconciledMatch: cached,
+                                                                   runIdentify: false)
+            if let r = reconcile { AlbumReconcileStore.save(d.dir.path, r) }
+            _ = await applyTierOne(fixes, root: root, session: session, name: d.album,
+                                   doesRenames: doesRenames)
+            deferred.removeAll { $0.id == d.id }
+            lines.append("Decisions applied — \(d.artist) — \(d.album)")
+        }
         ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
     }
 
-    /// Review verdict: KEEP the album exactly as analyze found it — nothing was
-    /// applied for it, so declining is simply dropping it from the queue.
-    func keep(_ d: DeferredAlbum) {
-        deferred.removeAll { $0.id == d.id }
-        lines.append("Kept as-is — \(d.dir.lastPathComponent)")
-    }
 
     /// Fill an album's artwork gaps with the chosen image — blank tracks only;
     /// existing art is never replaced here. One undoable run in the session.
@@ -371,25 +420,9 @@ struct PerfectV2View: View {
                     Section("Session") { ForEach(driver.lines, id: \.self) { Text($0).font(.caption) } }
                 }
                 if !driver.deferred.isEmpty {
-                    Section("Names to confirm — these albums are untouched until you decide") {
-                        ForEach(driver.deferred) { d in
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(d.dir.lastPathComponent).fontWeight(.medium)
-                                    Text(d.fix.summary).font(.caption).foregroundStyle(.secondary)
-                                    Spacer()
-                                    Button("Accept names") {
-                                        if let root { Task { await driver.accept(d, root: root, store: perfect) } }
-                                    }
-                                    .controlSize(.small).disabled(driver.running || root == nil)
-                                    Button("Keep as-is") { driver.keep(d) }
-                                        .controlSize(.small).disabled(driver.running)
-                                }
-                                ForEach(Array(d.fix.lines.enumerated()), id: \.offset) { _, line in
-                                    Text(line).font(.caption).foregroundStyle(.secondary)
-                                }
-                            }
-                            .padding(.vertical, 3)
+                    Section("Names to confirm — untouched until you apply; tick each track") {
+                        ForEach($driver.deferred) { $d in
+                            DeferredAlbumCard(album: $d, busy: driver.running)
                         }
                     }
                 }
@@ -424,7 +457,27 @@ struct PerfectV2View: View {
                 }
             }
         }
-        .frame(minWidth: 640, minHeight: 420)
+        .safeAreaInset(edge: .bottom) {
+            if !driver.deferred.isEmpty {
+                HStack(spacing: 10) {
+                    let accepts = driver.deferred.reduce(0) { $0 + $1.decisions.filter(\.accept).count }
+                        + driver.deferred.filter { $0.albumSuggestion != nil && $0.acceptAlbum }.count
+                    Text("\(driver.deferred.count) album\(driver.deferred.count == 1 ? "" : "s") · \(accepts) change\(accepts == 1 ? "" : "s") accepted")
+                        .fontWeight(.medium)
+                    Text("nothing is written until you apply · every run undoable from Runs")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Apply all decisions") {
+                        if let root { Task { await driver.applyDecisions(root: root, store: perfect) } }
+                    }
+                    .buttonStyle(.borderedProminent).tint(.teal)
+                    .disabled(driver.running || root == nil)
+                }
+                .padding(10)
+                .background(.bar)
+            }
+        }
+        .frame(minWidth: 700, minHeight: 460)
     }
 
     private func choose() {
@@ -516,5 +569,175 @@ struct CoverGapRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Kept names (per-album "don't ask again")
+
+/// Proposals the user KEPT: remembered per album folder so an identical
+/// suggestion never re-queues (and never auto-applies) on later runs.
+enum KeptNamesStore {
+    private static func hash(_ s: String) -> String {
+        var h: UInt64 = 5381; for b in s.utf8 { h = (h &* 33) &+ UInt64(b) }; return String(h, radix: 16)
+    }
+    private static func file(_ folderPath: String) -> URL? {
+        let fm = FileManager.default
+        guard let base = try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                     appropriateFor: nil, create: true) else { return nil }
+        let dir = base.appendingPathComponent("Music Librarian/kept-names", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("\(hash(folderPath)).json")
+    }
+    /// The change a proposal describes, folded — stable across runs and cosmetic drift.
+    static func pairKey(_ p: TrackProposal) -> String {
+        TrackProposal.hardFold(p.curTitle) + ">" + TrackProposal.hardFold(p.newTitle)
+        + "|" + TrackProposal.hardFold(p.curArtist) + ">" + TrackProposal.hardFold(p.newArtist)
+    }
+    static func load(_ folderPath: String) -> Set<String> {
+        guard let u = file(folderPath), let d = try? Data(contentsOf: u),
+              let a = try? JSONDecoder().decode([String].self, from: d) else { return [] }
+        return Set(a)
+    }
+    static func add(_ folderPath: String, _ keys: [String]) {
+        guard let u = file(folderPath) else { return }
+        let merged = load(folderPath).union(keys)
+        if let d = try? JSONEncoder().encode(Array(merged).sorted()) { try? d.write(to: u) }
+    }
+}
+
+// MARK: - Deferred album card (per-track verdicts, approved mockup)
+
+/// One deferred album: artist-first header, Accept-all/Keep-all quick actions,
+/// then a verdict row per track (and the album-name suggestion when present).
+struct DeferredAlbumCard: View {
+    @Binding var album: PerfectV2Driver.DeferredAlbum
+    let busy: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                (Text(album.artist).foregroundColor(.purple).fontWeight(.semibold)
+                 + Text(" — \(album.album)").fontWeight(.semibold))
+                Text("\(album.decisions.count) track\(album.decisions.count == 1 ? "" : "s")")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if album.decisions.count > 1 {
+                    Button("Accept all") { setAll(true) }.controlSize(.small).disabled(busy)
+                    Button("Keep all") { setAll(false) }.controlSize(.small).disabled(busy)
+                }
+            }
+            ForEach($album.decisions) { $d in
+                TrackDecisionRow(decision: $d, busy: busy)
+            }
+            if let s = album.albumSuggestion {
+                HStack(spacing: 8) {
+                    Image(systemName: "questionmark.folder").foregroundStyle(.orange)
+                    Text(s.summary).font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Picker("", selection: $album.acceptAlbum) {
+                        Text("Accept").tag(true)
+                        Text("Keep blank").tag(false)
+                    }
+                    .pickerStyle(.segmented).labelsHidden().frame(width: 150)
+                    .disabled(busy)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func setAll(_ accept: Bool) {
+        for i in album.decisions.indices { album.decisions[i].accept = accept }
+    }
+}
+
+/// One track's A/B verdict row: old name struck through → proposed name, a
+/// change-kind chip, the AcoustID score (amber when risky), ▶A/▶B audition
+/// buttons, and the Accept/Keep segmented verdict.
+struct TrackDecisionRow: View {
+    @Binding var decision: PerfectV2Driver.TrackDecision
+    let busy: Bool
+    @ObservedObject private var audio = AudioPreview.shared
+    @State private var previewURL: URL?
+    @State private var previewLoading = false
+    @State private var previewMissing = false
+
+    private var p: TrackProposal { decision.proposal }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                if !p.newTitle.isEmpty, p.newTitle != p.curTitle {
+                    changeLine(from: p.curTitle.isEmpty ? p.url.lastPathComponent : p.curTitle, to: p.newTitle)
+                }
+                if !p.newArtist.isEmpty, p.newArtist != p.curArtist {
+                    changeLine(from: "artist: \(p.curArtist.isEmpty ? "—" : p.curArtist)", to: p.newArtist)
+                }
+            }
+            Text(kindLabel)
+                .font(.system(size: 9, weight: .semibold)).textCase(.uppercase)
+                .padding(.horizontal, 6).padding(.vertical, 1)
+                .background(Capsule().fill(decision.risky ? Color.orange.opacity(0.18) : Color.purple.opacity(0.14)))
+                .foregroundStyle(decision.risky ? Color.orange : Color.purple)
+            Text(String(format: "%.2f", p.score))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(decision.risky ? Color.orange : Color.secondary)
+            // ▶A — your file
+            Button { audio.toggle(p.url) } label: {
+                Image(systemName: audio.playingURL == p.url ? "stop.circle.fill" : "play.circle")
+                    .foregroundStyle(audio.playingURL == p.url ? Color.red : Color.teal)
+            }
+            .buttonStyle(.plain).help("Play your file")
+            // ▶B — the proposed match (online preview)
+            Button { playProposed() } label: {
+                if previewLoading { ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 16, height: 16) }
+                else {
+                    Image(systemName: previewMissing ? "waveform.slash"
+                          : (previewURL != nil && audio.playingURL == previewURL ? "stop.circle.fill" : "waveform.circle"))
+                        .foregroundStyle(previewMissing ? Color.secondary
+                                         : (previewURL != nil && audio.playingURL == previewURL ? Color.red : Color.purple))
+                }
+            }
+            .buttonStyle(.plain).disabled(previewLoading || previewMissing)
+            .help(previewMissing ? "No online preview found for the proposed match" : "Hear the proposed match")
+            Spacer()
+            Picker("", selection: $decision.accept) {
+                Text("Accept").tag(true)
+                Text("Keep").tag(false)
+            }
+            .pickerStyle(.segmented).labelsHidden().frame(width: 140)
+            .disabled(busy)
+        }
+        .padding(.leading, 8)
+    }
+
+    private var kindLabel: String {
+        if TrackProposal.nameVariant(p.curTitle, p.newTitle)
+            || TrackProposal.nameVariant(p.curArtist, p.newArtist) { return "variant" }
+        return p.score < 0.75 ? "low confidence" : "retitle"
+    }
+
+    private func changeLine(from: String, to: String) -> some View {
+        (Text(from).strikethrough().foregroundColor(.secondary)
+         + Text("  →  ").foregroundColor(.secondary)
+         + Text(to).fontWeight(.semibold))
+            .font(.callout)
+            .lineLimit(1)
+    }
+
+    private func playProposed() {
+        if let u = previewURL { audio.toggle(u); return }
+        guard !previewLoading else { return }
+        previewLoading = true
+        let artist = p.newArtist.isEmpty ? p.curArtist : p.newArtist
+        let title = p.newTitle.isEmpty ? p.curTitle : p.newTitle
+        Task {
+            let url = await CoverArtClient().trackPreview(artist: artist, title: title)
+            await MainActor.run {
+                previewLoading = false
+                if let url { previewURL = url; audio.toggle(url) } else { previewMissing = true }
+            }
+        }
     }
 }
