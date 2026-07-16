@@ -46,6 +46,7 @@ final class PerfectV2Driver: ObservableObject {
     func run(root: URL, store: PerfectStore) async {
         guard !running else { return }
         running = true; cancelled = false; lines = []; deferred = []
+        PerfectStore.rememberRoot(root)   // so Runs/Logs list this library's runs
         let session = UUID().uuidString
         sessionID = session
         defer { running = false; progress = ""; store.loadRuns() }

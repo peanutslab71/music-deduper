@@ -1169,6 +1169,7 @@ struct NormalizeView: View {
 
     private func rescan() {
         guard let root else { return }
+        PerfectStore.rememberRoot(root)   // so Runs/Logs list this library's runs
         scanning = true; appliedSummary = nil
         Task.detached(priority: .userInitiated) {
             let scanned = PerfectStore.scanForNormalize(root: root)
