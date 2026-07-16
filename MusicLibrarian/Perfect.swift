@@ -3437,6 +3437,26 @@ final class PerfectStore: ObservableObject {
         }
     }
 
+    /// Revert EVERYTHING recorded for one library — sessions and loose runs alike —
+    /// strictly newest-first and SEQUENTIALLY, so no revert pulls paths out from
+    /// under another. One click back to the pre-Perfect library; manual per-run
+    /// ordering (which once leaked a tag restore) can't happen here.
+    func undoLibrary(_ root: URL) {
+        let members = runs.filter { $0.root.path == root.path }.sorted { $0.date > $1.date }
+        guard !members.isEmpty else { return }
+        busy = true
+        status = "Reverting library (\(members.count) run\(members.count == 1 ? "" : "s"))…"
+        let isCurrentLibrary = (self.root?.path == root.path)
+        Task {
+            var restored = 0, failed = 0
+            for run in members {
+                let r = await Self.revertRun(run)
+                restored += r.restored; failed += r.failed
+            }
+            self.finishUndo(restored: restored, failed: failed, current: isCurrentLibrary)
+        }
+    }
+
     /// The disk side of one run's revert — awaitable, so callers can sequence
     /// several reverts (undoSession) instead of firing them off concurrently.
     nonisolated static func revertRun(_ run: RunRecord) async -> (restored: Int, failed: Int) {

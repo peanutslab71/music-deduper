@@ -391,6 +391,7 @@ final class PerfectV2Driver: ObservableObject {
 struct PerfectV2View: View {
     @EnvironmentObject private var perfect: PerfectStore
     @StateObject private var driver = PerfectV2Driver()
+    @State private var confirmRevert = false
     @State private var root: URL? = UserDefaults.standard.string(forKey: "libraryBrowserRoot")
         .map { URL(fileURLWithPath: $0) }
 
@@ -458,20 +459,34 @@ struct PerfectV2View: View {
             }
         }
         .safeAreaInset(edge: .bottom) {
-            if !driver.deferred.isEmpty {
+            if !driver.deferred.isEmpty || !driver.lines.isEmpty {
                 HStack(spacing: 10) {
-                    let accepts = driver.deferred.reduce(0) { $0 + $1.decisions.filter(\.accept).count }
-                        + driver.deferred.filter { $0.albumSuggestion != nil && $0.acceptAlbum }.count
-                    Text("\(driver.deferred.count) album\(driver.deferred.count == 1 ? "" : "s") · \(accepts) change\(accepts == 1 ? "" : "s") accepted")
-                        .fontWeight(.medium)
+                    if !driver.deferred.isEmpty {
+                        let accepts = driver.deferred.reduce(0) { $0 + $1.decisions.filter(\.accept).count }
+                            + driver.deferred.filter { $0.albumSuggestion != nil && $0.acceptAlbum }.count
+                        Text("\(driver.deferred.count) album\(driver.deferred.count == 1 ? "" : "s") · \(accepts) change\(accepts == 1 ? "" : "s") accepted")
+                            .fontWeight(.medium)
+                    }
                     Text("nothing is written until you apply · every run undoable from Runs")
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button("Apply all decisions") {
-                        if let root { Task { await driver.applyDecisions(root: root, store: perfect) } }
+                    Button("Revert library…", role: .destructive) { confirmRevert = true }
+                        .disabled(driver.running || perfect.busy || root == nil)
+                        .confirmationDialog("Revert this library to before Perfect ran?",
+                                            isPresented: $confirmRevert, titleVisibility: .visible) {
+                            Button("Revert everything", role: .destructive) {
+                                if let root { perfect.undoLibrary(root) }
+                            }
+                        } message: {
+                            Text("Every recorded run for this library is undone, newest first. Files and tags return to their pre-run state.")
+                        }
+                    if !driver.deferred.isEmpty {
+                        Button("Apply all decisions") {
+                            if let root { Task { await driver.applyDecisions(root: root, store: perfect) } }
+                        }
+                        .buttonStyle(.borderedProminent).tint(.teal)
+                        .disabled(driver.running || root == nil)
                     }
-                    .buttonStyle(.borderedProminent).tint(.teal)
-                    .disabled(driver.running || root == nil)
                 }
                 .padding(10)
                 .background(.bar)
@@ -516,6 +531,10 @@ struct CoverGapRow: View {
     @State private var searching = false
     @State private var searched = false
     @State private var selected: Data?
+    // editable query — the escape hatch when the tag-driven search misses
+    // (e.g. an album filed under Various Artists, or a renamed edition)
+    @State private var queryArtist = ""
+    @State private var queryAlbum = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -550,25 +569,51 @@ struct CoverGapRow: View {
                     }
                     if !searched {
                         Button {
-                            searching = true
-                            Task {
-                                let found = await CoverArtClient().candidates(releaseMBIDs: [],
-                                                                              artist: gap.art.artist,
-                                                                              album: gap.art.album)
-                                await MainActor.run { online = found; searching = false; searched = true }
-                            }
+                            search()
                         } label: {
                             if searching { ProgressView().controlSize(.small) }
                             else { Label("Find covers online", systemImage: "magnifyingglass") }
                         }
                         .controlSize(.small).disabled(searching)
                     } else if online.isEmpty {
-                        Text("nothing found online").font(.caption).foregroundStyle(.tertiary)
+                        Text("nothing found online — edit the search below").font(.caption).foregroundStyle(.tertiary)
                     }
+                }
+            }
+            if searched {
+                // the manual escape hatch: edit the query when the tag-driven search misses
+                HStack(spacing: 6) {
+                    TextField("Artist", text: $queryArtist).textFieldStyle(.roundedBorder)
+                        .font(.caption).frame(width: 160)
+                    TextField("Album", text: $queryAlbum).textFieldStyle(.roundedBorder)
+                        .font(.caption).frame(width: 220)
+                    Button {
+                        search()
+                    } label: {
+                        if searching { ProgressView().controlSize(.small) } else { Text("Search again") }
+                    }
+                    .controlSize(.small).disabled(searching)
+                    Text("edit the search if the match misses").font(.caption2).foregroundStyle(.tertiary)
                 }
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func search() {
+        if queryArtist.isEmpty && queryAlbum.isEmpty {
+            // pre-fill from tags — but never search on "Various Artists", the
+            // dead-end that hid The Specials' cover; leave artist blank instead
+            let a = gap.art.artist
+            queryArtist = Organiser.artistKey(a) == "variousartists" ? "" : a
+            queryAlbum = gap.art.album.isEmpty ? gap.dir.lastPathComponent : gap.art.album
+        }
+        searching = true
+        let a = queryArtist, al = queryAlbum
+        Task {
+            let found = await CoverArtClient().candidates(releaseMBIDs: [], artist: a, album: al)
+            await MainActor.run { online = found; searching = false; searched = true }
+        }
     }
 }
 
