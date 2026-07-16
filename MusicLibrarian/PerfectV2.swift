@@ -947,6 +947,16 @@ struct AlbumCardView: View {
                     Text("← → keys").font(.caption2).foregroundStyle(.tertiary)
                 }
             }
+            if card.state == .analyzing {
+                // the pipeline fetches candidates as part of the analyze — say so
+                // instead of showing a confusing empty search UI
+                block("Cover") {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("analyzing — finding covers…").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
             if card.state == .needs || card.state == .clean {
                 block(coverTitle) { coverBlock }
             }
