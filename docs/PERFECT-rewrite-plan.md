@@ -343,8 +343,16 @@ v2 has:
   missing-tracks toggle gates the release reconcile (offline-fast runs), and
   thoroughness scopes the run — Light/Standard skip edition merges
   (Thorough-only, matching the wizard), Light also keeps file names as-is.
-- **REDESIGN (2026-07-16, after first real use): the roll-up becomes an ALBUM
-  CAROUSEL.** User verdict on the sectioned layout: grouping by issue type
+- **LIBRARY-FIRST CAROUSEL — ✅ BUILT (2026-07-16, mockup v3 approved).** The
+  library IS the carousel: choosing a library loads EVERY album as a card
+  immediately (cover thumb, facts line with genre/year, read-only track
+  table); Run is a visible pipeline — Phase 1 refreshes the strip once, then
+  each card pulses while analyzed and turns ✓ clean or gains decision blocks
+  live; the user can decide finished albums while the loop runs. Filter is
+  All/Needs-decisions over one list; every analyzed album offers the cover
+  chooser (replace is backed-up + undoable — the Hunky Dory ask); pending
+  frames are dimmed, the analyzing frame pulses and auto-scrolls into view.
+- **Earlier redesign rationale (superseded UI, kept for the record):** User verdict on the sectioned layout: grouping by issue type
   makes the same album appear in Names, Duplicates and Covers — duplicated
   effort and context switches; the per-album Perfect dialog's album-as-unit
   model is preferred. New direction (mockup v2 'carousel-redesign' at the

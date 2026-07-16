@@ -1,14 +1,16 @@
 //
-//  PerfectV2.swift — the Perfect v2 driver (behind the "perfectV2" flag).
+//  PerfectV2.swift — the Perfect v2 driver + library-first carousel (behind the
+//  "perfectV2" flag).
 //
-//  The thin replacement for the batch wizard pipeline: Phase-1 normalize (with
-//  the user's saved Normalize choices) → the proven per-album engine
-//  (AlbumPerfect.analyze) over every folder → a final organise pass on the
-//  corrected tags. Every apply is one reversible run stamped with the session's
-//  ID, so Runs offers "Revert session" back to the pre-run library.
+//  The library IS the carousel: choosing a library loads every album as a card
+//  immediately (cover, facts, track table) from a local scan. Run is a visible
+//  pipeline — Phase-1 normalize (the strip refreshes once as merges fuse), then
+//  the per-album engine walks the strip live: each card pulses while analyzed,
+//  then turns ✓ clean or gains its decision blocks in place. Decisions
+//  accumulate offline and apply in one batch; every apply is a session-stamped,
+//  undoable run; Revert library is always one click.
 //
 //  Enable with:  defaults write com.local.musiclibrarian perfectV2 -bool YES
-//  (hidden while the old wizard remains the shipping path — plan step 7 flips it).
 //
 
 import SwiftUI
@@ -19,44 +21,25 @@ extension PerfectStore {
     static var perfectV2Enabled: Bool { UserDefaults.standard.bool(forKey: "perfectV2") }
 }
 
-/// Drives one Perfect v2 session over a library. Owned by the v2 window; all the
-/// disk work runs off-main, one album at a time, cancellable between albums.
+// MARK: - Driver
+
+/// Drives one Perfect v2 session over a library. Owns the card list; all disk
+/// work runs off-main, one album at a time, cancellable between albums.
 @MainActor
 final class PerfectV2Driver: ObservableObject {
     @Published var running = false
     @Published var progress = ""
-    @Published var lines: [String] = []              // session log shown in the window
-    @Published var deferred: [DeferredAlbum] = []    // Tier 2 — untouched, awaiting a verdict
-    @Published var coverGaps: [CoverGap] = []        // albums missing artwork — fill by choice, never silently
-    @Published var drmTracks: [String] = []          // protected (FairPlay) rels — info only, never touched
-    @Published var earChoices: [EarChoice] = []      // same recording, two albums — you pick by ear
-
-    /// A by-ear verdict: keep A, keep B, or (the recommended legitimate-repeat
-    /// default) keep both. Applied with the decisions batch; "keep both" persists
-    /// so the pair never re-offers.
-    struct EarChoice: Identifiable {
-        let pair: EarPair
-        var verdict: Verdict
-        enum Verdict { case keepA, keepB, keepBoth }
-        var id: String { pair.id }
-    }
-
-    /// An album with artwork gaps: no cover anywhere, or some tracks blank. The
-    /// window offers the album's own best covers plus an on-demand online search;
-    /// the chosen image fills ONLY the blank tracks (existing art is never
-    /// replaced here — that's the review roll-up's job later).
-    struct CoverGap: Identifiable {
-        let dir: URL
-        let art: AlbumArtContext
-        var id: String { dir.path }
-        var missingRels: [String] { art.rels.filter { art.relArt[$0] == nil } }
-    }
+    @Published var lines: [String] = []          // session log
+    @Published var cards: [AlbumCardModel] = []  // EVERY album — the library itself
+    @Published var drmTracks: [String] = []      // protected rels — info only
     private var cancelled = false
     private var sessionID: String?
+    private var loadedRoot: URL?
 
-    /// One track's pending name decision (approved mockup: verdicts are PER TRACK).
-    /// The default flips with confidence: a high-score, non-variant proposal
-    /// pre-selects Accept; a risky one pre-selects Keep.
+    enum AlbumState { case pending, analyzing, clean, needs }
+
+    /// One track's pending name decision. The default flips with confidence:
+    /// a high-score, non-variant proposal pre-selects Accept; a risky one Keep.
     struct TrackDecision: Identifiable {
         var proposal: TrackProposal
         var accept: Bool
@@ -68,47 +51,122 @@ final class PerfectV2Driver: ObservableObject {
         }
     }
 
-    /// An album deferred for verdicts: nothing was applied (every downstream fix
-    /// was computed from the unaccepted names). Deciding is instant and offline;
-    /// "Apply all decisions" writes the accepted names per album, re-analyzes with
-    /// identify pinned off, and applies the now-clean fix set. Kept proposals are
-    /// remembered per album so they never re-queue.
-    struct DeferredAlbum: Identifiable {
+    /// A same-recording pair auto-dedup refused to decide (different albums —
+    /// a legitimate-repeat candidate): a by-ear verdict on the A-side's card.
+    struct EarPair: Identifiable, Sendable {
+        let aRel: String, bRel: String
+        let aInfo: String, bInfo: String
+        let artist: String, title: String
+        var id: String { aRel + "|" + bRel }
+    }
+    struct EarChoice: Identifiable {
+        let pair: EarPair
+        var verdict: Verdict
+        enum Verdict { case keepA, keepB, keepBoth }
+        var id: String { pair.id }
+    }
+
+    /// One album card — present from the moment the library loads, enriched by
+    /// the pipeline as its album is analyzed.
+    struct AlbumCardModel: Identifiable {
         let dir: URL
-        let files: [URL]
+        var files: [URL]
+        var state: AlbumState = .pending
+        var facts = ""                                     // tracks · format · genre · year
+        var thumb: Data? = nil                             // first embedded cover
+        var trackList: [(no: String, title: String)] = []  // read-only tag view
+        // decision payloads (present when state == .needs)
         var decisions: [TrackDecision] = []
-        var albumSuggestion: AlbumFix? = nil   // speculative album-name guess (6a)
-        var acceptAlbum = false                // a guess defaults to NOT accepted
+        var albumSuggestion: AlbumFix? = nil               // speculative album-name guess (6a)
+        var acceptAlbum = false                            // a guess defaults to NOT accepted
+        var earChoices: [EarChoice] = []
+        // artwork: rels + which have art (set after analyze; the chooser is
+        // available on every analyzed card — replace is backed up + undoable)
+        var art: AlbumArtContext? = nil
         var id: String { dir.path }
         var artist: String { dir.deletingLastPathComponent().lastPathComponent }
         var album: String { dir.lastPathComponent }
+        var missingArtRels: [String] {
+            guard let art else { return [] }
+            return art.rels.filter { art.relArt[$0] == nil }
+        }
+        var hasPendingDecisions: Bool {
+            !decisions.isEmpty || albumSuggestion != nil || !earChoices.isEmpty
+        }
     }
 
     func cancel() { cancelled = true }
 
+    // MARK: library loading — the carousel fills the moment a library is chosen
+
+    func loadLibrary(_ root: URL) {
+        guard loadedRoot != root || cards.isEmpty else { return }
+        loadedRoot = root
+        PerfectStore.rememberRoot(root)
+        Task {
+            let built = await Task.detached { PerfectV2Driver.buildCards(root: root) }.value
+            self.cards = built
+            self.drmTracks = built.flatMap { $0.files.filter { $0.pathExtension.lowercased() == "m4p" } }
+                .map { PerfectStore.rel($0, root) }
+            // thumbnails lazily, off-main, published as they arrive
+            Task.detached { [weak self] in
+                for card in built {
+                    guard let first = card.files.first else { continue }
+                    var len: Int32 = 0, ty: Int32 = 0
+                    guard let b = md_copy_artwork(first.path, &len, &ty) else { continue }
+                    let d = Data(bytes: b, count: Int(len)); free(b)
+                    await MainActor.run { [weak self] in
+                        guard let self, let i = self.cards.firstIndex(where: { $0.id == card.id }) else { return }
+                        self.cards[i].thumb = d
+                    }
+                }
+            }
+        }
+    }
+
+    /// Facts + track table from the local scan — no network, instant.
+    nonisolated static func buildCards(root: URL) -> [AlbumCardModel] {
+        let inputs = PerfectStore.organiseInputsFromDisk(root: root, fm: .default)
+        var byDir: [String: [OrganiseInput]] = [:]
+        for t in inputs { byDir[(t.rel as NSString).deletingLastPathComponent, default: []].append(t) }
+        return byDir.keys.sorted().map { dirRel in
+            let ts = byDir[dirRel]!.sorted { ($0.discNo, $0.trackNo, $0.rel) < ($1.discNo, $1.trackNo, $1.rel) }
+            let dir = root.appendingPathComponent(dirRel)
+            var card = AlbumCardModel(dir: dir, files: ts.map { root.appendingPathComponent($0.rel) })
+            let exts = Set(ts.map { $0.ext }).sorted().joined(separator: "/")
+            var bits = ["\(ts.count) track\(ts.count == 1 ? "" : "s")", exts]
+            if let first = card.files.first {
+                if let g = PerfectStore.readField(first, "genre"), !g.isEmpty { bits.append(g.lowercased()) }
+                if let d = PerfectStore.readField(first, "date"), d.count >= 4 { bits.append(String(d.prefix(4))) }
+            }
+            card.facts = bits.joined(separator: " · ")
+            card.trackList = ts.map { t in
+                let no = t.discNo > 1 ? "\(t.discNo)-\(Organiser.pad2(t.trackNo))"
+                        : (t.trackNo > 0 ? Organiser.pad2(t.trackNo) : "–")
+                return (no, t.title.isEmpty ? Organiser.titleFromFilename(t.rel) : t.title)
+            }
+            return card
+        }
+    }
+
+    // MARK: the run — a visible pipeline over the loaded cards
+
     func run(root: URL, store: PerfectStore) async {
         guard !running else { return }
-        running = true; cancelled = false; lines = []; deferred = []; coverGaps = []; drmTracks = []; earChoices = []
-        PerfectStore.rememberRoot(root)   // so Runs/Logs list this library's runs
-        // the user's persisted settings gate how much this run does (plan 6d):
-        // Light/Standard/Thorough scopes merges + renames; the missing-tracks
-        // toggle keeps a run offline-fast by skipping the release reconcile.
+        running = true; cancelled = false; lines = []
         let thoroughness = store.thoroughness
         let reconcileOnline = store.checkMissingTracks
         let session = UUID().uuidString
         sessionID = session
         defer { running = false; progress = ""; store.loadRuns() }
 
-        // ---- Phase 1: normalize, reusing the choices confirmed in the Normalize
-        // window (artist spellings, declined merges, compilation confirmations).
+        // ---- Phase 1: normalize (merges may fuse folders — the strip refreshes)
         progress = "Phase 1 — normalizing folders"
         let scanned = await Task.detached { PerfectStore.scanForNormalize(root: root) }.value
         let choices = Normalizer.ChoicesStore.load(root.path)
         let confirmedComps = Normalizer.compilationCandidates(scanned.tracks)
             .filter { !choices.declinedCompilations.contains($0.key) }
             .reduce(into: Set<String>()) { $0.formUnion($1.foldKeys) }
-        // Light/Standard skip edition merges (Thorough-only, matching the wizard's
-        // scoping) by declining every candidate for this run.
         var p1Declined = Set(choices.declinedMerges)
         if !thoroughness.doesMerges {
             p1Declined.formUnion(Organiser.albumMergeCandidates(scanned.tracks).map { $0.key })
@@ -121,47 +179,39 @@ final class PerfectV2Driver: ObservableObject {
                                                  tagWrites: p1.tagWrites, moves: p1.moves,
                                                  sessionID: session)
             lines.append("Phase 1: \(p1.tagWrites.count) tag write(s), \(p1.moves.count) move(s)")
+            // the tree changed — rebuild the strip from the normalized library
+            let rebuilt = await Task.detached { PerfectV2Driver.buildCards(root: root) }.value
+            cards = rebuilt
+            drmTracks = rebuilt.flatMap { $0.files.filter { $0.pathExtension.lowercased() == "m4p" } }
+                .map { PerfectStore.rel($0, root) }
         } else {
             lines.append("Phase 1: nothing to normalize")
+            for i in cards.indices { cards[i].state = .pending }
         }
         guard !cancelled else { lines.append("Cancelled — applied runs stay undoable from Runs"); return }
 
-        // ---- Per-album loop over the normalized tree: the same engine as
-        // "Perfect this album", one reversible run per album.
-        let albums = await Task.detached { PerfectV2Driver.albumFolders(root: root) }.value
+        // ---- the per-album loop, live on the strip
         var applied = 0, clean = 0
-        for (idx, album) in albums.enumerated() {
+        var idx = 0
+        while idx < cards.count {
             if cancelled { break }
-            progress = "Album \(idx + 1) of \(albums.count) — \(album.dir.lastPathComponent)"
-            // Protected (FairPlay) tracks: listed for the manifest, never touched.
-            drmTracks.append(contentsOf: album.files
-                .filter { $0.pathExtension.lowercased() == "m4p" }
-                .map { PerfectStore.rel($0, root) })
-            let cached = AlbumReconcileStore.load(album.dir.path)
-            let (fixes, art, reconcile) = await AlbumPerfect.analyze(root: root, files: album.files,
+            let card = cards[idx]
+            idx += 1
+            guard card.state == .pending else { continue }
+            setState(card.id, .analyzing)
+            progress = "Album \(idx) of \(cards.count) — \(card.album)"
+            let cached = AlbumReconcileStore.load(card.dir.path)
+            let (fixes, art, reconcile) = await AlbumPerfect.analyze(root: root, files: card.files,
                                                                      reconciledMatch: cached,
                                                                      reconcileOnline: reconcileOnline)
-            if let r = reconcile { AlbumReconcileStore.save(album.dir.path, r) }
-            // Artwork gaps queue for a cover choice (6b): no cover anywhere, or some
-            // tracks blank. Filling is a user pick, never silent.
-            if !art.rels.isEmpty, art.ownCovers.isEmpty || art.rels.contains(where: { art.relArt[$0] == nil }) {
-                coverGaps.append(CoverGap(dir: album.dir, art: art))
-            }
+            if let r = reconcile { AlbumReconcileStore.save(card.dir.path, r) }
 
-            // Tier gating (v2 plan): a SUBSTANTIVE identify change means every
-            // downstream fix was computed from the unaccepted names — defer the
-            // WHOLE album to the review roll-up rather than auto-apply half of it.
-            // VARIANT changes (word-subset or one-typo pairs) also defer: AcoustID
-            // can return either form on different runs, so auto-applying them
-            // oscillates A→B→A forever; a verdict settles them once.
-            // Compilation flagging is Phase 1's confirm checklist, never silent.
             var tierFixes = fixes
-            let kept = KeptNamesStore.load(album.dir.path)
+            let kept = KeptNamesStore.load(card.dir.path)
             var decisions: [TrackDecision] = []
             if let i = tierFixes.firstIndex(where: { $0.kind == .identify && $0.applyable }) {
                 var f = tierFixes[i]
-                // proposals the user KEPT on a previous run never re-queue and never
-                // auto-apply — drop them and their writes
+                // KEPT proposals never re-queue and never auto-apply
                 let dropRels = Set(f.proposals.filter { kept.contains(KeptNamesStore.pairKey($0)) }.map { $0.relPath })
                 if !dropRels.isEmpty {
                     f.proposals.removeAll { dropRels.contains($0.relPath) }
@@ -181,21 +231,26 @@ final class PerfectV2Driver: ObservableObject {
             }
             let suggestion = tierFixes.first { f in
                 guard f.speculative, f.applyable, let v = f.tagWrites.first?.value else { return false }
-                return !kept.contains("album>" + Organiser.fold(v))   // kept guesses stay gone
+                return !kept.contains("album>" + Organiser.fold(v))
             }
+
             if !decisions.isEmpty || suggestion != nil {
-                deferred.append(DeferredAlbum(dir: album.dir, files: album.files,
-                                              decisions: decisions, albumSuggestion: suggestion))
-                continue
+                update(card.id) { c in
+                    c.decisions = decisions; c.albumSuggestion = suggestion
+                    c.art = art; c.state = .needs
+                }
+                continue   // deferred whole — dependent fixes wait for the verdicts
             }
-            if await applyTierOne(tierFixes, root: root, session: session,
-                                  name: album.dir.lastPathComponent,
-                                  doesRenames: thoroughness.doesRenames) { applied += 1 } else { clean += 1 }
+            let didApply = await applyTierOne(tierFixes, root: root, session: session,
+                                              name: card.album, doesRenames: thoroughness.doesRenames)
+            if didApply { applied += 1 } else { clean += 1 }
+            update(card.id) { c in
+                c.art = art
+                c.state = c.missingArtRels.isEmpty ? .clean : .needs   // cover gaps are decisions too
+            }
         }
 
-        // ---- Final pass: re-file/merge on the CORRECTED tags, so a folder whose
-        // album or album-artist the loop fixed moves to match. (Library-wide dedup
-        // on final tags lands with the review roll-up increment.)
+        // ---- final pass on the corrected tags + the cross-album dedup sweep
         if !cancelled {
             progress = "Final pass — organising on corrected tags"
             let rescan = await Task.detached { PerfectStore.scanForNormalize(root: root) }.value
@@ -212,10 +267,6 @@ final class PerfectV2Driver: ObservableObject {
                                                      sessionID: session)
                 lines.append("Final pass: \(p2.tagWrites.count) tag write(s), \(p2.moves.count) move(s)")
             }
-            // Library-wide dedup on the FINAL tags: cross-folder copies that only
-            // became duplicates after their album/artist was corrected (the batch's
-            // step-0e capability, on the edition-folded cluster gate). Same
-            // merge-of-best shape as the per-album engine.
             progress = "Final pass — removing cross-folder duplicates"
             let dd = await Task.detached { await PerfectV2Driver.libraryDedup(root: root) }.value
             if !dd.moves.isEmpty {
@@ -224,30 +275,39 @@ final class PerfectV2Driver: ObservableObject {
                                                      artEmbeds: dd.embeds, sessionID: session)
                 lines.append("Duplicates: \(dd.moves.count) removed across folders (best copies kept)")
             }
-            // Cross-album same-recording pairs → by-ear verdicts (Keep both is the
-            // recommended default: a track on its album AND a hits set is legitimate).
+            // by-ear pairs land on their A-side album's card
             let earKept = KeptNamesStore.load(root.path + "#ear")
-            earChoices = dd.earPairs
-                .filter { !earKept.contains("ear>" + $0.id) }
-                .map { EarChoice(pair: $0, verdict: .keepBoth) }
+            for pair in dd.earPairs where !earKept.contains("ear>" + pair.id) {
+                let dirPath = root.appendingPathComponent((pair.aRel as NSString).deletingLastPathComponent).path
+                update(dirPath) { c in
+                    c.earChoices.append(EarChoice(pair: pair, verdict: .keepBoth))
+                    c.state = .needs
+                }
+            }
         } else {
             lines.append("Cancelled — applied runs stay undoable from Runs")
         }
-        lines.append("Albums: \(applied) fixed · \(clean) already clean · \(deferred.count) deferred for review")
+        let needs = cards.filter { $0.state == .needs }.count
+        lines.append("Albums: \(applied) fixed · \(clean) clean · \(needs) with decisions")
         ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
+    }
+
+    private func setState(_ id: String, _ s: AlbumState) { update(id) { $0.state = s } }
+    private func update(_ id: String, _ mutate: (inout AlbumCardModel) -> Void) {
+        guard let i = cards.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&cards[i])
     }
 
     /// Apply an album's Tier-1 fix set (one reversible run): enabled defaults
     /// honored, compilation flagging excluded (Phase-1 checklist), dependent
-    /// renames dropped when the disc fix isn't applied. Returns false if the
-    /// album needed nothing.
+    /// renames dropped when the disc fix isn't applied.
     private func applyTierOne(_ fixes: [AlbumFix], root: URL, session: String, name: String,
                               doesRenames: Bool = true) async -> Bool {
         let discOn = fixes.contains { $0.kind == .discOrder && $0.applyable && $0.enabled }
         let chosen = fixes.filter { f in
             f.applyable && f.enabled
             && f.kind != .compilation
-            && (doesRenames || f.kind != .filename)   // Light keeps file names as they are
+            && (doesRenames || f.kind != .filename)
             && !(f.needsDiscOrder && !discOn)
         }
         guard !chosen.isEmpty else { return false }
@@ -261,25 +321,21 @@ final class PerfectV2Driver: ObservableObject {
         return true
     }
 
-    /// Decide in batch, apply in batch (approved mockup): ticks are instant and
-    /// offline; this runs the whole queue — per album: write the ACCEPTED names,
-    /// re-analyze with identify pinned off (the verdict is ground truth; a fresh
-    /// pass could flip and leak into dependent fixes), apply the now-clean fix
-    /// set; remember every KEPT proposal so it never re-queues. One undoable run
-    /// per album, all in the session.
+    // MARK: batch apply — decisions accumulated across cards
+
     func applyDecisions(root: URL, store: PerfectStore) async {
-        guard !running, !deferred.isEmpty || !earChoices.isEmpty else { return }
+        let queue = cards.filter { $0.hasPendingDecisions }
+        guard !running, !queue.isEmpty else { return }
         running = true
         defer { running = false; progress = ""; store.loadRuns() }
         let session = sessionID ?? UUID().uuidString
         sessionID = session
-        let queue = deferred
         let doesRenames = store.thoroughness.doesRenames
-        for (n, d) in queue.enumerated() {
-            progress = "Applying decisions — album \(n + 1) of \(queue.count): \(d.album)"
+        for (n, card) in queue.enumerated() {
+            progress = "Applying decisions — album \(n + 1) of \(queue.count): \(card.album)"
             var writes: [(rel: String, field: String, value: String)] = []
             var keptKeys: [String] = []
-            for t in d.decisions {
+            for t in card.decisions {
                 let p = t.proposal
                 if t.accept {
                     if !p.newTitle.isEmpty, p.newTitle != p.curTitle { writes.append((p.relPath, "title", p.newTitle)) }
@@ -288,31 +344,31 @@ final class PerfectV2Driver: ObservableObject {
                     keptKeys.append(KeptNamesStore.pairKey(p))
                 }
             }
-            if let s = d.albumSuggestion {
-                if d.acceptAlbum { writes.append(contentsOf: s.tagWrites) }
+            if let s = card.albumSuggestion {
+                if card.acceptAlbum { writes.append(contentsOf: s.tagWrites) }
                 else if let v = s.tagWrites.first?.value { keptKeys.append("album>" + Organiser.fold(v)) }
             }
-            if !keptKeys.isEmpty { KeptNamesStore.add(d.dir.path, keptKeys) }
+            if !keptKeys.isEmpty { KeptNamesStore.add(card.dir.path, keptKeys) }
             if !writes.isEmpty {
-                await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — names for \(d.album)",
+                await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — names for \(card.album)",
                                                      tagWrites: writes, moves: [], sessionID: session)
             }
-            let cached = AlbumReconcileStore.load(d.dir.path)
-            let (fixes, _, reconcile) = await AlbumPerfect.analyze(root: root, files: d.files,
-                                                                   reconciledMatch: cached,
-                                                                   runIdentify: false)
-            if let r = reconcile { AlbumReconcileStore.save(d.dir.path, r) }
-            _ = await applyTierOne(fixes, root: root, session: session, name: d.album,
-                                   doesRenames: doesRenames)
-            deferred.removeAll { $0.id == d.id }
-            lines.append("Decisions applied — \(d.artist) — \(d.album)")
-        }
-        // by-ear duplicate verdicts: keep-A/keep-B quarantine the loser in one
-        // undoable run; keep-both persists so the pair never re-offers
-        if !earChoices.isEmpty {
+            if !card.decisions.isEmpty || card.albumSuggestion != nil {
+                // dependent fixes from the settled tags — identify pinned off: the
+                // verdict is ground truth, a fresh pass could flip and leak
+                let cached = AlbumReconcileStore.load(card.dir.path)
+                let (fixes, art, reconcile) = await AlbumPerfect.analyze(root: root, files: card.files,
+                                                                         reconciledMatch: cached,
+                                                                         runIdentify: false)
+                if let r = reconcile { AlbumReconcileStore.save(card.dir.path, r) }
+                _ = await applyTierOne(fixes, root: root, session: session, name: card.album,
+                                       doesRenames: doesRenames)
+                update(card.id) { $0.art = art }
+            }
+            // by-ear verdicts: keep-A/keep-B quarantine the loser; keep-both persists
             var quarantines: [(from: String, to: String)] = []
             var keptEar: [String] = []
-            for c in earChoices {
+            for c in card.earChoices {
                 switch c.verdict {
                 case .keepA: quarantines.append((c.pair.bRel, ""))
                 case .keepB: quarantines.append((c.pair.aRel, ""))
@@ -321,72 +377,58 @@ final class PerfectV2Driver: ObservableObject {
             }
             if !keptEar.isEmpty { KeptNamesStore.add(root.path + "#ear", keptEar) }
             if !quarantines.isEmpty {
-                progress = "Applying duplicate decisions"
-                await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — duplicate decisions",
+                await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — duplicate decisions (\(card.album))",
                                                      tagWrites: [], moves: quarantines, sessionID: session)
-                lines.append("Duplicates: \(quarantines.count) resolved by ear")
             }
-            earChoices = []
+            update(card.id) { c in
+                c.decisions = []; c.albumSuggestion = nil; c.earChoices = []
+                c.state = c.missingArtRels.isEmpty ? .clean : .needs
+            }
+            lines.append("Decisions applied — \(card.artist) — \(card.album)")
         }
         ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
     }
 
-
-    /// Fill an album's artwork gaps with the chosen image — blank tracks only;
-    /// existing art is never replaced here. One undoable run in the session.
-    /// Targets are REMAPPED before writing: the session's later passes may have
-    /// renamed/moved files after the gap was captured, and a stale rel would
-    /// silently no-op (the Some Old Bullshit miss) — a missing rel is re-resolved
-    /// by filename inside the album folder, or dropped with a message.
-    func applyCover(_ gap: CoverGap, image: Data, root: URL, store: PerfectStore) async {
-        guard !running else { return }
+    /// Set a cover — fills blank tracks when the album has gaps, REPLACES (backed
+    /// up, undoable) when the user picked one for a fully-covered album. Targets
+    /// are remapped by filename if the session's later passes moved files.
+    func applyCover(_ cardID: String, image: Data, root: URL, store: PerfectStore) async {
+        guard !running, let card = cards.first(where: { $0.id == cardID }), let art = card.art else { return }
         running = true
         defer { running = false; progress = ""; store.loadRuns() }
         let session = sessionID ?? UUID().uuidString
         sessionID = session
-        progress = "Setting cover — \(gap.dir.lastPathComponent)"
+        progress = "Setting cover — \(card.album)"
         let mime = image.starts(with: [0x89, 0x50, 0x4E, 0x47]) ? "image/png" : "image/jpeg"
         let fm = FileManager.default
-        let captured = gap.missingRels.isEmpty ? gap.art.rels : gap.missingRels
+        let captured = card.missingArtRels.isEmpty ? art.rels : card.missingArtRels
         var targets: [String] = []
         var lost = 0
         for rel in captured {
             if fm.fileExists(atPath: root.appendingPathComponent(rel).path) { targets.append(rel); continue }
-            // moved since capture — same filename inside the (possibly renamed) album dir?
-            let name = (rel as NSString).lastPathComponent
-            let candidate = gap.dir.appendingPathComponent(name)
+            let candidate = card.dir.appendingPathComponent((rel as NSString).lastPathComponent)
             if fm.fileExists(atPath: candidate.path) { targets.append(PerfectStore.rel(candidate, root)) }
             else { lost += 1 }
         }
         if lost > 0 { lines.append("Cover: \(lost) track(s) moved since the scan — run again to pick them up") }
-        guard !targets.isEmpty else { coverGaps.removeAll { $0.id == gap.id }; return }
-        await PerfectStore.performLibraryOps(root: root,
-                                             summary: "Perfect v2 — cover for \(gap.dir.lastPathComponent)",
+        guard !targets.isEmpty else { return }
+        await PerfectStore.performLibraryOps(root: root, summary: "Perfect v2 — cover for \(card.album)",
                                              tagWrites: [], moves: [],
                                              artEmbeds: targets.map { ($0, image, mime) },
                                              sessionID: session)
-        coverGaps.removeAll { $0.id == gap.id }
-        lines.append("Cover set on \(targets.count) track\(targets.count == 1 ? "" : "s") — \(gap.dir.lastPathComponent)")
+        update(cardID) { c in
+            c.thumb = image
+            if var a = c.art {
+                for rel in targets { a.relArt[rel] = (0, image.count) }
+                c.art = a
+            }
+            if !c.hasPendingDecisions { c.state = .clean }
+        }
+        lines.append("Cover set on \(targets.count) track\(targets.count == 1 ? "" : "s") — \(card.album)")
         ArtworkCache.shared.clear(); FoundArtCache.shared.clear()
     }
 
-    func skipCover(_ gap: CoverGap) {
-        coverGaps.removeAll { $0.id == gap.id }
-        lines.append("Left without cover — \(gap.dir.lastPathComponent)")
-    }
-
-    /// Cross-folder duplicate sweep over the whole library's FINAL tags. Returns
-    /// the merge-of-best backfill (keeper's blank fields + missing cover filled
-    /// from the losers) and the losers' quarantine moves — all applied as one
-    /// reversible run by the caller.
-    /// A same-recording pair auto-dedup refused to decide (different albums —
-    /// a legitimate-repeat candidate): offered on the by-ear review surface.
-    struct EarPair: Identifiable, Sendable {
-        let aRel: String, bRel: String
-        let aInfo: String, bInfo: String
-        let artist: String, title: String
-        var id: String { aRel + "|" + bRel }
-    }
+    // MARK: cross-album dedup sweep
 
     nonisolated static func libraryDedup(root: URL) async
         -> (writes: [(rel: String, field: String, value: String)],
@@ -402,17 +444,12 @@ final class PerfectV2Driver: ObservableObject {
         let backfill = ["title", "artist", "album", "albumartist", "composer",
                         "lyricist", "label", "conductor", "date", "genre", "track", "disc"]
         for c in clusters where c.memberIDs.count > 1 {
-            // Legitimate repeat appearances — the same recording on its studio album
-            // AND on a greatest-hits/compilation — are NEVER auto-removed (plan §E:
-            // "move aside for review, never auto-delete"). They go to the by-ear
-            // review surface instead. Only clusters whose members agree on the
-            // edition-folded ALBUM are true stray copies.
+            // Legitimate repeat appearances are NEVER auto-removed (plan §E) —
+            // they become by-ear verdicts. Only same-album clusters are stray copies.
             let albums = Set(c.memberIDs.map { Organiser.canonicalAlbumKey(tracks[$0].album) })
             guard albums.count == 1 else {
                 let k = tracks[c.keeperID]
                 func info(_ t: Track) -> String {
-                    // a blank album TAG (common on DRM m4p) falls back to the folder
-                    // name — never a bare "?"
                     let alb = t.album.isEmpty ? t.url.deletingLastPathComponent().lastPathComponent : t.album
                     return "\(fmtDur(t.duration)) · \(t.bitrate > 0 ? "\(t.bitrate) kbps" : t.ext) · \(alb)"
                 }
@@ -450,371 +487,6 @@ final class PerfectV2Driver: ObservableObject {
         }
         return (writes, embeds, moves, earPairs)
     }
-
-    /// One album folder = one directory that directly contains audio files.
-    struct AlbumFolder { let dir: URL; let files: [URL] }
-    nonisolated static func albumFolders(root: URL) -> [AlbumFolder] {
-        let inputs = PerfectStore.organiseInputsFromDisk(root: root, fm: .default)
-        var byDir: [String: [URL]] = [:]
-        for t in inputs {
-            let dirRel = (t.rel as NSString).deletingLastPathComponent
-            byDir[dirRel, default: []].append(root.appendingPathComponent(t.rel))
-        }
-        return byDir.keys.sorted().map {
-            AlbumFolder(dir: root.appendingPathComponent($0),
-                        files: byDir[$0]!.sorted { $0.path < $1.path })
-        }
-    }
-}
-
-/// The v2 window: pick a library, run the driver, watch progress, see what was
-/// deferred for review. Everything applied is session-stamped — one click in
-/// Runs ("Revert session") restores the pre-run library.
-struct PerfectV2View: View {
-    @EnvironmentObject private var perfect: PerfectStore
-    @StateObject private var driver = PerfectV2Driver()
-    @State private var confirmRevert = false
-    @State private var cardIndex = 0
-    @State private var root: URL? = UserDefaults.standard.string(forKey: "libraryBrowserRoot")
-        .map { URL(fileURLWithPath: $0) }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "sparkles").foregroundStyle(.purple)
-                Text("Perfect v2").font(.headline)
-                if let root { Text(root.lastPathComponent).font(.caption).foregroundStyle(.secondary) }
-                Spacer()
-                Button("Choose Library…") { choose() }.disabled(driver.running)
-                if driver.running {
-                    Button("Cancel") { driver.cancel() }
-                } else {
-                    Button("Run") { if let root { Task { await driver.run(root: root, store: perfect) } } }
-                        .buttonStyle(.borderedProminent).tint(.purple)
-                        .disabled(root == nil)
-                }
-            }
-            .padding(10)
-            Divider()
-            if driver.running {
-                ProgressView(driver.progress).padding(10)
-            }
-            // ---- the album carousel (approved mockup v2): one album per card,
-            // everything it needs in one place; ‹ › / arrow keys / filmstrip to move.
-            if !cardIDs.isEmpty {
-                carousel
-                filmstrip
-                Divider()
-            }
-            List {
-                if !driver.lines.isEmpty {
-                    Section("Session") { ForEach(driver.lines, id: \.self) { Text($0).font(.caption) } }
-                }
-                if !driver.drmTracks.isEmpty {
-                    Section("Protected (DRM) — listed only, never touched") {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("\(driver.drmTracks.count) FairPlay-protected track(s). Most players (including Roon) can't play these; they can't be fingerprinted or re-tagged. Legitimate routes: re-download from your Apple purchase history, match via an Apple Music subscription, or re-rip from CD.")
-                                .font(.caption).foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                            HStack {
-                                Button("Export list (CSV)…") { exportDRMList() }.controlSize(.small)
-                                Spacer()
-                            }
-                            ForEach(driver.drmTracks.prefix(12), id: \.self) { Text($0).font(.caption2).foregroundStyle(.tertiary) }
-                            if driver.drmTracks.count > 12 {
-                                Text("… and \(driver.drmTracks.count - 12) more (export for the full list)")
-                                    .font(.caption2).foregroundStyle(.tertiary)
-                            }
-                        }
-                    }
-                }
-                if driver.lines.isEmpty && !driver.running {
-                    Text("Runs Phase-1 normalize (using your saved Normalize choices), then the per-album engine over every folder, then a final organise on the corrected tags. Each album is one undoable run; the whole session reverts from Runs.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            if !driver.deferred.isEmpty || !driver.earChoices.isEmpty || !driver.lines.isEmpty {
-                HStack(spacing: 10) {
-                    if !driver.deferred.isEmpty || !driver.earChoices.isEmpty {
-                        let accepts = driver.deferred.reduce(0) { $0 + $1.decisions.filter(\.accept).count }
-                            + driver.deferred.filter { $0.albumSuggestion != nil && $0.acceptAlbum }.count
-                        Text("\(driver.deferred.count + driver.earChoices.count) item\(driver.deferred.count + driver.earChoices.count == 1 ? "" : "s") · \(accepts) change\(accepts == 1 ? "" : "s") accepted")
-                            .fontWeight(.medium)
-                    }
-                    Text("nothing is written until you apply · every run undoable from Runs")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Revert library…", role: .destructive) { confirmRevert = true }
-                        .disabled(driver.running || perfect.busy || root == nil)
-                        .confirmationDialog("Revert this library to before Perfect ran?",
-                                            isPresented: $confirmRevert, titleVisibility: .visible) {
-                            Button("Revert everything", role: .destructive) {
-                                if let root { perfect.undoLibrary(root) }
-                            }
-                        } message: {
-                            Text("Every recorded run for this library is undone, newest first. Files and tags return to their pre-run state.")
-                        }
-                    if !driver.deferred.isEmpty || !driver.earChoices.isEmpty {
-                        Button("Apply all decisions") {
-                            if let root { Task { await driver.applyDecisions(root: root, store: perfect) } }
-                        }
-                        .buttonStyle(.borderedProminent).tint(.teal)
-                        .disabled(driver.running || root == nil)
-                    }
-                }
-                .padding(10)
-                .background(.bar)
-            }
-        }
-        .frame(minWidth: 700, minHeight: 460)
-    }
-
-    // ---- carousel plumbing ----
-
-    /// Every album with something to decide, in one stable order: deferred name
-    /// verdicts, by-ear duplicate pairs (keyed by their A-side's album folder),
-    /// and cover gaps — merged so each album appears exactly ONCE.
-    private var cardIDs: [String] {
-        var order: [String] = []
-        var seen = Set<String>()
-        for d in driver.deferred where seen.insert(d.id).inserted { order.append(d.id) }
-        if let root {
-            for c in driver.earChoices {
-                let dir = root.appendingPathComponent((c.pair.aRel as NSString).deletingLastPathComponent).path
-                if seen.insert(dir).inserted { order.append(dir) }
-            }
-        }
-        for g in driver.coverGaps where seen.insert(g.id).inserted { order.append(g.id) }
-        return order
-    }
-
-    private func earChoiceIDs(for dirPath: String) -> [String] {
-        guard let root else { return [] }
-        return driver.earChoices.filter {
-            root.appendingPathComponent(($0.pair.aRel as NSString).deletingLastPathComponent).path == dirPath
-        }.map(\.id)
-    }
-
-    private var carousel: some View {
-        let ids = cardIDs
-        let index = min(cardIndex, max(ids.count - 1, 0))
-        return HStack(spacing: 0) {
-            Button { cardIndex = max(index - 1, 0) } label: {
-                Image(systemName: "chevron.left").font(.title2)
-            }
-            .buttonStyle(.plain).padding(.horizontal, 8)
-            .keyboardShortcut(.leftArrow, modifiers: [])
-            .disabled(index == 0)
-            if index < ids.count {
-                CarouselAlbumCard(
-                    dirPath: ids[index],
-                    position: (index + 1, ids.count),
-                    deferred: deferredBinding(ids[index]),
-                    earIDs: earChoiceIDs(for: ids[index]),
-                    driver: driver, root: root, store: perfect
-                )
-                .id(ids[index])
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
-            Button { cardIndex = min(index + 1, ids.count - 1) } label: {
-                Image(systemName: "chevron.right").font(.title2)
-            }
-            .buttonStyle(.plain).padding(.horizontal, 8)
-            .keyboardShortcut(.rightArrow, modifiers: [])
-            .disabled(index >= ids.count - 1)
-        }
-        .padding(.vertical, 8)
-    }
-
-    private var filmstrip: some View {
-        let ids = cardIDs
-        return ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(Array(ids.enumerated()), id: \.element) { i, id in
-                    let dir = URL(fileURLWithPath: id)
-                    VStack(spacing: 2) {
-                        ZStack(alignment: .topTrailing) {
-                            filmFrameImage(id)
-                                .frame(width: 46, height: 46)
-                                .clipShape(RoundedRectangle(cornerRadius: 5))
-                                .overlay(RoundedRectangle(cornerRadius: 5)
-                                    .strokeBorder(i == min(cardIndex, ids.count - 1) ? Color.purple : Color.secondary.opacity(0.3),
-                                                  lineWidth: i == min(cardIndex, ids.count - 1) ? 2 : 1))
-                            filmBadges(id)
-                        }
-                        Text(dir.lastPathComponent).font(.system(size: 9)).lineLimit(1)
-                            .frame(width: 52)
-                            .foregroundStyle(.secondary)
-                    }
-                    .contentShape(Rectangle())
-                    .onTapGesture { cardIndex = i }
-                }
-            }
-            .padding(.horizontal, 12).padding(.vertical, 6)
-        }
-    }
-
-    @ViewBuilder private func filmFrameImage(_ id: String) -> some View {
-        if let gap = driver.coverGaps.first(where: { $0.id == id }),
-           let data = gap.art.ownCovers.first, let img = NSImage(data: data) {
-            Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-        } else {
-            ZStack {
-                Rectangle().fill(Color.secondary.opacity(0.12))
-                Image(systemName: "music.note").foregroundStyle(.tertiary)
-            }
-        }
-    }
-
-    @ViewBuilder private func filmBadges(_ id: String) -> some View {
-        HStack(spacing: 2) {
-            if let d = driver.deferred.first(where: { $0.id == id }), !d.decisions.isEmpty || d.albumSuggestion != nil {
-                badge("N", .orange)
-            }
-            if !earChoiceIDs(for: id).isEmpty { badge("2×", .orange) }
-            if driver.coverGaps.contains(where: { $0.id == id }) { badge("C", .purple) }
-        }
-        .offset(x: 4, y: -4)
-    }
-
-    private func badge(_ s: String, _ c: Color) -> some View {
-        Text(s).font(.system(size: 7, weight: .bold)).foregroundStyle(.white)
-            .padding(.horizontal, 4).padding(.vertical, 1)
-            .background(Capsule().fill(c))
-    }
-
-    private func deferredBinding(_ id: String) -> Binding<PerfectV2Driver.DeferredAlbum>? {
-        guard driver.deferred.contains(where: { $0.id == id }) else { return nil }
-        return Binding(
-            get: { driver.deferred.first(where: { $0.id == id })
-                   ?? PerfectV2Driver.DeferredAlbum(dir: URL(fileURLWithPath: id), files: []) },
-            set: { v in if let i = driver.deferred.firstIndex(where: { $0.id == id }) { driver.deferred[i] = v } }
-        )
-    }
-
-    private func choose() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false; panel.canChooseDirectories = true
-        panel.prompt = "Use Library"
-        if panel.runModal() == .OK { root = panel.url }
-    }
-
-    /// The DRM manifest: one row per protected track (artist/album/title come from
-    /// the Artist/Album/NN Title path shape), openable in Numbers/Excel.
-    private func exportDRMList() {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "protected-tracks.csv"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        var csv = "artist,album,file\n"
-        for rel in driver.drmTracks {
-            let parts = rel.split(separator: "/").map(String.init)
-            let artist = parts.count >= 3 ? parts[parts.count - 3] : ""
-            let album = parts.count >= 2 ? parts[parts.count - 2] : ""
-            let esc = { (s: String) in "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
-            csv += "\(esc(artist)),\(esc(album)),\(esc(parts.last ?? rel))\n"
-        }
-        try? csv.write(to: url, atomically: true, encoding: .utf8)
-    }
-}
-
-/// One artwork-gap row: artist — album, how many tracks are blank, the album's
-/// own covers plus on-demand online candidates, and a pick-to-fill flow.
-struct CoverGapRow: View {
-    let gap: PerfectV2Driver.CoverGap
-    @ObservedObject var driver: PerfectV2Driver
-    let root: URL?
-    let store: PerfectStore
-    @State private var online: [Data] = []
-    @State private var searching = false
-    @State private var searched = false
-    @State private var selected: Data?
-    var onSelect: ((Data) -> Void)? = nil   // carousel: preview the pick on the big cover
-    // editable query — the escape hatch when the tag-driven search misses
-    // (e.g. an album filed under Various Artists, or a renamed edition)
-    @State private var queryArtist = ""
-    @State private var queryAlbum = ""
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("\(gap.art.artist.isEmpty ? gap.dir.deletingLastPathComponent().lastPathComponent : gap.art.artist) — \(gap.art.album.isEmpty ? gap.dir.lastPathComponent : gap.art.album)")
-                        .fontWeight(.medium)
-                    Text(gap.missingRels.isEmpty
-                         ? "no cover on any track"
-                         : "\(gap.missingRels.count) of \(gap.art.rels.count) track(s) without art")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                if let selected {
-                    Button("Use this cover") {
-                        if let root { Task { await driver.applyCover(gap, image: selected, root: root, store: store) } }
-                    }
-                    .buttonStyle(.borderedProminent).tint(.teal)
-                    .controlSize(.small).disabled(driver.running || root == nil)
-                }
-                Button("Skip") { driver.skipCover(gap) }.controlSize(.small).disabled(driver.running)
-            }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(Array(gap.art.ownCovers.enumerated()), id: \.offset) { _, data in
-                        CoverThumb(data: data, selected: selected == data, badge: "in files")
-                            .onTapGesture { selected = data; onSelect?(data) }
-                    }
-                    ForEach(Array(online.enumerated()), id: \.offset) { _, data in
-                        CoverThumb(data: data, selected: selected == data, badge: "online")
-                            .onTapGesture { selected = data; onSelect?(data) }
-                    }
-                    if !searched {
-                        Button {
-                            search()
-                        } label: {
-                            if searching { ProgressView().controlSize(.small) }
-                            else { Label("Find covers online", systemImage: "magnifyingglass") }
-                        }
-                        .controlSize(.small).disabled(searching)
-                    } else if online.isEmpty {
-                        Text("nothing found online — edit the search below").font(.caption).foregroundStyle(.tertiary)
-                    }
-                }
-            }
-            if searched {
-                // the manual escape hatch: edit the query when the tag-driven search misses
-                HStack(spacing: 6) {
-                    TextField("Artist", text: $queryArtist).textFieldStyle(.roundedBorder)
-                        .font(.caption).frame(width: 160)
-                    TextField("Album", text: $queryAlbum).textFieldStyle(.roundedBorder)
-                        .font(.caption).frame(width: 220)
-                    Button {
-                        search()
-                    } label: {
-                        if searching { ProgressView().controlSize(.small) } else { Text("Search again") }
-                    }
-                    .controlSize(.small).disabled(searching)
-                    Text("edit the search if the match misses").font(.caption2).foregroundStyle(.tertiary)
-                }
-            }
-        }
-        .padding(.vertical, 4)
-    }
-
-    private func search() {
-        if queryArtist.isEmpty && queryAlbum.isEmpty {
-            // pre-fill from tags — but never search on "Various Artists", the
-            // dead-end that hid The Specials' cover; leave artist blank instead
-            let a = gap.art.artist
-            queryArtist = Organiser.artistKey(a) == "variousartists" ? "" : a
-            queryAlbum = gap.art.album.isEmpty ? gap.dir.lastPathComponent : gap.art.album
-        }
-        searching = true
-        let a = queryArtist, al = queryAlbum
-        Task {
-            let found = await CoverArtClient().candidates(releaseMBIDs: [], artist: a, album: al)
-            await MainActor.run { online = found; searching = false; searched = true }
-        }
-    }
 }
 
 // MARK: - Kept names (per-album "don't ask again")
@@ -850,55 +522,506 @@ enum KeptNamesStore {
     }
 }
 
-// MARK: - Deferred album card (per-track verdicts, approved mockup)
+// MARK: - The window
 
-/// One deferred album: artist-first header, Accept-all/Keep-all quick actions,
-/// then a verdict row per track (and the album-name suggestion when present).
-struct DeferredAlbumCard: View {
-    @Binding var album: PerfectV2Driver.DeferredAlbum
-    let busy: Bool
-    var showHeader = true   // false when embedded in a carousel card (which has its own)
+/// The library-first carousel: every album is a card the moment a library is
+/// chosen; Run analyzes them live in place; decisions accumulate and batch-apply.
+struct PerfectV2View: View {
+    @EnvironmentObject private var perfect: PerfectStore
+    @StateObject private var driver = PerfectV2Driver()
+    @State private var confirmRevert = false
+    @State private var cardIndex = 0
+    @State private var needsOnly = false
+    @State private var root: URL? = UserDefaults.standard.string(forKey: "libraryBrowserRoot")
+        .map { URL(fileURLWithPath: $0) }
+
+    private var visibleIndices: [Int] {
+        needsOnly ? driver.cards.indices.filter { driver.cards[$0].state == .needs }
+                  : Array(driver.cards.indices)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            statusline
+            if driver.cards.isEmpty {
+                Text("Choose a library — every album appears here immediately; Run analyzes them in place.")
+                    .foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                carousel
+                filmstrip
+                Divider()
+                bottomLists
+            }
+        }
+        .safeAreaInset(edge: .bottom) { applyBar }
+        .frame(minWidth: 760, minHeight: 560)
+        .onAppear { if let root { driver.loadLibrary(root) } }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles").foregroundStyle(.purple)
+            Text("Perfect v2").font(.headline)
+            if let root { Text(root.lastPathComponent).font(.caption).foregroundStyle(.secondary) }
+            Spacer()
+            Picker("", selection: $needsOnly) {
+                Text("All · \(driver.cards.count)").tag(false)
+                Text("Needs decisions · \(driver.cards.filter { $0.state == .needs }.count)").tag(true)
+            }
+            .pickerStyle(.segmented).labelsHidden().frame(width: 280)
+            .onChange(of: needsOnly) { _ in cardIndex = 0 }
+            Button("Choose Library…") { choose() }.disabled(driver.running)
+            if driver.running {
+                Button("Cancel") { driver.cancel() }
+            } else {
+                Button("Run") { if let root { Task { await driver.run(root: root, store: perfect) } } }
+                    .buttonStyle(.borderedProminent).tint(.purple)
+                    .disabled(root == nil || driver.cards.isEmpty)
+            }
+        }
+        .padding(10)
+    }
+
+    @ViewBuilder private var statusline: some View {
+        if driver.running {
             HStack(spacing: 8) {
-                if showHeader {
-                    (Text(album.artist).foregroundColor(.purple).fontWeight(.semibold)
-                     + Text(" — \(album.album)").fontWeight(.semibold))
-                    Text("\(album.decisions.count) track\(album.decisions.count == 1 ? "" : "s")")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                ProgressView().controlSize(.small)
+                Text(driver.progress).font(.caption).foregroundStyle(.purple)
+                Text("· decide finished albums while this runs").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                if album.decisions.count > 1 {
-                    Button("Accept all") { setAll(true) }.controlSize(.small).disabled(busy)
-                    Button("Keep all") { setAll(false) }.controlSize(.small).disabled(busy)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 5)
+            Divider()
+        }
+    }
+
+    private var carousel: some View {
+        let ids = visibleIndices
+        let pos = min(cardIndex, max(ids.count - 1, 0))
+        return HStack(spacing: 0) {
+            Button { cardIndex = max(pos - 1, 0) } label: { Image(systemName: "chevron.left").font(.title2) }
+                .buttonStyle(.plain).padding(.horizontal, 8)
+                .keyboardShortcut(.leftArrow, modifiers: [])
+                .disabled(pos == 0)
+            if !ids.isEmpty, pos < ids.count {
+                ScrollView {
+                    AlbumCardView(card: cardBinding(ids[pos]),
+                                  position: (pos + 1, ids.count),
+                                  driver: driver, root: root, store: perfect)
+                        .padding(.bottom, 8)
                 }
+                .id(driver.cards[ids[pos]].id)
+                .frame(maxWidth: .infinity)
+            } else {
+                Text(needsOnly ? "No albums need decisions." : "")
+                    .foregroundStyle(.secondary).frame(maxWidth: .infinity)
             }
-            ForEach($album.decisions) { $d in
-                TrackDecisionRow(decision: $d, busy: busy)
-            }
-            if let s = album.albumSuggestion {
+            Button { cardIndex = min(pos + 1, ids.count - 1) } label: { Image(systemName: "chevron.right").font(.title2) }
+                .buttonStyle(.plain).padding(.horizontal, 8)
+                .keyboardShortcut(.rightArrow, modifiers: [])
+                .disabled(pos >= ids.count - 1)
+        }
+        .padding(.vertical, 6)
+        .frame(maxHeight: .infinity)
+    }
+
+    private var filmstrip: some View {
+        let ids = visibleIndices
+        return ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    Image(systemName: "questionmark.folder").foregroundStyle(.orange)
-                    Text(s.summary).font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                    Picker("", selection: $album.acceptAlbum) {
-                        Text("Accept").tag(true)
-                        Text("Keep blank").tag(false)
+                    ForEach(Array(ids.enumerated()), id: \.element) { pos, i in
+                        let c = driver.cards[i]
+                        VStack(spacing: 2) {
+                            ZStack(alignment: .topTrailing) {
+                                frameImage(c)
+                                    .frame(width: 46, height: 46)
+                                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                                    .overlay(RoundedRectangle(cornerRadius: 5)
+                                        .strokeBorder(frameBorder(c, current: pos == min(cardIndex, max(ids.count - 1, 0))),
+                                                      lineWidth: pos == min(cardIndex, max(ids.count - 1, 0)) ? 2 : 1))
+                                    .opacity(c.state == .pending ? 0.45 : 1)
+                                frameBadges(c)
+                            }
+                            Text(c.album).font(.system(size: 9)).lineLimit(1).frame(width: 52)
+                                .foregroundStyle(.secondary)
+                        }
+                        .id(c.id)
+                        .contentShape(Rectangle())
+                        .onTapGesture { cardIndex = pos }
                     }
-                    .pickerStyle(.segmented).labelsHidden().frame(width: 150)
-                    .disabled(busy)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 6)
+            }
+            .frame(height: 76)
+            .onChange(of: driver.progress) { _ in
+                if driver.running, let analyzing = driver.cards.first(where: { $0.state == .analyzing }) {
+                    withAnimation { proxy.scrollTo(analyzing.id) }
                 }
             }
         }
-        .padding(.vertical, 4)
+    }
+
+    private func frameBorder(_ c: PerfectV2Driver.AlbumCardModel, current: Bool) -> Color {
+        if current { return .purple }
+        if c.state == .analyzing { return .purple.opacity(0.7) }
+        return .secondary.opacity(0.3)
+    }
+
+    @ViewBuilder private func frameImage(_ c: PerfectV2Driver.AlbumCardModel) -> some View {
+        if let data = c.thumb, let img = NSImage(data: data) {
+            Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+        } else {
+            ZStack {
+                Rectangle().fill(Color.secondary.opacity(0.12))
+                Image(systemName: "music.note").foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    @ViewBuilder private func frameBadges(_ c: PerfectV2Driver.AlbumCardModel) -> some View {
+        HStack(spacing: 2) {
+            switch c.state {
+            case .clean: badge("✓", .teal)
+            case .analyzing: badge("…", .purple)
+            case .needs:
+                if !c.decisions.isEmpty || c.albumSuggestion != nil { badge("N", .orange) }
+                if !c.earChoices.isEmpty { badge("2×", .orange) }
+                if !c.missingArtRels.isEmpty { badge("C", .purple) }
+            case .pending: EmptyView()
+            }
+        }
+        .offset(x: 4, y: -4)
+    }
+
+    private func badge(_ s: String, _ c: Color) -> some View {
+        Text(s).font(.system(size: 7, weight: .bold)).foregroundStyle(.white)
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .background(Capsule().fill(c))
+    }
+
+    private var bottomLists: some View {
+        List {
+            if !driver.lines.isEmpty {
+                Section("Session") { ForEach(driver.lines, id: \.self) { Text($0).font(.caption) } }
+            }
+            if !driver.drmTracks.isEmpty {
+                Section("Protected (DRM) — listed only, never touched") {
+                    HStack {
+                        Text("\(driver.drmTracks.count) FairPlay track(s) — can't be played by most servers, fingerprinted or re-tagged. Re-acquire via Apple purchase history / Apple Music / CD.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Export CSV…") { exportDRMList() }.controlSize(.small)
+                    }
+                }
+            }
+        }
+        .frame(maxHeight: 120)
+    }
+
+    @ViewBuilder private var applyBar: some View {
+        let pending = driver.cards.filter { $0.hasPendingDecisions }
+        if !pending.isEmpty || !driver.lines.isEmpty {
+            HStack(spacing: 10) {
+                if !pending.isEmpty {
+                    let accepts = pending.reduce(0) { $0 + $1.decisions.filter(\.accept).count
+                        + $1.earChoices.filter { $0.verdict != .keepBoth }.count
+                        + ($1.albumSuggestion != nil && $1.acceptAlbum ? 1 : 0) }
+                    Text("\(pending.count) album\(pending.count == 1 ? "" : "s") · \(accepts) change\(accepts == 1 ? "" : "s") accepted")
+                        .fontWeight(.medium)
+                }
+                Text("nothing is written until you apply · every run undoable from Runs")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Revert library…", role: .destructive) { confirmRevert = true }
+                    .disabled(driver.running || perfect.busy || root == nil)
+                    .confirmationDialog("Revert this library to before Perfect ran?",
+                                        isPresented: $confirmRevert, titleVisibility: .visible) {
+                        Button("Revert everything", role: .destructive) {
+                            if let root { perfect.undoLibrary(root) }
+                        }
+                    } message: {
+                        Text("Every recorded run for this library is undone, newest first. Files and tags return to their pre-run state.")
+                    }
+                if !pending.isEmpty {
+                    Button("Apply all decisions") {
+                        if let root { Task { await driver.applyDecisions(root: root, store: perfect) } }
+                    }
+                    .buttonStyle(.borderedProminent).tint(.teal)
+                    .disabled(driver.running || root == nil)
+                }
+            }
+            .padding(10)
+            .background(.bar)
+        }
+    }
+
+    private func cardBinding(_ i: Int) -> Binding<PerfectV2Driver.AlbumCardModel> {
+        let id = driver.cards[i].id
+        return Binding(
+            get: { driver.cards.first(where: { $0.id == id }) ?? driver.cards[min(i, driver.cards.count - 1)] },
+            set: { v in if let j = driver.cards.firstIndex(where: { $0.id == id }) { driver.cards[j] = v } }
+        )
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false; panel.canChooseDirectories = true
+        panel.prompt = "Use Library"
+        if panel.runModal() == .OK, let u = panel.url {
+            root = u
+            driver.loadLibrary(u)
+            cardIndex = 0
+        }
+    }
+
+    /// The DRM manifest: one row per protected track, openable in Numbers/Excel.
+    private func exportDRMList() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "protected-tracks.csv"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        var csv = "artist,album,file\n"
+        for rel in driver.drmTracks {
+            let parts = rel.split(separator: "/").map(String.init)
+            let artist = parts.count >= 3 ? parts[parts.count - 3] : ""
+            let album = parts.count >= 2 ? parts[parts.count - 2] : ""
+            let esc = { (s: String) in "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
+            csv += "\(esc(artist)),\(esc(album)),\(esc(parts.last ?? rel))\n"
+        }
+        try? csv.write(to: url, atomically: true, encoding: .utf8)
+    }
+}
+
+// MARK: - One album card
+
+/// One album, everything it needs in one place: big cover (a chooser pick
+/// previews onto it instantly), artist-first title, state chips, the track
+/// table, then blocks for names, this album's duplicate calls, and the cover
+/// chooser (offered on every analyzed album — replacing is backed up, undoable).
+struct AlbumCardView: View {
+    @Binding var card: PerfectV2Driver.AlbumCardModel
+    let position: (Int, Int)
+    @ObservedObject var driver: PerfectV2Driver
+    let root: URL?
+    let store: PerfectStore
+    @State private var previewCover: Data?
+    @State private var online: [Data] = []
+    @State private var searching = false
+    @State private var searched = false
+    @State private var selectedCover: Data?
+    @State private var queryArtist = ""
+    @State private var queryAlbum = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 14) {
+                bigCover
+                VStack(alignment: .leading, spacing: 4) {
+                    (Text(card.artist).foregroundColor(.purple).fontWeight(.semibold)
+                     + Text(" — \(card.album)").fontWeight(.semibold))
+                        .font(.title3)
+                    Text(card.facts).font(.caption).foregroundStyle(.secondary)
+                    stateChips
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("Album \(position.0) of \(position.1)").font(.caption).foregroundStyle(.secondary)
+                    Text("← → keys").font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+            DisclosureGroup {
+                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 3) {
+                    ForEach(Array(card.trackList.enumerated()), id: \.offset) { _, t in
+                        GridRow {
+                            Text(t.no).font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
+                            Text(t.title).font(.caption)
+                        }
+                    }
+                }
+                .padding(.top, 4)
+            } label: {
+                Text("TRACKS & TAGS").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            }
+            if !card.decisions.isEmpty || card.albumSuggestion != nil {
+                block("Names") { namesBlock }
+            }
+            if !card.earChoices.isEmpty {
+                block("Duplicates — the same recording elsewhere") { earBlock }
+            }
+            if card.state == .needs || card.state == .clean {
+                block(coverTitle) { coverBlock }
+            }
+        }
+        .padding(.horizontal, 10)
+    }
+
+    private var bigCover: some View {
+        ZStack {
+            if let data = previewCover ?? card.thumb, let img = NSImage(data: data) {
+                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                Rectangle().fill(Color.secondary.opacity(0.1))
+                Image(systemName: "music.note").font(.system(size: 34)).foregroundStyle(.tertiary)
+            }
+        }
+        .frame(width: 116, height: 116)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.25)))
+    }
+
+    private var stateChips: some View {
+        HStack(spacing: 6) {
+            switch card.state {
+            case .pending: chip("not yet analyzed", .secondary)
+            case .analyzing: chip("analyzing…", .purple)
+            case .clean: chip("✓ clean", .teal)
+            case .needs:
+                if !card.decisions.isEmpty { chip("\(card.decisions.count) name\(card.decisions.count == 1 ? "" : "s")", .orange) }
+                if card.albumSuggestion != nil { chip("album name?", .orange) }
+                if !card.earChoices.isEmpty { chip("\(card.earChoices.count) repeat\(card.earChoices.count == 1 ? "" : "s")", .orange) }
+                if !card.missingArtRels.isEmpty { chip("cover", .purple) }
+            }
+        }
+    }
+
+    private func chip(_ s: String, _ c: Color) -> some View {
+        Text(s).font(.system(size: 10, weight: .semibold)).textCase(.uppercase)
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .background(Capsule().fill(c.opacity(0.15)))
+            .foregroundStyle(c)
+    }
+
+    @ViewBuilder private func block<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.system(size: 10, weight: .semibold)).textCase(.uppercase)
+                .foregroundStyle(.secondary)
+            content()
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.05)))
+    }
+
+    // ---- names ----
+
+    @ViewBuilder private var namesBlock: some View {
+        if card.decisions.count > 1 {
+            HStack {
+                Spacer()
+                Button("Accept all") { setAll(true) }.controlSize(.small).disabled(driver.running)
+                Button("Keep all") { setAll(false) }.controlSize(.small).disabled(driver.running)
+            }
+        }
+        ForEach($card.decisions) { $d in
+            TrackDecisionRow(decision: $d, busy: driver.running)
+        }
+        if let s = card.albumSuggestion {
+            HStack(spacing: 8) {
+                Image(systemName: "questionmark.folder").foregroundStyle(.orange)
+                Text(s.summary).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Picker("", selection: $card.acceptAlbum) {
+                    Text("Accept").tag(true)
+                    Text("Keep blank").tag(false)
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 150)
+                .disabled(driver.running)
+            }
+        }
     }
 
     private func setAll(_ accept: Bool) {
-        for i in album.decisions.indices { album.decisions[i].accept = accept }
+        for i in card.decisions.indices { card.decisions[i].accept = accept }
+    }
+
+    // ---- duplicates ----
+
+    private var earBlock: some View {
+        ForEach($card.earChoices) { $c in
+            EarChoiceRow(choice: $c, rootURL: root, busy: driver.running)
+        }
+    }
+
+    // ---- cover ----
+
+    private var coverTitle: String {
+        guard let art = card.art else { return "Cover" }
+        if card.missingArtRels.isEmpty { return "Cover — current shown; replace if you prefer (backed up, undoable)" }
+        if card.missingArtRels.count == art.rels.count { return "Cover — none on any track (tap to preview)" }
+        return "Cover — \(card.missingArtRels.count) of \(art.rels.count) track(s) without art"
+    }
+
+    @ViewBuilder private var coverBlock: some View {
+        HStack(alignment: .top, spacing: 10) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    if let own = card.thumb {
+                        CoverThumb(data: own, selected: selectedCover == own, badge: "current")
+                            .onTapGesture { selectedCover = own; previewCover = own }
+                    }
+                    ForEach(Array(online.enumerated()), id: \.offset) { _, data in
+                        CoverThumb(data: data, selected: selectedCover == data, badge: "online")
+                            .onTapGesture { selectedCover = data; previewCover = data }
+                    }
+                    if !searched {
+                        Button {
+                            search()
+                        } label: {
+                            if searching { ProgressView().controlSize(.small) }
+                            else { Label("Find covers online", systemImage: "magnifyingglass") }
+                        }
+                        .controlSize(.small).disabled(searching)
+                    } else if online.isEmpty {
+                        Text("nothing found — edit the search below").font(.caption).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            if let sel = selectedCover, sel != card.thumb {
+                Button("Use this cover") {
+                    if let root { Task { await driver.applyCover(card.id, image: sel, root: root, store: store) } }
+                }
+                .buttonStyle(.borderedProminent).tint(.teal)
+                .controlSize(.small).disabled(driver.running || root == nil)
+            }
+        }
+        if searched {
+            HStack(spacing: 6) {
+                TextField("Artist", text: $queryArtist).textFieldStyle(.roundedBorder)
+                    .font(.caption).frame(width: 160)
+                TextField("Album", text: $queryAlbum).textFieldStyle(.roundedBorder)
+                    .font(.caption).frame(width: 220)
+                Button {
+                    search()
+                } label: {
+                    if searching { ProgressView().controlSize(.small) } else { Text("Search again") }
+                }
+                .controlSize(.small).disabled(searching)
+                Text("edit the search if the match misses").font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private func search() {
+        if queryArtist.isEmpty && queryAlbum.isEmpty {
+            // never search on "Various Artists" — the dead end that hid The Specials
+            let a = card.art?.artist ?? card.artist
+            queryArtist = Organiser.artistKey(a) == "variousartists" ? "" : a
+            let al = card.art?.album ?? ""
+            queryAlbum = al.isEmpty ? card.album : al
+        }
+        searching = true
+        let a = queryArtist, al = queryAlbum
+        Task {
+            let found = await CoverArtClient().candidates(releaseMBIDs: [], artist: a, album: al)
+            await MainActor.run { online = found; searching = false; searched = true }
+        }
     }
 }
+
+// MARK: - Track decision row
 
 /// One track's A/B verdict row: old name struck through → proposed name, a
 /// change-kind chip, the AcoustID score (amber when risky), ▶A/▶B audition
@@ -931,13 +1054,11 @@ struct TrackDecisionRow: View {
             Text(String(format: "%.2f", p.score))
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(decision.risky ? Color.orange : Color.secondary)
-            // ▶A — your file
             Button { audio.toggle(p.url) } label: {
                 Image(systemName: audio.playingURL == p.url ? "stop.circle.fill" : "play.circle")
                     .foregroundStyle(audio.playingURL == p.url ? Color.red : Color.teal)
             }
             .buttonStyle(.plain).help("Play your file")
-            // ▶B — the proposed match (online preview)
             Button { playProposed() } label: {
                 if previewLoading { ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 16, height: 16) }
                 else {
@@ -990,10 +1111,11 @@ struct TrackDecisionRow: View {
     }
 }
 
-/// One by-ear duplicate: artist — title header, then the two copies with play
-/// buttons and their vitals, and a Keep A / Keep B / Keep both verdict. "Keep
-/// both" is the recommended default — a track on its album AND a hits set is
-/// legitimate ownership, not a duplicate.
+// MARK: - By-ear duplicate row
+
+/// One by-ear duplicate: the two copies with play buttons and vitals, and a
+/// Keep A / Keep B / Keep both verdict. "Keep both" is the recommended default —
+/// a track on its album AND a hits set is legitimate ownership.
 struct EarChoiceRow: View {
     @Binding var choice: PerfectV2Driver.EarChoice
     let rootURL: URL?
@@ -1003,8 +1125,7 @@ struct EarChoiceRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
-                (Text(choice.pair.artist).foregroundColor(.purple).fontWeight(.semibold)
-                 + Text(" — \(choice.pair.title)").fontWeight(.semibold))
+                Text(choice.pair.title).fontWeight(.medium)
                 Spacer()
                 Picker("", selection: $choice.verdict) {
                     Text("Keep A").tag(PerfectV2Driver.EarChoice.Verdict.keepA)
@@ -1017,7 +1138,6 @@ struct EarChoiceRow: View {
             copyLine(label: "A", rel: choice.pair.aRel, info: choice.pair.aInfo)
             copyLine(label: "B", rel: choice.pair.bRel, info: choice.pair.bInfo)
         }
-        .padding(.vertical, 4)
     }
 
     private func copyLine(label: String, rel: String, info: String) -> some View {
@@ -1035,113 +1155,5 @@ struct EarChoiceRow: View {
             Text(rel).font(.caption2).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
         }
         .padding(.leading, 8)
-    }
-}
-
-// MARK: - Carousel album card (approved mockup v2)
-
-/// One album, everything it needs in one place: big cover (instant preview of a
-/// pick), artist-first title, needs chips, then blocks for names, this album's
-/// duplicate calls, and the cover chooser.
-struct CarouselAlbumCard: View {
-    let dirPath: String
-    let position: (Int, Int)
-    let deferred: Binding<PerfectV2Driver.DeferredAlbum>?
-    let earIDs: [String]
-    @ObservedObject var driver: PerfectV2Driver
-    let root: URL?
-    let store: PerfectStore
-    @State private var previewCover: Data?
-
-    private var dir: URL { URL(fileURLWithPath: dirPath) }
-    private var gap: PerfectV2Driver.CoverGap? { driver.coverGaps.first { $0.id == dirPath } }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 14) {
-                bigCover
-                VStack(alignment: .leading, spacing: 4) {
-                    (Text(dir.deletingLastPathComponent().lastPathComponent)
-                        .foregroundColor(.purple).fontWeight(.semibold)
-                     + Text(" — \(dir.lastPathComponent)").fontWeight(.semibold))
-                        .font(.title3)
-                    needsChips
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("Album \(position.0) of \(position.1)").font(.caption).foregroundStyle(.secondary)
-                    Text("← → keys").font(.caption2).foregroundStyle(.tertiary)
-                }
-            }
-            if let deferred {
-                block("Names") { DeferredAlbumCard(album: deferred, busy: driver.running, showHeader: false) }
-            }
-            if !earIDs.isEmpty {
-                block("Duplicates — the same recording elsewhere") {
-                    ForEach(earIDs, id: \.self) { id in
-                        if let b = earBinding(id) { EarChoiceRow(choice: b, rootURL: root, busy: driver.running) }
-                    }
-                }
-            }
-            if let gap {
-                block(gap.missingRels.isEmpty ? "Cover — none on any track (tap to preview)"
-                                              : "Cover — \(gap.missingRels.count) of \(gap.art.rels.count) track(s) without art") {
-                    CoverGapRow(gap: gap, driver: driver, root: root, store: store,
-                                onSelect: { previewCover = $0 })
-                }
-            }
-        }
-        .padding(.horizontal, 6)
-    }
-
-    private var bigCover: some View {
-        ZStack {
-            if let data = previewCover ?? gap?.art.ownCovers.first, let img = NSImage(data: data) {
-                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-            } else {
-                Rectangle().fill(Color.secondary.opacity(0.1))
-                Image(systemName: "music.note").font(.system(size: 34)).foregroundStyle(.tertiary)
-            }
-        }
-        .frame(width: 110, height: 110)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.25)))
-    }
-
-    private var needsChips: some View {
-        HStack(spacing: 6) {
-            if let d = deferred?.wrappedValue {
-                if !d.decisions.isEmpty { chip("\(d.decisions.count) name\(d.decisions.count == 1 ? "" : "s")", .orange) }
-                if d.albumSuggestion != nil { chip("album name?", .orange) }
-            }
-            if !earIDs.isEmpty { chip("\(earIDs.count) repeat\(earIDs.count == 1 ? "" : "s")", .orange) }
-            if let gap { chip(gap.missingRels.isEmpty ? "no cover" : "cover gaps", .purple) }
-        }
-    }
-
-    private func chip(_ s: String, _ c: Color) -> some View {
-        Text(s).font(.system(size: 10, weight: .semibold)).textCase(.uppercase)
-            .padding(.horizontal, 7).padding(.vertical, 2)
-            .background(Capsule().fill(c.opacity(0.15)))
-            .foregroundStyle(c)
-    }
-
-    @ViewBuilder private func block<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.system(size: 10, weight: .semibold)).textCase(.uppercase)
-                .foregroundStyle(.secondary)
-            content()
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.05)))
-    }
-
-    private func earBinding(_ id: String) -> Binding<PerfectV2Driver.EarChoice>? {
-        guard let first = driver.earChoices.first(where: { $0.id == id }) else { return nil }
-        return Binding(
-            get: { driver.earChoices.first(where: { $0.id == id }) ?? first },
-            set: { v in if let i = driver.earChoices.firstIndex(where: { $0.id == id }) { driver.earChoices[i] = v } }
-        )
     }
 }
